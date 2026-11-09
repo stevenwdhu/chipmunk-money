@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          # Its own pnpm cache runs before pnpm is installed (below), so the store is cached by hand.
+          package-manager-cache: false
       # pnpm comes from packageManager in package.json
       - run: corepack enable
       - name: Find the pnpm store
