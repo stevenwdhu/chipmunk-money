@@ -1,0 +1,34 @@
+# docker compose up -d, then open http://localhost:8787
+# The project name fixes the volume's name (spending-tracker_spending-data), whatever this folder is called.
+name: spending-tracker
+services:
+  spending-tracker:
+    build: .
+    image: spending-tracker
+    restart: unless-stopped
+    ports:
+      # Only this machine can reach it. To open it to your network, use "8787:8787", ideally behind
+      # a reverse proxy that signs people in (see TRUSTED_AUTH_HEADER below).
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # meta.db, ledgers/, backups/ and secret.key. Back this volume up.
+      - spending-data:/data
+    # Optional: your settings (AI and Plaid keys and the like); see .env.example.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Where the image keeps its data and listens. These win over a .env made for running from source.
+      DATA_DIR: /data
+      API_PORT: "8787"
+      HOST: 0.0.0.0
+      # Your time zone, for "today" and the daily jobs. The app's own setting wins when it's set.
+      TZ: ${TZ:-UTC}
+      # A header your reverse proxy adds for signed-in people (Tailscale Serve: Tailscale-User-Login).
+      # TRUSTED_AUTH_HEADER: Tailscale-User-Login
+      # More host names the web app is opened at, comma-separated. IP addresses, localhost and local
+      # names (.local, .lan, .ts.net and the like) always work.
+      # ALLOWED_HOSTS: money.example.com
+
+volumes:
+  spending-data:

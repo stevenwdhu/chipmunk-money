@@ -1,0 +1,26 @@
+{
+  "name": "spending-tracker",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.16.1",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"pnpm --filter @st/server dev\" \"pnpm --filter @st/web dev\"",
+    "build": "pnpm --filter @st/web build && pnpm --filter @st/mcp build && pnpm --filter @st/server build",
+    "start": "node apps/server/dist/index.mjs",
+    "test": "vitest run",
+    "typecheck": "pnpm -r typecheck",
+    "seed:demo": "pnpm --filter @st/server seed:demo",
+    "db:generate": "pnpm --filter @st/server db:generate",
+    "mcp:stdio": "pnpm --silent --filter @st/mcp stdio"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "concurrently": "^10.0.7",
+    "typescript": "^6.0.3",
+    "vitest": "^5.1.0"
+  }
+}

@@ -1,0 +1,44 @@
+# An allow-list: send nothing but what the build needs, then strip anything risky from inside it.
+# data/ and .demo-data/ hold real finances; they must never reach the build context.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!apps/
+!packages/
+
+# Never, at any depth (these also hold if the allow-list above is loosened later)
+data/
+**/data/
+.demo-data/
+**/.demo-data/
+.env*
+**/.env*
+**/secret.key
+**/*.key
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/backups/
+**/*.zip
+**/node_modules
+.git
+**/.git
+.claude/
+**/.claude/
+
+# Build outputs and caches, made fresh inside the image
+**/dist
+**/dev-dist
+**/.vite
+**/coverage
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo
+**/.DS_Store
+
+# Tests aren't run in the image
+**/*.test.ts
+apps/server/src/test/

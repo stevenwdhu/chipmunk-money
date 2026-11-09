@@ -1,0 +1,577 @@
+import { describe, expect, it } from 'vitest'
+import { addDays, addMonthsToDate, recurringCreateSchema, transactionCreateSchema } from '@st/shared'
+import { categoryId, makeAccount, testContext } from '../test/helpers'
+import type { AppContext } from './context'
+import {
+  confirmRecurring,
+  createRecurring,
+  detectRecurring,
+  dismissRecurring,
+  getRecurring,
+  linkPossiblePayment,
+  listRecurring,
+  recurringPaymentIds,
+  notItsPayment,
+  updateRecurring,
+  upcomingPayments,
+} from './recurring'
+import { setAppSetting } from './settings'
+import { createTransaction, deleteTransaction, getTransaction, listTransactions, restoreTransaction, updateTransaction } from './transactions'
+
+const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
+
+describe('recurring detection', () => {
+  it('suggests a monthly subscription, links history on confirm and matches new payments', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Amex', 'credit')
+    const subs = categoryId(ctx, 'Software & media')
+    for (let m = 0; m < 6; m++) {
+      const date = addMonthsToDate('2026-04-28', m)
+      await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -2099, payee: 'NETFLIX.COM 866-579-7172', categoryId: subs }))
+    }
+    // Irregular noise that must not be suggested
+    for (const d of ['2026-05-02', '2026-05-09', '2026-08-20']) {
+      await createTransaction(ctx, tx({ accountId: acc, date: d, amountMinor: -1500, payee: 'Random Diner' }))
+    }
+
+    expect(detectRecurring(ctx).created).toBe(1)
+    const [item] = listRecurring(ctx, 'suggested')
+    expect(item).toMatchObject({ cadence: 'monthly', expectedAmountMinor: -2099, categoryId: subs, nextDueDate: '2026-10-28' })
+
+    confirmRecurring(ctx, item!.id)
+    const active = listRecurring(ctx, 'active')[0]!
+    expect(active.occurrences).toBe(6)
+    expect(active.alerts).toEqual([])
+
+    // Detection never re-suggests a known payee.
+    expect(detectRecurring(ctx).created).toBe(0)
+
+    // A new price: asked about rather than linked; yes makes it the amount, and the earlier payments stay.
+    const paid = await createTransaction(ctx, tx({ accountId: acc, date: '2026-10-27', amountMinor: -2399, payee: 'NETFLIX.COM 866-579-7172' }))
+    expect(getTransaction(ctx, paid.id).recurringItemId).toBeNull()
+    expect(listRecurring(ctx, 'active')[0]!.possiblePayment).toMatchObject({ transactionId: paid.id, newAmount: true })
+    expect(linkPossiblePayment(ctx, active.id, paid.id)).toMatchObject({ nextDueDate: '2026-11-28', expectedAmountMinor: -2399, occurrences: 7, alerts: [] })
+  })
+
+  it('puts its category on all its payments: when they link, when it changes, and on new ones', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Amex', 'credit')
+    const [shopping, electronics, phones] = [categoryId(ctx, 'General shopping'), categoryId(ctx, 'Electronics'), categoryId(ctx, 'Phones')]
+    for (const date of ['2026-07-25', '2026-08-25', '2026-09-25']) {
+      await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -5250, payee: 'AFFIRM', categoryId: shopping }))
+    }
+    detectRecurring(ctx)
+    const item = listRecurring(ctx, 'suggested')[0]!
+    const categories = () => listTransactions(ctx, { accountId: acc, limit: 50 }).items.map((t) => [t.categoryId, t.categorySource])
+    updateRecurring(ctx, item.id, { name: 'Headphones', categoryId: electronics, status: 'active' })
+    expect(categories()).toEqual(Array(3).fill([electronics, 'recurring']))
+    updateRecurring(ctx, item.id, { categoryId: phones })
+    expect(categories()).toEqual(Array(3).fill([phones, 'recurring']))
+    // A new payment takes it too, though you'd filed the payee elsewhere.
+    const paid = await createTransaction(ctx, tx({ accountId: acc, date: '2026-10-25', amountMinor: -5250, payee: 'AFFIRM', categoryId: shopping }))
+    expect(getTransaction(ctx, paid.id)).toMatchObject({ recurringItemId: item.id, categoryId: phones })
+
+    // Changing one payment's category changes the item's, and so all of them; so does taking it away.
+    updateTransaction(ctx, paid.id, { categoryId: electronics })
+    expect(getRecurring(ctx, item.id).categoryId).toBe(electronics)
+    expect(categories().map(([c]) => c)).toEqual(Array(4).fill(electronics))
+    updateTransaction(ctx, paid.id, { categoryId: null })
+    expect(getRecurring(ctx, item.id).categoryId).toBeNull()
+    expect(categories().map(([c]) => c)).toEqual(Array(4).fill(null))
+  })
+
+  it('flags missing payments and lists upcoming ones', async () => {
+    const ctx = testContext({ now: '2026-10-20T18:00:00Z' })
+    const acc = makeAccount(ctx)
+    for (let m = 0; m < 4; m++) {
+      await createTransaction(ctx, tx({ accountId: acc, date: addMonthsToDate('2026-06-01', m), amountMinor: -185_000, payee: 'Rent' }))
+    }
+    detectRecurring(ctx)
+    const item = listRecurring(ctx, 'suggested')[0]!
+    confirmRecurring(ctx, item.id)
+    expect(listRecurring(ctx, 'active')[0]!.alerts).toContain('missing') // Oct 1 rent never arrived
+    const upcoming = upcomingPayments(ctx, 30)
+    expect(upcoming.map((u) => u.dueDate)).toEqual(['2026-10-01', '2026-11-01'])
+    expect(upcoming[0]!.overdue).toBe(true)
+
+    dismissRecurring(ctx, item.id)
+    expect(upcomingPayments(ctx, 30)).toEqual([])
+  })
+
+  const pay = async (ctx: AppContext, payee: string, amountMinor: number, dates: string[]) => {
+    const accountId = makeAccount(ctx, `Card ${payee}`, 'credit')
+    for (const date of dates) await createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false, skipRecurring: true })
+    return accountId
+  }
+  const found = (ctx: AppContext) => listRecurring(ctx, 'suggested').map((i) => [i.expectedAmountMinor, i.cadence, i.nextDueDate])
+
+  it('finds a schedule with a gap, and asks whether the payment that came early is the missing one', async () => {
+    const ctx = testContext()
+    // Monthly on the 1st, but September's came on Aug 24.
+    const acc = await pay(ctx, 'Transfer in', 290_000, ['2026-05-01', '2026-06-01', '2026-07-01', '2026-08-01', '2026-08-24', '2026-10-01'])
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({ cadence: 'monthly', expectedAmountMinor: 290_000, nextDueDate: '2026-11-01', occurrences: 5 })
+    const item = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    expect(item).toMatchObject({ occurrences: 5, possiblePayment: { date: '2026-08-24', dueDate: '2026-09-01', newAmount: false } })
+
+    // Yes: it's September's, and stays that through any recalculation.
+    const early = item.possiblePayment!.transactionId
+    expect(linkPossiblePayment(ctx, item.id, early)).toMatchObject({ occurrences: 6, possiblePayment: null, nextDueDate: '2026-11-01' })
+    expect(updateRecurring(ctx, item.id, { name: 'Contribution' }).occurrences).toBe(6)
+    expect(getTransaction(ctx, early).recurringItemId).toBe(item.id)
+    void acc
+  })
+
+  it('finds a bill across the names the bank gave it, paid on the 25th to the 28th, from two cards', async () => {
+    const ctx = testContext()
+    const [visa, td] = [makeAccount(ctx, 'Visa', 'credit'), makeAccount(ctx, 'TD', 'credit')]
+    const add = (payee: string, amountMinor: number, date: string, accountId = visa) =>
+      createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false, skipRecurring: true })
+    // Property tax through the same service, close in amount, already tracked.
+    for (const date of ['2026-06-25', '2026-07-28', '2026-08-20', '2026-09-22']) await add('PayHub Tax', -31_044, date)
+    createRecurring(ctx, recurringCreateSchema.parse({ payee: 'PayHub Tax', expectedAmountMinor: -31_044, amountTolerancePct: 2, cadence: 'monthly', anchorDate: '2026-10-20' }))
+    await add('PayHub Utilities', -33_674, '2026-04-28')
+    await add('PayHub Utilities', -33_674, '2026-05-27', td)
+    await add('PayHub Utilities', -33_674, '2026-06-25')
+    await add('PayHub Utilities', -33_674, '2026-07-28')
+    await add('PayHub', -33_674, '2026-08-27')
+    await add('PayHub Rent', -33_674, '2026-09-25')
+    setAppSetting(ctx.meta, 'recurring.detection', { priceVariationPct: 10 })
+
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({
+      payee: 'PayHub Rent',
+      otherPayees: ['PayHub', 'PayHub Utilities'],
+      expectedAmountMinor: -33_674,
+      cadence: 'monthly',
+      accountId: null,
+      occurrences: 6,
+      nextDueDate: '2026-10-25',
+    })
+    const item = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    expect(item).toMatchObject({ occurrences: 6, possiblePayment: null })
+  })
+
+  it('suggests a series that stopped, for history: confirmed, it ends with its payments', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const streaming = categoryId(ctx, 'Software & media')
+    // The old price, then a new one, now tracked.
+    for (const date of ['2026-04-15', '2026-05-15', '2026-06-15']) await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -2625, payee: 'ACME TV', categoryId: streaming }), { useAi: false, skipRecurring: true })
+    for (const date of ['2026-07-15', '2026-08-15', '2026-09-15']) await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -4515, payee: 'ACME TV' }), { useAi: false, skipRecurring: true })
+
+    expect(detectRecurring(ctx).created).toBe(2)
+    const found = listRecurring(ctx, 'suggested').map((i) => [i.expectedAmountMinor, i.occurrences, i.lastSeenDate, i.stopped])
+    expect(found.sort()).toEqual([
+      [-2625, 3, '2026-06-15', true],
+      [-4515, 3, '2026-09-15', false],
+    ])
+    const old = listRecurring(ctx, 'suggested').find((i) => i.stopped)!
+    expect(confirmRecurring(ctx, old.id)).toMatchObject({ status: 'ended', occurrences: 3, alerts: [], stopped: false })
+    expect(listRecurring(ctx, 'suggested').map((i) => i.expectedAmountMinor)).toEqual([-4515])
+  })
+
+  it('needs 3 in a row for a weekly schedule', async () => {
+    const ctx = testContext()
+    // Groceries at the same price on 4 of the last 7 Saturdays, no more than 2 in a row.
+    await pay(ctx, 'VEGGIE BOX CO', -3_800, ['2026-08-15', '2026-09-05', '2026-09-19', '2026-09-26'])
+    expect(found(ctx)).toEqual([])
+    expect(detectRecurring(ctx).created).toBe(0)
+  })
+
+  it('finds two subscriptions from one payee, each by its own amount', async () => {
+    const ctx = testContext()
+    // iCloud on the 10th, Apple Music on the 11th: each month's window holds both.
+    const acc = await pay(ctx, 'APPLE.COM/BILL', -399, ['2026-07-10', '2026-08-10', '2026-09-10'])
+    for (const date of ['2026-07-11', '2026-08-11', '2026-09-11']) await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -1099, payee: 'APPLE.COM/BILL' }), { useAi: false, skipRecurring: true })
+    expect(detectRecurring(ctx).created).toBe(2)
+    expect(found(ctx).sort()).toEqual([
+      [-1099, 'monthly', '2026-10-11'],
+      [-399, 'monthly', '2026-10-10'],
+    ])
+    for (const i of listRecurring(ctx, 'suggested')) {
+      expect(i.occurrences).toBe(3)
+      confirmRecurring(ctx, i.id)
+    }
+    // A new payment goes to the item with its amount.
+    const music = listRecurring(ctx, 'active').find((i) => i.expectedAmountMinor === -1099)!
+    const paid = await createTransaction(ctx, tx({ accountId: acc, date: '2026-10-11', amountMinor: -1099, payee: 'APPLE.COM/BILL' }), { useAi: false })
+    expect(getTransaction(ctx, paid.id).recurringItemId).toBe(music.id)
+  })
+
+  it('finds the same price on two days of each month as semi-monthly, and doesn’t bring a dismissed one back', async () => {
+    const ctx = testContext()
+    // Two subscriptions, or one charged twice a month: the payments are the same either way.
+    await pay(ctx, 'NETFLIX.COM', -1549, ['2026-07-03', '2026-07-20', '2026-08-03', '2026-08-20', '2026-09-03', '2026-09-20'])
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(found(ctx)).toEqual([[-1549, 'semimonthly', '2026-10-03']])
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({ anchorDate: '2026-09-20', secondDay: 3, occurrences: 6 })
+    for (const i of listRecurring(ctx, 'suggested')) dismissRecurring(ctx, i.id)
+    expect(detectRecurring(ctx).created).toBe(0)
+  })
+
+  it('follows the latest payment’s amount within the price variation, and asks about a bigger change', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'HYDRO ONE', -10_000, ['2026-07-15', '2026-08-14', '2026-09-15'])
+    detectRecurring(ctx)
+    const item = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    const paid = (date: string, amountMinor: number) =>
+      createTransaction(ctx, tx({ accountId: acc, date, amountMinor, payee: 'HYDRO ONE' }), { useAi: false }).then(() => getRecurring(ctx, item.id))
+    expect(await paid('2026-10-15', -10_400)).toMatchObject({ expectedAmountMinor: -10_400, alerts: [] })
+    // 4% more again: within 5% of the new amount, so it follows.
+    expect(await paid('2026-11-16', -10_800)).toMatchObject({ expectedAmountMinor: -10_800, alerts: [] })
+    expect(await paid('2026-12-15', -13_000)).toMatchObject({ expectedAmountMinor: -10_800, occurrences: 5, possiblePayment: { amountMinor: -13_000, newAmount: true } })
+  })
+
+  it('finds pay that comes twice a month, on the 15th and the last day', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'ACME PAYROLL', 300_000, ['2026-07-15', '2026-07-31', '2026-08-14', '2026-08-31', '2026-09-15', '2026-09-30'])
+    expect(detectRecurring(ctx).created).toBe(1)
+    const found = listRecurring(ctx, 'suggested')[0]!
+    expect(found).toMatchObject({ cadence: 'semimonthly', anchorDate: '2026-09-15', secondDay: 31, nextDueDate: '2026-10-15', monthlyCostMinor: 600_000 })
+    confirmRecurring(ctx, found.id)
+    expect(upcomingPayments(ctx, 30).map((u) => u.dueDate)).toEqual(['2026-10-15', '2026-10-31'])
+    // The next one is matched, and the one after is the month's end.
+    const paid = await createTransaction(ctx, tx({ accountId: acc, date: '2026-10-15', amountMinor: 300_000, payee: 'ACME PAYROLL' }), { useAi: false })
+    expect(getTransaction(ctx, paid.id).recurringItemId).toBe(found.id)
+    expect(getRecurring(ctx, found.id).nextDueDate).toBe('2026-10-31')
+  })
+
+  it('adds semi-monthly by hand with a second day that goes with the first', () => {
+    const ctx = testContext()
+    const base = { payee: 'Mortgage', name: null, categoryId: null, accountId: null, expectedAmountMinor: -120_000, amountTolerancePct: 5, totalPayments: null }
+    const item = createRecurring(ctx, { ...base, cadence: 'semimonthly', anchorDate: '2026-10-01' })
+    expect(item).toMatchObject({ secondDay: 15, nextDueDate: '2026-10-01' })
+    // Moving the next payment onto the other day swaps them; leaving semi-monthly drops it.
+    expect(updateRecurring(ctx, item.id, { nextDueDate: '2026-10-15' })).toMatchObject({ anchorDate: '2026-10-15', secondDay: 1 })
+    expect(updateRecurring(ctx, item.id, { secondDay: 31 })).toMatchObject({ secondDay: 31 })
+    expect(updateRecurring(ctx, item.id, { cadence: 'monthly' })).toMatchObject({ secondDay: null })
+  })
+
+  it('looks a day either side of each due date, and over a weekend', async () => {
+    // Due Saturdays; the one on Sep 26 posted on Monday the 28th.
+    const weekly = testContext()
+    await pay(weekly, 'GOODLIFE FITNESS', -1500, ['2026-09-19', '2026-09-28', '2026-10-03'])
+    expect(detectRecurring(weekly).created).toBe(1)
+    expect(found(weekly)).toEqual([[-1500, 'weekly', '2026-10-10']])
+
+    // Due the 10th; January's fell on a Saturday and posted Monday the 12th.
+    const monthly = testContext({ now: '2026-01-20T18:00:00Z' })
+    await pay(monthly, 'ROGERS', -8500, ['2025-11-10', '2025-12-10', '2026-01-12'])
+    expect(detectRecurring(monthly).created).toBe(1)
+    expect(found(monthly)[0]!.slice(0, 2)).toEqual([-8500, 'monthly'])
+
+    // Two days off on weekdays is too far with the default of one day.
+    const late = testContext()
+    await pay(late, 'GYM', -1500, ['2026-09-15', '2026-09-24', '2026-10-01'])
+    expect(detectRecurring(late).created).toBe(0)
+  })
+
+  it('finds yearly payments and month ends, and keeps the last day of the month', async () => {
+    const ctx = testContext()
+    await pay(ctx, 'COSTCO MEMBERSHIP', -6500, ['2024-10-01', '2025-10-01', '2026-09-30'])
+    await pay(ctx, 'LANDLORD', -200_000, ['2026-07-31', '2026-08-31', '2026-09-30'])
+    expect(detectRecurring(ctx).created).toBe(2)
+    expect(found(ctx).sort()).toEqual([
+      [-200_000, 'monthly', '2026-10-31'],
+      [-6500, 'yearly', '2027-09-30'],
+    ])
+  })
+
+  it('skips frequent purchases, and uses the price variation setting', async () => {
+    const ctx = testContext()
+    // Every other day: there's one in every window, but just as many between them.
+    await pay(ctx, 'STARBUCKS', -575, Array.from({ length: 22 }, (_, i) => addDays('2026-08-21', i * 2)))
+    await pay(ctx, 'HYDRO ONE', -10_000, ['2026-07-15', '2026-08-14', '2026-09-15'])
+    await pay(ctx, 'ENBRIDGE', -10_000, ['2026-07-15', '2026-08-14', '2026-09-15'])
+    // Enbridge's August bill was 8% more: over the default 5%.
+    ctx.sqlite.prepare("UPDATE transactions SET amount_minor = -10800 WHERE payee = 'ENBRIDGE' AND date = '2026-08-14'").run()
+    expect(found(detectAnd(ctx))).toEqual([[-10_000, 'monthly', '2026-10-15']])
+
+    setAppSetting(ctx.meta, 'recurring.detection', { priceVariationPct: 10 })
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(listRecurring(ctx, 'suggested').map((i) => [i.payee, i.amountTolerancePct])).toEqual([
+      ['HYDRO ONE', 5],
+      ['ENBRIDGE', 10],
+    ])
+  })
+})
+
+describe('instalment plans', () => {
+  const pay = async (ctx: AppContext, payee: string, amountMinor: number, dates: string[], accountId = makeAccount(ctx, `Card ${payee} ${amountMinor}`, 'credit')) => {
+    for (const date of dates) await createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false, skipRecurring: true })
+    return accountId
+  }
+  const byAmount = (ctx: AppContext, amount: number) => listRecurring(ctx).find((i) => i.expectedAmountMinor === amount)!
+
+  it('finds Pay in 4 after two payments, a paid-off one as finished, and ends after the last', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'KLARNA*BOSE', -9_875, ['2026-09-18', '2026-10-02'])
+    await pay(ctx, 'KLARNA*BOSE', -3150, ['2026-08-07', '2026-08-21', '2026-09-04', '2026-09-18'], acc)
+    await pay(ctx, 'KLARNA*BOSE', -4980, ['2026-09-04', '2026-09-18', '2026-10-02'], acc)
+    expect(detectRecurring(ctx).created).toBe(3)
+    // All 4 paid: to keep in your history.
+    expect(byAmount(ctx, -3150)).toMatchObject({ status: 'suggested', totalPayments: 4, paidPayments: 4, remainingPayments: 0, endDate: '2026-09-18' })
+    confirmRecurring(ctx, byAmount(ctx, -3150).id)
+    expect(byAmount(ctx, -3150)).toMatchObject({ status: 'ended', paidPayments: 4, occurrences: 4 })
+    expect(byAmount(ctx, -9_875)).toMatchObject({
+      cadence: 'biweekly',
+      status: 'suggested',
+      totalPayments: 4,
+      paidPayments: 2,
+      remainingPayments: 2,
+      remainingAmountMinor: -19_750,
+      nextDueDate: '2026-10-16',
+      endDate: '2026-10-30',
+      instalmentService: true,
+    })
+    expect(byAmount(ctx, -4980)).toMatchObject({ paidPayments: 3, remainingPayments: 1, endDate: '2026-10-16' })
+
+    // Confirmed, each plan takes only its own payments; the upcoming list stops at the last one.
+    for (const i of listRecurring(ctx, 'suggested')) confirmRecurring(ctx, i.id)
+    expect(byAmount(ctx, -4980)).toMatchObject({ status: 'active', paidPayments: 3 })
+    const upcoming = upcomingPayments(ctx, 30).map((u) => [u.dueDate, u.amountMinor, u.paymentNumber, u.totalPayments])
+    expect(upcoming.sort()).toEqual([
+      ['2026-10-16', -4980, 4, 4],
+      ['2026-10-16', -9_875, 3, 4],
+      ['2026-10-30', -9_875, 4, 4],
+    ])
+    const last = await createTransaction(ctx, tx({ accountId: acc, date: '2026-10-16', amountMinor: -4980, payee: 'KLARNA*BOSE' }), { useAi: false })
+    expect(getTransaction(ctx, last.id).recurringItemId).toBe(byAmount(ctx, -4980).id)
+    expect(byAmount(ctx, -4980)).toMatchObject({ status: 'ended', paidPayments: 4, remainingPayments: 0, endDate: '2026-10-16', alerts: [] })
+  })
+
+  it('counts payments from before your history, and can drop the end', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'AUTO LOAN PMT', -61_050, ['2026-08-30', '2026-09-30'])
+    const loan = createRecurring(ctx, {
+      name: 'Car loan',
+      payee: 'AUTO LOAN PMT',
+      categoryId: null,
+      accountId: acc,
+      expectedAmountMinor: -61_050,
+      amountTolerancePct: 5,
+      cadence: 'monthly',
+      anchorDate: '2026-10-30',
+      totalPayments: 60,
+      paidPayments: 40,
+    })
+    expect(loan).toMatchObject({ occurrences: 2, paidPayments: 40, remainingPayments: 20, endDate: '2028-05-30', remainingAmountMinor: -1_221_000 })
+    expect(updateRecurring(ctx, loan.id, { paidPayments: 60 }).status).toBe('ended')
+    expect(updateRecurring(ctx, loan.id, { paidPayments: 59 })).toMatchObject({ status: 'active', remainingPayments: 1 })
+    expect(updateRecurring(ctx, loan.id, { totalPayments: null })).toMatchObject({ paidPayments: 2, remainingPayments: null, endDate: null })
+  })
+
+  it('names a plan after the store in its description, and keeps a name apart from the payee', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'KLARNA*BOSE CANADA', -9_875, ['2026-09-18', '2026-10-02'])
+    await pay(ctx, 'NETFLIX.COM', -1549, ['2026-07-10', '2026-08-10', '2026-09-10'], acc)
+    detectRecurring(ctx)
+    expect(listRecurring(ctx, 'suggested').map((i) => [i.payee, i.name]).sort()).toEqual([
+      ['KLARNA*BOSE CANADA', 'BOSE CANADA'],
+      ['NETFLIX.COM', null],
+    ])
+    // A name of your own, and back to none; the payee and matching stay.
+    const netflix = byAmount(ctx, -1549)
+    expect(updateRecurring(ctx, netflix.id, { name: 'Family plan' })).toMatchObject({ name: 'Family plan', payee: 'NETFLIX.COM', payeeKey: 'netflix com' })
+    expect(updateRecurring(ctx, netflix.id, { name: null })).toMatchObject({ name: null, payee: 'NETFLIX.COM' })
+    expect(createRecurring(ctx, { payee: 'Spotify', name: null, categoryId: null, accountId: null, expectedAmountMinor: -1199, amountTolerancePct: 5, cadence: 'monthly', anchorDate: '2026-10-12', totalPayments: null })).toMatchObject({
+      name: null,
+      payee: 'Spotify',
+      payeeKey: 'spotify',
+    })
+  })
+
+  it('finds a paid-off Pay in 4 whose payments came a day later each time', async () => {
+    const ctx = testContext()
+    // 15, 15 and 14 days apart: May 19 is 2 days off 6 weeks before Jul 2, but 1 day off 2 weeks before Jun 3.
+    await pay(ctx, 'KLARNA', -15_990, ['2026-05-19', '2026-06-03', '2026-06-18', '2026-07-02'])
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({ cadence: 'biweekly', totalPayments: 4, paidPayments: 4, remainingPayments: 0, endDate: '2026-07-02' })
+  })
+
+  it('finds a monthly plan that’s been paid off, with its smaller final payment', async () => {
+    const ctx = testContext()
+    const acc = await pay(ctx, 'AFFIRM', -41_210, ['2026-01-03', '2026-02-03', '2026-03-03', '2026-04-03', '2026-05-03'])
+    await pay(ctx, 'AFFIRM', -38_980, ['2026-06-03'], acc)
+    expect(detectRecurring(ctx).created).toBe(1)
+    const plan = listRecurring(ctx, 'suggested')[0]!
+    expect(plan).toMatchObject({ cadence: 'monthly', expectedAmountMinor: -41_210, totalPayments: 6, paidPayments: 6, remainingPayments: 0, endDate: '2026-06-03', totalAmountMinor: -245_030 })
+    // Its payments, newest first: the ones found while it's a suggestion, the linked ones once confirmed.
+    const found = recurringPaymentIds(ctx, plan.id)
+    expect(found.map((id) => getTransaction(ctx, id).date)).toEqual(['2026-06-03', '2026-05-03', '2026-04-03', '2026-03-03', '2026-02-03', '2026-01-03'])
+    confirmRecurring(ctx, plan.id)
+    expect(getRecurring(ctx, plan.id)).toMatchObject({ status: 'ended', occurrences: 6, totalAmountMinor: -245_030 })
+    expect(recurringPaymentIds(ctx, plan.id)).toEqual(found)
+    // Scanning again doesn't bring it back.
+    expect(detectRecurring(ctx).created).toBe(0)
+  })
+
+  it('marks a monthly plan from a buy-now-pay-later service, to say how many payments', async () => {
+    const ctx = testContext()
+    await pay(ctx, 'AFFIRM', -5250, ['2026-07-25', '2026-08-25', '2026-09-25'])
+    detectRecurring(ctx)
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({ cadence: 'monthly', totalPayments: null, instalmentService: true })
+  })
+})
+
+describe('payments from another payee', () => {
+  // Property tax through PayHub, monthly on the 20th; then the bank starts sending plain "PayHub" for every PayHub payment.
+  const setup = async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const add = (payee: string, amountMinor: number, date: string, skipRecurring = true) =>
+      createTransaction(ctx, tx({ accountId: acc, date, amountMinor, payee }), { useAi: false, skipRecurring })
+    for (const date of ['2026-06-20', '2026-07-20', '2026-08-20']) await add('PayHub Tax', -31_044, date)
+    detectRecurring(ctx)
+    const item = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    expect(item).toMatchObject({ nextDueDate: '2026-09-20', alerts: ['missing'], possiblePayment: null })
+    return { ctx, item, add }
+  }
+
+  it('offers a payment from a similar payee, and linking it adds the payee', async () => {
+    const { ctx, item, add } = await setup()
+    const older = await add('PayHub', -31_044, '2026-05-20')
+    const paid = await add('PayHub', -31_044, '2026-09-22')
+    const other = await add('PayHub', -4579, '2026-09-24')
+    // Another bill through PayHub close to the amount, but in August, which already has its payment.
+    const utilities = await add('PayHub', -31_950, '2026-08-25')
+    expect(getRecurring(ctx, item.id).possiblePayment).toEqual({ transactionId: paid.id, date: '2026-09-22', payee: 'PayHub', amountMinor: -31_044, newAmount: false, dueDate: '2026-09-20' })
+
+    const linked = linkPossiblePayment(ctx, item.id, paid.id)
+    expect(linked).toMatchObject({ otherPayees: ['PayHub'], nextDueDate: '2026-10-20', alerts: [], possiblePayment: null, occurrences: 5 })
+    // Its earlier payment from that payee too; not one at another amount.
+    expect(getTransaction(ctx, older.id).recurringItemId).toBe(item.id)
+    expect(getTransaction(ctx, other.id).recurringItemId).toBeNull()
+    expect(getTransaction(ctx, utilities.id).recurringItemId).toBeNull()
+
+    // New payments from it match, but only about the item's amount: it sends other payments too.
+    const smaller = await add('PayHub', -18_000, '2026-10-19', false)
+    expect(getTransaction(ctx, smaller.id).recurringItemId).toBeNull()
+    const next = await add('PayHub', -31_044, '2026-10-21', false)
+    expect(getTransaction(ctx, next.id).recurringItemId).toBe(item.id)
+    expect(detectRecurring(ctx).created).toBe(0)
+
+    // Removed in the dialog, it's gone from the item (its linked payments stay).
+    expect(updateRecurring(ctx, item.id, { otherPayees: [] }).otherPayees).toEqual([])
+    expect(getTransaction(ctx, next.id).recurringItemId).toBe(item.id)
+  })
+
+  it('takes off a payment from the other payee in a month that already has its payment, at the next change', async () => {
+    const { ctx, item, add } = await setup()
+    const paid = await add('PayHub', -31_044, '2026-09-22')
+    linkPossiblePayment(ctx, item.id, paid.id)
+    // Linked before the one-per-due-date rule: the utilities bill a week after August's tax payment.
+    const utilities = await add('PayHub', -31_950, '2026-08-25')
+    ctx.sqlite.prepare("UPDATE transactions SET recurring_item_id = ?, category_source = 'recurring' WHERE id = ?").run(item.id, utilities.id)
+    expect(getRecurring(ctx, item.id).occurrences).toBe(5)
+    expect(updateRecurring(ctx, item.id, { name: 'Property tax' })).toMatchObject({ occurrences: 4, nextDueDate: '2026-10-20' })
+    expect(getTransaction(ctx, utilities.id)).toMatchObject({ recurringItemId: null, categoryId: null })
+  })
+
+  it('doesn’t offer one again once you say it isn’t the item’s, nor one from a different payee', async () => {
+    const { ctx, item, add } = await setup()
+    const paid = await add('PayHub', -31_044, '2026-09-22')
+    await add('PayHub Utilities', -31_044, '2026-09-21')
+    expect(getRecurring(ctx, item.id).possiblePayment?.transactionId).toBe(paid.id)
+    expect(notItsPayment(ctx, item.id, paid.id)).toMatchObject({ possiblePayment: null, alerts: ['missing'] })
+  })
+})
+
+describe('recalculating a recurring item', () => {
+  const setup = async () => {
+    const ctx = testContext()
+    const visa = makeAccount(ctx, 'Visa', 'credit')
+    const add = (payee: string, amountMinor: number, date: string, accountId = visa) =>
+      createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false, skipRecurring: true })
+    const paid = []
+    for (const date of ['2026-06-10', '2026-07-10', '2026-08-10', '2026-09-10']) paid.push(await add('Spotify', -1199, date))
+    detectRecurring(ctx)
+    const item = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    expect(item).toMatchObject({ occurrences: 4, nextDueDate: '2026-10-10' })
+    return { ctx, item, add, paid, visa }
+  }
+
+  it('takes off a payment that isn’t the item’s: back to expecting it, never linked again, uncategorized', async () => {
+    const { ctx, item, paid } = await setup()
+    const music = categoryId(ctx, 'Software & media')
+    updateRecurring(ctx, item.id, { categoryId: music })
+    const wrong = paid[3]!
+    expect(getTransaction(ctx, wrong.id)).toMatchObject({ categoryId: music, needsReview: false })
+
+    const after = notItsPayment(ctx, item.id, wrong.id)
+    expect(after).toMatchObject({ occurrences: 3, nextDueDate: '2026-09-10', possiblePayment: null })
+    expect(getTransaction(ctx, wrong.id)).toMatchObject({ recurringItemId: null, categoryId: null, categorySource: null, needsReview: false })
+    // Any later change works its payments out again, without it.
+    expect(updateRecurring(ctx, item.id, { name: 'Music' }).occurrences).toBe(3)
+    expect(getTransaction(ctx, wrong.id).recurringItemId).toBeNull()
+  })
+
+  it('works its payments out again when you edit it', async () => {
+    const { ctx, item, add } = await setup()
+    // The price went up: asked about, and the payments at the old price stay its.
+    const dearer = await add('Spotify', -1399, '2026-10-10')
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: dearer.id, newAmount: true })
+    expect(linkPossiblePayment(ctx, item.id, dearer.id)).toMatchObject({ occurrences: 5, expectedAmountMinor: -1399, nextDueDate: '2026-11-10' })
+    // Even with no variation: each is checked against the amount of its time.
+    expect(updateRecurring(ctx, item.id, { amountTolerancePct: 0 }).occurrences).toBe(5)
+    // Paid from another account: payments from elsewhere don't count.
+    const amex = makeAccount(ctx, 'Amex', 'credit')
+    await add('Spotify', -1399, '2026-11-10', amex)
+    expect(updateRecurring(ctx, item.id, { accountId: amex })).toMatchObject({ occurrences: 1, nextDueDate: '2026-12-10' })
+    // A next due date you set stays.
+    expect(updateRecurring(ctx, item.id, { nextDueDate: '2027-01-10' }).nextDueDate).toBe('2027-01-10')
+  })
+
+  it('keeps only payments within its price variation, one per due date; the others can be an item of their own', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx)
+    const add = (amountMinor: number, date: string) =>
+      createTransaction(ctx, tx({ accountId: acc, date, amountMinor, payee: 'Transfer in' }), { useAi: false, skipRecurring: true })
+    // Two transfers in on the 1st of each month, and one in between.
+    for (const date of ['2026-07-01', '2026-08-01', '2026-09-01']) {
+      await add(256_469, date)
+      await add(290_000, date)
+    }
+    await add(226_563, '2026-08-20')
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'Transfer in', expectedAmountMinor: 256_469, amountTolerancePct: 1, cadence: 'monthly', anchorDate: '2026-10-01' }),
+    )
+    expect(item).toMatchObject({ occurrences: 3, nextDueDate: '2026-10-01' })
+    expect(recurringPaymentIds(ctx, item.id).map((id) => getTransaction(ctx, id).amountMinor)).toEqual([256_469, 256_469, 256_469])
+    expect(listRecurring(ctx, 'suggested')).toEqual([])
+    expect(detectRecurring(ctx).created).toBe(1)
+    expect(listRecurring(ctx, 'suggested')[0]).toMatchObject({ expectedAmountMinor: 290_000, cadence: 'monthly' })
+  })
+
+  it('moves the next due date back when its latest payment is deleted', async () => {
+    const { ctx, item, paid } = await setup()
+    deleteTransaction(ctx, paid[3]!.id)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 3, nextDueDate: '2026-09-10' })
+    restoreTransaction(ctx, paid[3]!.id)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 4, nextDueDate: '2026-10-10' })
+  })
+
+  it('reopens a paid-off plan that loses a payment, but not one you stopped', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const pays = []
+    for (const date of ['2026-06-02', '2026-06-16', '2026-06-30', '2026-07-14']) {
+      pays.push(await createTransaction(ctx, tx({ accountId: acc, date, amountMinor: -2500, payee: 'KLARNA*SHOP' }), { useAi: false, skipRecurring: true }))
+    }
+    detectRecurring(ctx)
+    const plan = confirmRecurring(ctx, listRecurring(ctx, 'suggested')[0]!.id)
+    expect(plan).toMatchObject({ status: 'ended', paidPayments: 4 })
+    expect(notItsPayment(ctx, plan.id, pays[3]!.id)).toMatchObject({ status: 'active', paidPayments: 3, nextDueDate: '2026-07-14' })
+
+    // Stopped with payments left: an edit doesn't bring it back.
+    updateRecurring(ctx, plan.id, { status: 'ended' })
+    expect(updateRecurring(ctx, plan.id, { name: 'Shoes', totalPayments: 4 }).status).toBe('ended')
+  })
+})
+
+function detectAnd(ctx: AppContext) {
+  detectRecurring(ctx)
+  return ctx
+}
