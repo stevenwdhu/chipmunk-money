@@ -694,7 +694,7 @@ export type UpcomingPayment = z.output<typeof upcomingPaymentSchema>
 export const aiProviderPublicSchema = z.object({
   kind: z.enum(AI_KINDS),
   model: z.string(),
-  baseUrl: z.string().nullable().describe('The URL of an `openai-compatible` server.'),
+  baseUrl: z.string().nullable().describe('The URL of an `openai-compatible` server, or of a `local` one when it isn’t at localhost:11434.'),
   hasApiKey: z.boolean(),
   apiKeyHint: z.string().nullable().describe('The last few characters of the key.'),
   source: z.enum(['settings', 'env']),

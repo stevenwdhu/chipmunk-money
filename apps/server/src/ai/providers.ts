@@ -85,11 +85,24 @@ export async function structuredAnthropic<T>(cfg: StoredAiConfig, call: Structur
 }
 
 /**
- * Where an OpenAI-style provider is: fixed for the named ones, your URL for "OpenAI-compatible"
- * (or OpenAI's, for settings saved before that URL was required).
+ * What each server and model turned out to support (the step down from structured output, and
+ * whether it takes the thinking setting), so it's asked that way from then on rather than refused
+ * each time. Kept until the server restarts.
+ */
+const learned = new Map<string, { step: number; noThinking: boolean }>()
+
+/** Servers you run yourself (Ollama, LM Studio, vLLM), at a URL of your own. */
+const selfHosted = (cfg: StoredAiConfig) => cfg.kind === 'openai-compatible' || cfg.kind === 'local'
+
+/**
+ * Where an OpenAI-style provider is: fixed for the named ones, your URL for "OpenAI-compatible" (or
+ * OpenAI's, for settings saved before that URL was required), and Ollama at localhost:11434 unless you
+ * gave another (this app in Docker reaches it at host.docker.internal, say).
  */
 export function endpointFor(cfg: StoredAiConfig): string {
-  return aiProviderInfo(cfg.kind).baseUrl ?? cfg.baseUrl ?? 'https://api.openai.com/v1'
+  const fixed = aiProviderInfo(cfg.kind).baseUrl
+  if (selfHosted(cfg)) return cfg.baseUrl ?? fixed ?? 'https://api.openai.com/v1'
+  return fixed ?? cfg.baseUrl ?? 'https://api.openai.com/v1'
 }
 
 export async function structuredOpenAI<T>(cfg: StoredAiConfig, call: StructuredCall<T>): Promise<StructuredResult<T>> {
@@ -104,19 +117,34 @@ export async function structuredOpenAI<T>(cfg: StoredAiConfig, call: StructuredC
     { role: 'user' as const, content: call.user },
   ]
 
+  // Each step down asks for less, for servers that can't do the one before: the schema, plain JSON
+  // mode, then only the words in the system prompt (Ollama with some models answers 501 to both modes).
+  const formats: Array<OpenAI.ChatCompletionCreateParams['response_format']> = [
+    { type: 'json_schema', json_schema: { name: call.name, schema: call.jsonSchema, strict: true } },
+    { type: 'json_object' },
+    undefined,
+  ]
+  // A server you run (Ollama) may think before answering unless told not to, which is slow, and these
+  // answers need no reasoning. A server that refuses the setting is asked again without it.
+  const key = `${endpointFor(cfg)} ${cfg.model}`
+  let { step, noThinking } = learned.get(key) ?? { step: 0, noThinking: selfHosted(cfg) }
   let completion
-  try {
-    completion = await client.chat.completions.create({
-      model: cfg.model,
-      messages,
-      response_format: { type: 'json_schema', json_schema: { name: call.name, schema: call.jsonSchema, strict: true } },
-    })
-  } catch (err) {
-    // Older OpenAI-compatible servers only support JSON mode.
-    if (err instanceof OpenAI.BadRequestError) {
-      completion = await client.chat.completions.create({ model: cfg.model, messages, response_format: { type: 'json_object' } })
-    } else {
-      throw err
+  for (;;) {
+    try {
+      completion = await client.chat.completions.create({
+        model: cfg.model,
+        messages,
+        ...(formats[step] ? { response_format: formats[step] } : {}),
+        ...(noThinking ? { reasoning_effort: 'none' as const } : {}),
+      })
+      learned.set(key, { step, noThinking })
+      break
+    } catch (err) {
+      const unsupported = err instanceof OpenAI.APIError && (err.status === 400 || err.status === 422 || err.status === 501)
+      if (!unsupported) throw err
+      if (noThinking && /reason|think/i.test(err.message)) noThinking = false
+      else if (step < formats.length - 1) step++
+      else throw err
     }
   }
 
@@ -227,6 +255,19 @@ function resultSchema(names: string[]) {
   })
 }
 
+/**
+ * The list's name for what a model answered. Without structured output, a model may answer as the
+ * list is written ("Income › Salary (income)", see `userPrompt`), or in other letter case.
+ */
+export function categoryNamed(names: readonly string[], answer: string): string {
+  if (names.includes(answer)) return answer
+  const same = (x: string) => names.find((n) => n.toLowerCase() === x.trim().toLowerCase())
+  const tail = answer.split('›').pop() ?? ''
+  // The list's notes after a name, taken off last, so a name that ends in brackets still matches as it is.
+  const unnoted = (x: string) => x.replace(/\s*\((?:income|not spending or income[^)]*)\)\s*$/i, '')
+  return same(answer) ?? same(tail) ?? same(unnoted(tail)) ?? answer
+}
+
 /** A transaction's category, from one configured provider. */
 export async function callProvider(cfg: StoredAiConfig, req: LlmCategoryRequest, meta: MetaStore): Promise<ProviderCallResult> {
   const names = req.categories.map((c) => c.name)
@@ -237,8 +278,11 @@ export async function callProvider(cfg: StoredAiConfig, req: LlmCategoryRequest,
       user: userPrompt(req),
       name: 'category',
       schema: resultSchema(names),
-      // Servers in plain JSON mode may leave out agreesWithBank.
-      parse: resultSchema(names).extend({ agreesWithBank: z.boolean().optional() }) as never,
+      // Servers without structured output may leave out agreesWithBank, or name the category's group too.
+      parse: resultSchema(names).extend({
+        category: z.string().transform((x) => categoryNamed(names, x)).pipe(z.enum(names as [string, ...string[]])),
+        agreesWithBank: z.boolean().optional(),
+      }) as never,
       jsonSchema: {
         type: 'object',
         properties: { category: { type: 'string', enum: names }, confidence: { type: 'number' }, agreesWithBank: { type: 'boolean' } },

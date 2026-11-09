@@ -310,8 +310,8 @@ export function updateSettings(meta: MetaStore, input: SettingsUpdate) {
         continue
       }
       const prev = getAppSetting<StoredAiConfig | null>(meta, `ai.${slot}`, null)
-      // Only "OpenAI-compatible" has a URL of your own.
-      const baseUrl = next.kind === 'openai-compatible' ? next.baseUrl || null : null
+      // Only "OpenAI-compatible" and a local server have a URL of your own.
+      const baseUrl = next.kind === 'openai-compatible' || next.kind === 'local' ? next.baseUrl || null : null
       // Left out: keep the saved key (still encrypted), but only for the provider and server it was
       // saved for. Another provider or another server's address forgets it, so it's never sent elsewhere.
       const sameProvider = !!prev && prev.kind === next.kind && originOf(prev.baseUrl) === originOf(baseUrl)

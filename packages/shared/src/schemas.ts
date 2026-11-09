@@ -575,7 +575,7 @@ export const aiProviderInputSchema = z
       .url()
       .nullish()
       .or(z.literal('').transform(() => null))
-      .describe('The server’s URL, for `openai-compatible` only (the other providers have fixed URLs).'),
+      .describe('The server’s URL: required for `openai-compatible`, optional for `local` (default http://localhost:11434/v1). The other providers have fixed URLs.'),
     /** undefined keeps the stored key, null or '' clears it. */
     apiKey: z.string().trim().max(400).nullish(),
   })

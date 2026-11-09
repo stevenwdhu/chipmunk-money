@@ -57,12 +57,19 @@ const origin = (url: string | null | undefined) => {
     return url ?? null
   }
 }
+/** Providers with a URL of your own: required for OpenAI-compatible, optional for a local server. */
+const hasUrl = computed(() => kind.value === 'openai-compatible' || kind.value === 'local')
+const urlHint = computed(() =>
+  kind.value === 'local'
+    ? 'Where Ollama is, ending in /v1. Leave it empty for this machine. When this app runs in Docker and Ollama on the same computer, use http://host.docker.internal:11434/v1.'
+    : 'Where the server’s OpenAI-style API is, usually ending in /v1.',
+)
 // A saved key belongs to the provider and server it was saved for: the server forgets it when either
 // changes, so the form asks for one again.
 const keyStays = computed(() => {
   const c = props.config
   if (!c?.hasApiKey || kind.value !== c.kind) return false
-  return kind.value !== 'openai-compatible' || origin(baseUrl.value.trim()) === origin(c.baseUrl)
+  return !hasUrl.value || origin(baseUrl.value.trim()) === origin(c.baseUrl)
 })
 watch(keyStays, (stays) => {
   replacingKey.value = !stays
@@ -134,8 +141,7 @@ const providerHint = computed(() => {
       : 'Pick a provider to ask when the primary one fails, or None.'
   if (kind.value === 'openai-compatible')
     return 'Any server that speaks the OpenAI chat API, at the URL you give: LM Studio, vLLM, a gateway, or Ollama on another machine.'
-  if (kind.value === 'local')
-    return 'Ollama on the same machine as this app, at localhost:11434. If Ollama runs elsewhere (or this app runs in Docker), choose OpenAI-compatible and give its URL.'
+  if (kind.value === 'local') return 'Ollama, at localhost:11434 unless you give another URL.'
   if (isChatgpt.value) return 'Sign in with your ChatGPT account instead of an API key. Requests count toward your ChatGPT plan’s usage.'
   return info.value.baseUrl ? `Connects to ${host(info.value.baseUrl)}.` : 'Claude models through the Anthropic API.'
 })
@@ -184,7 +190,7 @@ async function save() {
         [props.which]: {
           kind: kind.value as AiKind,
           model: model.value.trim(),
-          baseUrl: kind.value === 'openai-compatible' ? baseUrl.value.trim() : null,
+          baseUrl: hasUrl.value ? baseUrl.value.trim() || null : null,
           ...(info.value.apiKey === 'none' ? { apiKey: null } : replacingKey.value ? { apiKey: apiKey.value.trim() || null } : {}),
         },
       },
@@ -318,9 +324,19 @@ async function test() {
             </template>
           </template>
         </div>
-        <div v-if="kind === 'openai-compatible'" class="grid content-start gap-1.5">
-          <FieldLabel :html-for="`ai-${which}-url`" hint="Where the server's OpenAI-style API is, usually ending in /v1.">Server URL</FieldLabel>
-          <Input :id="`ai-${which}-url`" v-model="baseUrl" placeholder="http://192.168.1.20:11434/v1" autocomplete="off" />
+        <div v-if="hasUrl" class="grid content-start gap-1.5">
+          <FieldLabel
+            :html-for="`ai-${which}-url`"
+            :optional="kind === 'local'"
+            :hint="urlHint"
+            >Server URL</FieldLabel
+          >
+          <Input
+            :id="`ai-${which}-url`"
+            v-model="baseUrl"
+            :placeholder="kind === 'local' ? 'http://localhost:11434/v1' : 'http://192.168.1.20:11434/v1'"
+            autocomplete="off"
+          />
         </div>
         <div v-if="!off && info.apiKey !== 'none'" class="grid content-start gap-1.5">
           <FieldLabel
