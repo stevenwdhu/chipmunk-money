@@ -45,7 +45,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Quick start with Docker
 
 ```bash
-git clone https://github.com/<owner>/spending-tracker.git
+git clone https://github.com/stevenwdhu/spending-tracker.git
 cd spending-tracker
 docker compose up -d
 ```
@@ -57,6 +57,7 @@ Then open http://localhost:8787. It builds the image the first time, and runs on
 - **Time zone:** set `TZ` for "today" and the daily jobs, e.g. `TZ=America/Toronto docker compose up -d`, or put it in `.env`. It defaults to UTC. App settings → General can also set one, and that wins.
 - **Settings:** copy `.env.example` to `.env` for AI or Plaid keys and the like. Compose passes it to the container. `DATA_DIR`, `API_PORT` and `HOST` in it are ignored there, as compose sets those for the image.
 - **Update:** `git pull && docker compose up -d --build`. Migrations run on start, after a copy of each database is saved in `backups/`.
+- **Prebuilt image:** every commit to `main` is published as `ghcr.io/stevenwdhu/spending-tracker:latest` for amd64 and arm64, and each release as its version (`:1.2.3`). To use it instead of building, replace `build: .` in `compose.yaml` with `image: ghcr.io/stevenwdhu/spending-tracker:latest`, and update with `docker compose pull && docker compose up -d`.
 - **Back up the volume:** stop it, copy `/data` out, and start it again:
 
   ```bash

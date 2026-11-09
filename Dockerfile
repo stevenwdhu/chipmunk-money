@@ -54,8 +54,7 @@ RUN set -eu; \
 
 # ---- runtime ------------------------------------------------------------------------------------
 FROM node:${NODE_VERSION}-slim AS runtime
-# org.opencontainers.image.source: add the repository URL here once it's public, e.g.
-# LABEL org.opencontainers.image.source="https://github.com/<owner>/spending-tracker"
+# CI's publish job adds org.opencontainers.image.source and the version labels.
 LABEL org.opencontainers.image.title="Spending Tracker" \
       org.opencontainers.image.description="Self-hosted spending, accounts and net worth tracker: web app, REST API and MCP server in one container"
 ENV NODE_ENV=production \
