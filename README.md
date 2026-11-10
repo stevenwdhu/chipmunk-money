@@ -8,8 +8,7 @@
 
 [Get started](#get-started) · [Features](#features) · [Docs](#documentation) · [Security](docs/security.md)
 
-[![CI](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
@@ -78,14 +77,14 @@ All of it, in detail: [docs/features.md](docs/features.md).
     <td width="50%" valign="top" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-phone-dark.webp">
-        <img src="docs/images/overview-phone-light.webp" width="260" alt="The Overview page on a phone, with tabs along the bottom and a button to add a transaction">
+        <img src="docs/images/overview-phone-light.webp" width="220" alt="The Overview page on a phone, with tabs along the bottom and a button to add a transaction">
       </picture>
       <br><b>On your phone.</b> Add it to your home screen and it opens like an app.
     </td>
     <td width="50%" valign="top" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="docs/images/quick-add-phone-dark.webp">
-        <img src="docs/images/quick-add-phone-light.webp" width="260" alt="Adding a transaction on a phone: a sheet with the amount, payee, category, account and date">
+        <img src="docs/images/quick-add-phone-light.webp" width="220" alt="Adding a transaction on a phone: a sheet with the amount, payee, category, account and date">
       </picture>
       <br><b>Quick add.</b> A few taps at the till, and it's filed.
     </td>

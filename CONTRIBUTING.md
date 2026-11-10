@@ -2,7 +2,7 @@
 
 Thanks for helping. Bug reports, ideas and pull requests are all welcome. For anything big, open an issue first so we can agree on the shape before you write it.
 
-**Never put real financial data in an issue, a test, a fixture or a screenshot.** That means real payee names, amounts, account numbers, bank exports or backups, yours or anyone's. Make up names, places and amounts instead, and take screenshots from the demo data below.
+**Never put real financial data in an issue, a test, a fixture or a screenshot.** That means real payee names, amounts, account numbers, bank exports or backups, yours or anyone's. Make up names, places and amounts instead, and take screenshots from the demo data below. `pnpm screenshots` retakes the README's from it.
 
 ## Setup
 

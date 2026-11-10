@@ -15,12 +15,14 @@
     "typecheck": "pnpm -r typecheck",
     "seed:demo": "pnpm --filter @st/server seed:demo",
     "db:generate": "pnpm --filter @st/server db:generate",
+    "screenshots": "node scripts/screenshots.mjs",
     "docs:update": "pnpm --filter @st/server docs:update",
     "mcp:stdio": "pnpm --silent --filter @st/mcp stdio"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "concurrently": "^10.0.7",
+    "playwright-core": "^1.65.0",
     "typescript": "^6.0.3",
     "vitest": "^5.1.0"
   }
