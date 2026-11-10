@@ -31,7 +31,7 @@ A key can also be limited to some ledgers, and given an expiry. A key limited to
 
 `GET /me` says who the API thinks you are: the key's name, its scopes, the ids of the ledgers it's limited to (null for every ledger), and `defaultLedger`, the ledger to use when you don't name one. That's the one the app opens, or the key's first ledger when it can't use that one.
 
-**Without a key.** Everything needs a key except the app's own web page, and `/api/docs`, `/api/v1/openapi.json` and `/healthz`, which hold no data. A request without a key from curl, a script or another website gets 401, and at a host name that isn't local and isn't in `ALLOWED_HOSTS` it's a 403. How the server tells its own page apart, and running it behind a proxy that signs people in (`TRUSTED_AUTH_HEADER`), are explained in the README's [Security](../README.md#security) section.
+**Without a key.** Everything needs a key except the app's own web page, and `/api/docs`, `/api/v1/openapi.json` and `/healthz`, which hold no data. A request without a key from curl, a script or another website gets 401, and at a host name that isn't local and isn't in `ALLOWED_HOSTS` it's a 403. How the server tells its own page apart, and running it behind a proxy that signs people in (`TRUSTED_AUTH_HEADER`), are explained in [Security](security.md).
 
 ## Conventions
 

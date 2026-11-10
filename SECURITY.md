@@ -31,7 +31,7 @@ Spending Tracker is a self-hosted app for one person or one household. It runs o
 - **Secrets at rest.** Bank access and keys are encrypted with `secret.key`, and new installs create the data directory readable only by its owner (0700, files 0600). Error messages from AI providers never echo the request or the key.
 
 **What it doesn't protect against**
-- **Anyone who can reach the port.** There's no login yet. Someone on your network can fake the headers a browser sends and get in as you. Keep the port on `127.0.0.1` or behind a proxy that signs people in, and never put it on the internet as is. The README's Security section shows how.
+- **Anyone who can reach the port.** There's no login yet. Someone on your network can fake the headers a browser sends and get in as you. Keep the port on `127.0.0.1` or behind a proxy that signs people in, and never put it on the internet as is. [docs/security.md](docs/security.md) shows how.
 - **A spoofed `TRUSTED_AUTH_HEADER`.** The server only checks that the header is there. Anything that can reach the port without going through the proxy can send it.
 - **Someone with access to the machine** or to the data directory, `secret.key` or a backup. They can read everything. Encrypt the disk, and keep backups and `secret.key` private.
 - **Plain HTTP on your network.** Traffic between your phone and the server can be read by others on the same network. Use HTTPS (Tailscale Serve gives you that) when the network isn't yours alone.

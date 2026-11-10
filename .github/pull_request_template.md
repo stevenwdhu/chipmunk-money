@@ -6,5 +6,5 @@
 
 - [ ] `pnpm typecheck`, `pnpm test` and `pnpm build` pass
 - [ ] Tests added or updated for what changed
-- [ ] README updated if behaviour or configuration changed
+- [ ] README or docs/ updated if behaviour or configuration changed
 - [ ] No real financial data anywhere in the change
