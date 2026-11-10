@@ -2,12 +2,12 @@
  * ~13 months of realistic sample data (CAD) for development and demos. Loaded from the welcome
  * screen, or from the command line with `pnpm seed:demo` (seed-demo-cli.ts).
  */
-import { addDays, addMonthsToDate, monthOf, transactionCreateSchema, type TransactionCreate } from '@st/shared'
+import { addDays, addMonthsToDate, monthOf, recurringCreateSchema, transactionCreateSchema, type TransactionCreate } from '@st/shared'
 import { createAccount, setBalance } from '../services/accounts'
 import { historySuggestion } from '../services/categorize'
 import type { AppContext } from '../services/context'
 import { createCustomReport } from '../services/custom-reports'
-import { confirmRecurring, detectRecurring, listRecurring } from '../services/recurring'
+import { addPayment, confirmRecurring, createRecurring, detectRecurring, dismissRecurring, listRecurring } from '../services/recurring'
 import { today } from '../services/settings'
 import { insertTransaction } from '../services/transactions'
 
@@ -54,14 +54,14 @@ export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
 
   let count = 0
   const add = (input: Omit<TransactionCreate, 'status'> & { categoryName?: string | null }) => {
-    if (input.date > end) return
+    if (input.date > end) return null
     const { categoryName, ...rest } = input
     const parsed = transactionCreateSchema.parse({
       ...rest,
       categoryId: categoryName === undefined ? rest.categoryId : categoryName ? cat(categoryName) : null,
     })
-    insertTransaction(ctx, parsed, { suggestion: null, skipRecurring: true })
     count++
+    return insertTransaction(ctx, parsed, { suggestion: null, skipRecurring: true })
   }
 
   const days: string[] = []
@@ -116,10 +116,14 @@ export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
     if (rand() < 0.3) {
       card({ accountId: amex.id, date: d, amountMinor: -between(16, 78), payee: pick(['UBER *EATS PENDING', 'PIZZERIA LIBRETTO', 'PAI NORTHERN THAI', 'CHIPOTLE 2841', 'SQ *SEOUL SHAKE']), categoryName: 'Dine out' })
     }
-    // Coffee and treats, sometimes with cash
+    // Coffee and treats, sometimes with cash: each place's usual order most days, now and then something else
     if (weekday(d) >= 1 && weekday(d) <= 5 && rand() < 0.45) {
-      const payee = pick(['TIM HORTONS #2814', 'STARBUCKS 04527', 'BALZACS COFFEE'])
-      const amountMinor = -between(2.5, 7.5)
+      const [payee, usual, others] = pick([
+        ['TIM HORTONS #2814', 249, [429, 519]],
+        ['STARBUCKS 04527', 625, [545, 715]],
+        ['BALZACS COFFEE', 475, [595]],
+      ] as const)
+      const amountMinor = -(rand() < 0.75 ? usual : pick([...others]))
       if (rand() < 0.25) add({ accountId: cash.id, date: d, amountMinor, payee, categoryName: 'Drinks & treats' })
       else card({ accountId: amex.id, date: d, amountMinor, payee, categoryName: 'Drinks & treats' })
     }
@@ -144,6 +148,15 @@ export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
     }
   }
 
+  // Two instalment plans: a vacuum on Pay in 4 (half paid), and a laptop paid monthly after a down payment.
+  const plans = { vacuum: { account: amex.id }, laptop: { account: td.id, down: null as number | null } }
+  for (const offset of [23, 9]) card({ accountId: amex.id, date: addDays(end, -offset), amountMinor: -14_975, payee: 'KLARNA*DYSON CANADA', categoryName: 'General shopping' })
+  const firstMonthly = addMonthsToDate(`${monthOf(end)}-01`, -5)
+  plans.laptop.down = add({ accountId: td.id, date: addDays(firstMonthly, -30), amountMinor: -40_000, payee: 'AFFIRM *BEST BUY', categoryName: 'Electronics' })
+  for (let m = firstMonthly; m <= end; m = addMonthsToDate(m, 1)) {
+    add({ accountId: td.id, date: m, amountMinor: -12_500, payee: 'AFFIRM *BEST BUY', categoryName: 'Electronics' })
+  }
+
   // Recent activity left for the app to categorize: history covers most, two are brand new.
   const recent = (offset: number) => addDays(end, -offset)
   add({ accountId: amex.id, date: recent(1), amountMinor: -6_745, payee: 'LOBLAWS #1104 TORONTO ON', categoryId: null })
@@ -165,12 +178,12 @@ export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
   const pending = ctx.sqlite
     .prepare('SELECT id, payee, amount_minor AS amount FROM transactions WHERE category_id IS NULL AND transfer_pair_id IS NULL')
     .all() as Array<{ id: number; payee: string; amount: number }>
-  return { count, pending, tfsa: tfsa.id }
+  return { count, pending, tfsa: tfsa.id, plans, end, firstMonthly }
 }
 
 /** Seeds demo data and runs the same follow-up the app would: history categories and recurring detection. */
 export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
-  const { count, pending } = seedDemo(ctx, opts)
+  const { count, pending, plans, end, firstMonthly } = seedDemo(ctx, opts)
 
   for (const p of pending) {
     const s = historySuggestion(ctx, p.payee, p.amount)
@@ -180,10 +193,42 @@ export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
       .run(s.categoryId, s.confidence, s.confidence >= 0.8 ? 0 : 1, p.id)
   }
 
+  // The plans, as you'd add them: named, with their number of payments, and the laptop's down payment added at its own amount.
+  const category = (name: string) => (ctx.sqlite.prepare('SELECT id FROM categories WHERE name = ?').pluck().get(name) as number | undefined) ?? null
+  createRecurring(
+    ctx,
+    recurringCreateSchema.parse({
+      payee: 'KLARNA*DYSON CANADA',
+      name: 'Dyson vacuum',
+      expectedAmountMinor: -14_975,
+      cadence: 'biweekly',
+      anchorDate: addDays(end, -23),
+      totalPayments: 4,
+      accountId: plans.vacuum.account,
+      categoryId: category('General shopping'),
+    }),
+  )
+  const laptop = createRecurring(
+    ctx,
+    recurringCreateSchema.parse({
+      payee: 'AFFIRM *BEST BUY',
+      name: 'Laptop',
+      expectedAmountMinor: -12_500,
+      cadence: 'monthly',
+      anchorDate: firstMonthly,
+      totalPayments: 13,
+      accountId: plans.laptop.account,
+      categoryId: category('Electronics'),
+    }),
+  )
+  if (plans.laptop.down) addPayment(ctx, laptop.id, plans.laptop.down)
+
   const { created } = detectRecurring(ctx)
   // Confirm the obvious ones; leave the rest as suggestions to review in the app.
   for (const item of listRecurring(ctx, 'suggested')) {
-    if (/rent|netflix|spotify|rogers|payroll/i.test(item.payee)) confirmRecurring(ctx, item.id)
+    if (/rent|netflix|spotify|rogers|payroll|fido|goodlife|hydro|cashback/i.test(item.payee)) confirmRecurring(ctx, item.id)
+    // The scan takes a coffee you buy most weekdays for a schedule: dismissed, as you would.
+    else if (/tim hortons|starbucks|balzacs/i.test(item.payee)) dismissRecurring(ctx, item.id)
   }
   // Mark the newest Uber Eats charge as an AI-style suggestion to show the review flow.
   ctx.sqlite
