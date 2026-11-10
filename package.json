@@ -15,7 +15,7 @@
     "typecheck": "pnpm -r typecheck",
     "seed:demo": "pnpm --filter @st/server seed:demo",
     "db:generate": "pnpm --filter @st/server db:generate",
-    "docs:reference": "pnpm --filter @st/server docs:reference",
+    "docs:update": "pnpm --filter @st/server docs:update",
     "mcp:stdio": "pnpm --silent --filter @st/mcp stdio"
   },
   "devDependencies": {

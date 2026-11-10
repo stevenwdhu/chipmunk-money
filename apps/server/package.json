@@ -11,7 +11,7 @@
     "seed:demo": "tsx src/db/seed-demo-cli.ts",
     "db:generate": "drizzle-kit generate && drizzle-kit generate --config drizzle.meta.config.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "docs:reference": "tsx src/docs-cli.ts"
+    "docs:update": "tsx src/docs-cli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

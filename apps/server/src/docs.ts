@@ -6,11 +6,11 @@ import type { RouteSpec } from './api/router'
 
 /**
  * The reference parts of docs/api.md and docs/mcp.md, made from the code: every API endpoint, and
- * every MCP tool with its arguments. `pnpm docs:reference` writes them between the files' markers, and a test
+ * every MCP tool with its arguments. `pnpm docs:update` writes them between the files' markers, and a test
  * fails when they're out of date.
  */
 
-export const START = '<!-- reference:start (made by `pnpm docs:reference` from the code: edit the code, not this) -->'
+export const START = '<!-- reference:start (made by `pnpm docs:update` from the code: edit the code, not this) -->'
 export const END = '<!-- reference:end -->'
 
 /** The document with its reference part replaced. */

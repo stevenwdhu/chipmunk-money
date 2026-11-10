@@ -221,7 +221,7 @@ How to connect an agent, and every tool: [docs/mcp.md](docs/mcp.md).
 | `pnpm test` | Vitest: shared utilities, the server (services, API, security, scopes, idempotency, AI fallback) and MCP (with a real MCP client) |
 | `pnpm typecheck` | `tsc` for shared, MCP and server, `vue-tsc` for web |
 | `pnpm seed:demo [--force] [--ledger <slug>]` | Load sample data into the default (or named) ledger of `DATA_DIR`. It refuses a ledger that has data (accounts, transactions, recurring items, reports or tags) unless you pass `--force`, which first saves that ledger in `backups/` and then replaces all of those. Use a separate `DATA_DIR` for it (see [CONTRIBUTING.md](CONTRIBUTING.md)) |
-| `pnpm docs:reference` | Update the endpoint list in [docs/api.md](docs/api.md) and the tool list in [docs/mcp.md](docs/mcp.md) from the code. A test fails when they're out of date |
+| `pnpm docs:update` | Update the endpoint list in [docs/api.md](docs/api.md) and the tool list in [docs/mcp.md](docs/mcp.md) from the code. A test fails when they're out of date |
 | `pnpm db:generate` | Create migrations after editing `apps/server/src/db/schema.ts` (ledgers) or `meta-schema.ts` (app-wide). Each folder starts from `0000_baseline.sql`: the earlier migrations squashed into one. A database from before the squash that missed some of them can't be upgraded, so the app refuses it |
 
 ## Project layout

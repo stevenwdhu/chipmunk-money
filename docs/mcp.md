@@ -62,7 +62,7 @@ Erasing or restoring data, deleting a ledger and managing API keys are left out 
 
 ## Tools
 
-<!-- reference:start (made by `pnpm docs:reference` from the code: edit the code, not this) -->
+<!-- reference:start (made by `pnpm docs:update` from the code: edit the code, not this) -->
 
 ### Read (a *Read only* key)
 

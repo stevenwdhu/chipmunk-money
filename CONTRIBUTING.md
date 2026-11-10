@@ -55,5 +55,5 @@ All three run in CI on every push and pull request, plus a Docker build. Please 
 ## Commits and pull requests
 
 - Short, one-line [conventional commits](https://www.conventionalcommits.org): `feat: …`, `fix: …`, `docs: …`, `test: …`, `chore: …`, with a scope when it helps (`feat(web): …`, `fix(mcp): …`). Say what changed for the person using the app, e.g. `fix: refunds of uncategorized purchases show in the Uncategorized list`.
-- One change per pull request. Add or update tests for what you changed, and the README when behaviour or configuration changes. A change to an API endpoint or MCP tool also needs `pnpm docs:reference`, which updates their lists in `docs/` (a test fails until you do), and the guide around them in [docs/api.md](docs/api.md) or [docs/mcp.md](docs/mcp.md) when how to use them changes.
+- One change per pull request. Add or update tests for what you changed, and the README when behaviour or configuration changes. A change to an API endpoint or MCP tool also needs `pnpm docs:update`, which updates their lists in `docs/` (a test fails until you do), and the guide around them in [docs/api.md](docs/api.md) or [docs/mcp.md](docs/mcp.md) when how to use them changes.
 - Security problems go through [SECURITY.md](SECURITY.md), not a public issue or pull request.

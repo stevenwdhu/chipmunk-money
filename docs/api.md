@@ -112,7 +112,7 @@ curl -X POST http://localhost:8787/api/v1/ledgers/personal/recurring/15/add-paym
 
 Paths are under `/api/v1`. A **Scope** of `read` works with any key, `write` needs *Read and write* or *Full access*, and `admin` needs *Full access*.
 
-<!-- reference:start (made by `pnpm docs:reference` from the code: edit the code, not this) -->
+<!-- reference:start (made by `pnpm docs:update` from the code: edit the code, not this) -->
 
 ### Me
 
