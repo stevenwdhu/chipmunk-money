@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { Loader2 } from '@lucide/vue'
 import type { RecurringItem } from '@st/shared'
 import MoneyText from '@/components/MoneyText.vue'
+import RecurringPaymentPicker from '@/components/RecurringPaymentPicker.vue'
 import { useAccounts, useRecurringPayments } from '@/composables/queries'
 import { useToday } from '@/composables/useToday'
 import { shortDate } from '@/lib/format'
@@ -11,7 +12,7 @@ import { useUiStore } from '@/stores/ui'
 /**
  * A recurring item's payments, newest first, as its row or card unfolds on the Recurring page; a suggestion's are the
  * ones the scan found. In a row, it lines up with it: dates under its name, amounts under its amount (left of the
- * row's edit button).
+ * row's edit button). Under them, a link to add one the app didn't link, at its own amount.
  */
 const props = defineProps<{ item: RecurringItem; card?: boolean }>()
 const ui = useUiStore()
@@ -44,6 +45,10 @@ const LINE = computed(() => ['flex w-full items-center gap-3 py-1.5 text-left te
         </span>
         <MoneyText :amount="tx.amountMinor" />
       </button>
+    </div>
+    <!-- One the app didn't link, at its own amount (a plan's down payment, say). -->
+    <div v-if="item.status === 'active' || item.status === 'ended'" :class="[LINE, 'py-1']">
+      <RecurringPaymentPicker :item="item" />
     </div>
   </div>
 </template>

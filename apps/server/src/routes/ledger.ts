@@ -77,6 +77,8 @@ import {
   RECURRING_STATUSES,
   recurringCreateSchema,
   recurringItemSchema,
+  recurringPaymentCandidateSchema,
+  recurringPaymentCandidatesQuerySchema,
   recurringPaymentSchema,
   recurringUpdateSchema,
   reorderSchema,
@@ -1144,8 +1146,9 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     {
       ...rec,
       scope: 'write',
-      summary: 'Link a payment from another payee',
-      description: 'Says a payment (usually its `possiblePayment`) is the item’s: its payee becomes one of the item’s, and the payment and others like it are linked.',
+      summary: 'Link a payment from another payee, or at a new amount',
+      description:
+        'Says a payment (usually its `possiblePayment`) is the item’s: its payee becomes one of the item’s, and the payment and others like it are linked. Beyond its price variation it’s the item’s amount from then on (a price change), except for an instalment plan’s last payment, which is added at its own amount as with POST /recurring/{id}/add-payment.',
       body: recurringPaymentSchema,
       response: recurringItemSchema,
     },
@@ -1153,6 +1156,37 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       const tx = txs.getTransaction(c.var.ctx, body.transactionId)
       const item = recurring.linkPossiblePayment(c.var.ctx, params.id, body.transactionId)
       log(c, { action: 'update', entity: 'recurring', entityId: item.id, summary: `Linked ${describe(tx)} to ${recurringLabel(item)}` })
+      return item
+    },
+  )
+  r.get(
+    '/recurring/:id/payment-candidates',
+    {
+      ...rec,
+      scope: 'read',
+      summary: 'Find payments to add to a recurring item',
+      description:
+        'Payments to add with POST /recurring/{id}/add-payment: not linked to a recurring item and not transfers, money out for a bill or plan (money in for income), from its account if it has one, at any amount. From around its dates: its first payment (or next due date) back 3 periods, until a period after its next due date. With `q`, any that match, at any date. Its payees’ and ones like them first, then the newest. Up to 50.',
+      query: recurringPaymentCandidatesQuerySchema,
+      response: z.array(recurringPaymentCandidateSchema),
+    },
+    (c, { params, query }) => txs.recurringPaymentCandidates(c.var.ctx, params.id, query),
+  )
+  r.post(
+    '/recurring/:id/add-payment',
+    {
+      ...rec,
+      scope: 'write',
+      summary: 'Add a payment to a recurring item at its own amount',
+      description:
+        'For a payment the app didn’t link, like an instalment plan’s down payment, a first payment that covers part of a period, or its last one (the remainder). It’s counted and takes the item’s category, but the item’s usual amount stays: it’s no price change. It’s for the due date it falls in (or, when another payment has that one, the one before or after it). Its payee isn’t added to the item’s. An active or ended item only, a payment from its account, and a plan takes no more payments than it has (one from before its linked payments counts as one of those paid before your history). Undo it with POST /recurring/{id}/not-payment.',
+      body: recurringPaymentSchema,
+      response: recurringItemSchema,
+    },
+    (c, { params, body }) => {
+      const tx = txs.getTransaction(c.var.ctx, body.transactionId)
+      const item = recurring.addPayment(c.var.ctx, params.id, body.transactionId)
+      log(c, { action: 'update', entity: 'recurring', entityId: item.id, summary: `Added ${describe(tx)} to ${recurringLabel(item)}` })
       return item
     },
   )

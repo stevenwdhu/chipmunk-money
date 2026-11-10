@@ -659,7 +659,7 @@ export const recurringItemSchema = z
         date,
         payee: z.string(),
         amountMinor: minor,
-        newAmount: z.boolean().describe('From its own payee, beyond its price variation: linking it makes this the item’s amount from its due date on.'),
+        newAmount: z.boolean().describe('From its own payee, beyond its price variation: linking it makes this the item’s amount from its due date on. Except an instalment plan’s last payment (any amount up to 1.5 times its own), which is linked at its own amount and ends the plan.'),
         dueDate: date.describe('The due date it would be the payment for: its next one, or one in its history that has none (it came early or late).'),
       })
       .nullable()
@@ -672,6 +672,15 @@ export type RecurringItem = z.output<typeof recurringItemSchema>
 
 /** What a recurring item is called: its name, or its payee. */
 export const recurringLabel = (i: { name: string | null; payee: string }) => i.name ?? i.payee
+
+export const recurringPaymentCandidateSchema = z
+  .object({
+    transaction: transactionSchema,
+    likely: z.boolean().describe('From one of its payees, or a payee like them.'),
+  })
+  .meta({ id: 'RecurringPaymentCandidate' })
+  .describe('A payment you could add to a recurring item: not linked to one, and not a transfer.')
+export type RecurringPaymentCandidate = z.output<typeof recurringPaymentCandidateSchema>
 
 export const upcomingPaymentSchema = z
   .object({

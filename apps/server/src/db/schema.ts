@@ -355,6 +355,11 @@ export const recurringPaymentDues = sqliteTable(
       .notNull()
       .references(() => transactions.id, { onDelete: 'cascade' }),
     dueDate: text('due_date').notNull(),
+    /**
+     * A payment you added at its own amount, like a plan's down payment or its last payment (the
+     * remainder): it doesn't change the item's amount or count as a price change.
+     */
+    oneOff: integer('one_off', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.itemId, t.transactionId] })],
 )

@@ -3,6 +3,7 @@ import { addDays, addMonthsToDate, recurringCreateSchema, transactionCreateSchem
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import type { AppContext } from './context'
 import {
+  addPayment,
   confirmRecurring,
   createRecurring,
   detectRecurring,
@@ -16,7 +17,7 @@ import {
   upcomingPayments,
 } from './recurring'
 import { setAppSetting } from './settings'
-import { createTransaction, deleteTransaction, getTransaction, listTransactions, restoreTransaction, updateTransaction } from './transactions'
+import { createTransaction, deleteTransaction, getTransaction, listTransactions, recurringPaymentCandidates, restoreTransaction, updateTransaction } from './transactions'
 
 const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
 
@@ -568,6 +569,142 @@ describe('recalculating a recurring item', () => {
     // Stopped with payments left: an edit doesn't bring it back.
     updateRecurring(ctx, plan.id, { status: 'ended' })
     expect(updateRecurring(ctx, plan.id, { name: 'Shoes', totalPayments: 4 }).status).toBe('ended')
+  })
+})
+
+describe('payments added at their own amount', () => {
+  const add = async (ctx: AppContext, accountId: number, date: string, amountMinor: number, payee = 'AFFIRM') =>
+    createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false })
+  /** A 5-payment plan of $100 a month from Jul 15, its first 3 paid, and a $300 down payment 5 days before the first. */
+  const plan = async (ctx: AppContext) => {
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const down = await add(ctx, acc, '2026-07-10', -30_000)
+    for (const date of ['2026-07-15', '2026-08-15', '2026-09-15']) await add(ctx, acc, date, -10_000)
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'AFFIRM', name: 'Sofa', expectedAmountMinor: -10_000, cadence: 'monthly', anchorDate: '2026-07-15', totalPayments: 5, accountId: acc }),
+    )
+    return { ctx, acc, down, item }
+  }
+
+  it('adds a down payment: counted and categorized, the usual amount stays and its other payments too', async () => {
+    const { ctx, down, item } = await plan(testContext())
+    expect(item).toMatchObject({ paidPayments: 3, remainingPayments: 2 })
+    expect(getTransaction(ctx, down.id).recurringItemId).toBeNull()
+    // Offered with its payee's payments first.
+    const offered = recurringPaymentCandidates(ctx, item.id, {})
+    expect(offered.map((c) => [c.transaction.id, c.likely])).toEqual([[down.id, true]])
+
+    const sofa = categoryId(ctx, 'Electronics')
+    updateRecurring(ctx, item.id, { categoryId: sofa })
+    // The down payment is in the first payment's period: it takes the one before.
+    expect(addPayment(ctx, item.id, down.id)).toMatchObject({
+      paidPayments: 4,
+      remainingPayments: 1,
+      expectedAmountMinor: -10_000,
+      alerts: [],
+      nextDueDate: '2026-10-15',
+      remainingAmountMinor: -10_000,
+      totalAmountMinor: -70_000,
+    })
+    expect(getTransaction(ctx, down.id)).toMatchObject({ recurringItemId: item.id, categoryId: sofa })
+    expect(recurringPaymentIds(ctx, item.id)).toHaveLength(4)
+    // Worked out again (an edit), it keeps all four.
+    expect(updateRecurring(ctx, item.id, { amountTolerancePct: 5 })).toMatchObject({ paidPayments: 4, expectedAmountMinor: -10_000 })
+    expect(recurringPaymentCandidates(ctx, item.id, {})).toEqual([])
+  })
+
+  it('adds a final payment far from the usual amount: the plan ends, and it was no price change', async () => {
+    const { ctx, acc, down, item } = await plan(testContext())
+    addPayment(ctx, item.id, down.id)
+    // $43.21 is too far from $100 to be linked: it's asked about, as its last payment, and can be added.
+    const last = await add(ctx, acc, '2026-10-15', -4321)
+    expect(getTransaction(ctx, last.id).recurringItemId).toBeNull()
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: true })
+    expect(addPayment(ctx, item.id, last.id)).toMatchObject({
+      status: 'ended',
+      paidPayments: 5,
+      remainingPayments: 0,
+      expectedAmountMinor: -10_000,
+      totalAmountMinor: -64_321,
+      endDate: '2026-10-15',
+    })
+    // It has all its payments now.
+    const more = await add(ctx, acc, '2026-10-20', -1000)
+    expect(() => addPayment(ctx, item.id, more.id)).toThrow(/has all 5 payments/)
+    // And undone, it's back to expecting the last one.
+    expect(notItsPayment(ctx, item.id, last.id)).toMatchObject({ status: 'active', paidPayments: 4, expectedAmountMinor: -10_000 })
+  })
+
+  it('links a plan’s last payment it asks about at its own amount, not as a new price', async () => {
+    const { ctx, acc, down, item } = await plan(testContext())
+    addPayment(ctx, item.id, down.id)
+    const last = await add(ctx, acc, '2026-10-15', -7000)
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: true })
+    expect(linkPossiblePayment(ctx, item.id, last.id)).toMatchObject({ status: 'ended', paidPayments: 5, expectedAmountMinor: -10_000, totalAmountMinor: -67_000 })
+  })
+
+  it('takes a down payment before the plan’s first payment, then matches the usual ones as they come', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const down = await add(ctx, acc, '2026-09-20', -30_000)
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'AFFIRM', expectedAmountMinor: -10_000, cadence: 'monthly', anchorDate: '2026-10-01', totalPayments: 4, accountId: acc }),
+    )
+    // The only payment, at its own amount: no price change, nothing missing.
+    expect(addPayment(ctx, item.id, down.id)).toMatchObject({ paidPayments: 1, expectedAmountMinor: -10_000, alerts: [], nextDueDate: '2026-10-01' })
+    const first = await add(ctx, acc, '2026-10-01', -10_000)
+    expect(getTransaction(ctx, first.id).recurringItemId).toBe(item.id)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ paidPayments: 2, nextDueDate: '2026-11-01', alerts: [] })
+  })
+
+  it('keeps a plan’s payments when its last one, a little smaller, is the newest', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const date of ['2026-05-20', '2026-06-20', '2026-07-20', '2026-08-20', '2026-09-20']) await add(ctx, acc, date, -41_210)
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'AFFIRM', expectedAmountMinor: -41_210, cadence: 'monthly', anchorDate: '2026-05-20', totalPayments: 6, amountTolerancePct: 10 }),
+    )
+    // 9.7% less: within the variation, so it links and the plan ends.
+    await add(ctx, acc, '2026-10-20', -37_200)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ status: 'ended', paidPayments: 6 })
+    // Worked out again, the earlier ones are still compared with its amount, not with the last one.
+    expect(updateRecurring(ctx, item.id, { name: 'Bike' })).toMatchObject({ status: 'ended', paidPayments: 6, expectedAmountMinor: -41_210, totalAmountMinor: -243_250 })
+  })
+
+  it('keeps a paid-off plan the scan found with its smaller last payment, once you confirm it', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const date of ['2026-02-20', '2026-03-20', '2026-04-20', '2026-05-20', '2026-06-20']) await add(ctx, acc, date, -41_210)
+    await add(ctx, acc, '2026-07-20', -30_000)
+    detectRecurring(ctx)
+    const found = listRecurring(ctx, 'suggested')[0]!
+    expect(found).toMatchObject({ totalPayments: 6, paidPayments: 6 })
+    expect(confirmRecurring(ctx, found.id)).toMatchObject({ status: 'ended', paidPayments: 6, expectedAmountMinor: -41_210, totalAmountMinor: -236_050 })
+  })
+
+  it('counts one from before its linked payments as one you said was paid before your history', async () => {
+    const { ctx, down, item } = await plan(testContext())
+    // You said 4 were paid: the app had found 3.
+    expect(updateRecurring(ctx, item.id, { paidPayments: 4 })).toMatchObject({ paidPayments: 4 })
+    expect(addPayment(ctx, item.id, down.id)).toMatchObject({ paidPayments: 4, remainingPayments: 1 })
+  })
+
+  it('adds only a payment from its account, the same way, to an item you track', async () => {
+    const { ctx, item } = await plan(testContext())
+    const other = makeAccount(ctx, 'Chequing', 'chequing')
+    const elsewhere = await add(ctx, other, '2026-07-10', -30_000)
+    expect(() => addPayment(ctx, item.id, elsewhere.id)).toThrow(/another account/)
+    const refund = await add(ctx, item.accountId!, '2026-07-20', 5000)
+    expect(() => addPayment(ctx, item.id, refund.id)).toThrow(/money in/)
+    expect(recurringPaymentCandidates(ctx, item.id, {}).map((c) => c.transaction.id)).not.toContain(elsewhere.id)
+    // Searched, at any date, and from other payees.
+    const old = await add(ctx, item.accountId!, '2025-01-02', -2500, 'Sofa Store')
+    expect(recurringPaymentCandidates(ctx, item.id, { q: 'sofa store' })).toMatchObject([{ transaction: { id: old.id }, likely: false }])
+    updateRecurring(ctx, item.id, { status: 'suggested' })
+    expect(() => addPayment(ctx, item.id, old.id)).toThrow(/Confirm it first/)
   })
 })
 

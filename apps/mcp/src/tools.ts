@@ -49,6 +49,7 @@ import {
   type NetWorthReport,
   type PayeeTotal,
   type RecurringItem,
+  type RecurringPaymentCandidate,
   type SyncResult,
   type Tag,
   type TagWithCount,
@@ -1213,6 +1214,62 @@ export const TOOLS: ToolDef[] = [
       const l = await ctx.ledger(args.ledger)
       const r = await ctx.api.post<RecurringItem>(`/ledgers/${l.slug}/recurring/${args.id}/dismiss`)
       return { text: `Dismissed ${described(r)}.`, data: { ledger: l.slug, id: r.id, payee: r.payee, name: r.name, status: r.status } }
+    },
+  }),
+  tool({
+    name: 'recurring_payment_candidates',
+    scope: 'read',
+    title: 'Find payments to add to a recurring payment',
+    description:
+      'Transactions you could add to a recurring item with add_recurring_payment, like an instalment plan’s down payment or its last payment (the remainder), which the app doesn’t link because their amount differs. Not linked to an item and not transfers, the same way as the item (money out or in), from its account if it has one, at any amount. Without `search`: from around its dates. Its payees’ and ones like them come first (`likely`).',
+    input: z.object({
+      ledger,
+      id: z.number().int().describe('The recurring item’s id, from list_recurring.'),
+      search: z.string().max(100).optional().describe('Words to find (payee, name, notes or amount), at any date.'),
+    }),
+    output: z.object({ ledger: z.string(), candidates: z.array(z.object({ transaction: transactionView, likely: z.boolean() })) }),
+    annotations: READ,
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const [list, lk] = await Promise.all([
+        ctx.api.get<RecurringPaymentCandidate[]>(`/ledgers/${l.slug}/recurring/${args.id}/payment-candidates`, { q: args.search || undefined }),
+        ctx.lookups(l),
+      ])
+      const candidates = list.map((c) => ({ transaction: viewTransaction(c.transaction, lk), likely: c.likely }))
+      const text = candidates.length
+        ? [`${plural(candidates.length, 'payment')} you could add:`, ...candidates.map((c) => `${transactionLine(c.transaction)}${c.likely ? ' (its payee)' : ''}`)].join('\n')
+        : args.search
+          ? 'No payment you could add matches.'
+          : 'No payment around its dates to add. Search for one.'
+      return { text, data: { ledger: l.slug, candidates } }
+    },
+  }),
+  tool({
+    name: 'add_recurring_payment',
+    scope: 'write',
+    title: 'Add a payment to a recurring payment',
+    description:
+      'Adds a transaction to a recurring item at its own amount: an instalment plan’s down payment, a first payment that covers part of a period, its last one (the remainder), or one the app didn’t link. It’s counted and takes the item’s category, but the item’s usual amount stays (it’s no price change). Find one with recurring_payment_candidates. The item must be active or ended, the payment from its account, and a plan takes no more payments than it has. Ask the user before adding one they didn’t name.',
+    input: z.object({ ledger, id: z.number().int().describe('The recurring item’s id.'), transactionId: z.number().int() }),
+    output: z.object({
+      ledger: z.string(),
+      id: z.number(),
+      payee: z.string(),
+      name: z.string().nullable(),
+      status: z.string(),
+      amount: z.string(),
+      instalments: z.object({ paid: z.number(), total: z.number(), left: z.string(), endDate: z.string().nullable() }).nullable(),
+    }),
+    annotations: WRITE,
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const r = await ctx.api.post<RecurringItem>(`/ledgers/${l.slug}/recurring/${args.id}/add-payment`, { transactionId: args.transactionId })
+      const instalments = r.totalPayments === null ? null : { paid: r.paidPayments, total: r.totalPayments, left: money(r.remainingAmountMinor ?? 0), endDate: r.endDate }
+      const plan = instalments ? `: ${instalments.paid} of ${instalments.total} paid${r.status === 'ended' ? ', paid off' : `, ${instalments.left} left`}` : ''
+      return {
+        text: `Added transaction #${args.transactionId} to ${described(r)}${plan}. Its usual amount stays ${money(r.expectedAmountMinor)}.`,
+        data: { ledger: l.slug, id: r.id, payee: r.payee, name: r.name, status: r.status, amount: money(r.expectedAmountMinor), instalments },
+      }
     },
   }),
   tool({

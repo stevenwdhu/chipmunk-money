@@ -563,6 +563,16 @@ export type RecurringUpdate = z.input<typeof recurringUpdateSchema>
 /** A payment from a similar payee: link it to a recurring item, or say it isn't the item's. */
 export const recurringPaymentSchema = z.object({ transactionId: id })
 
+export const recurringPaymentCandidatesQuerySchema = z.object({
+  q: z
+    .string()
+    .trim()
+    .max(100)
+    .optional()
+    .describe('Search payees, names, notes and amounts, at any date. Left out: payments from around its dates, from its first payment (or next due date) back 3 periods until 1 after its next due date.'),
+})
+export type RecurringPaymentCandidatesQuery = z.input<typeof recurringPaymentCandidatesQuerySchema>
+
 // Settings ---------------------------------------------------------------
 
 export const aiProviderInputSchema = z

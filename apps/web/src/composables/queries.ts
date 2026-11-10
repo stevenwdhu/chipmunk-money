@@ -70,6 +70,7 @@ import type {
   PeriodSummary,
   RecurringCreate,
   RecurringItem,
+  RecurringPaymentCandidate,
   LinkCandidate,
   LinkedTransaction,
   LinkKind,
@@ -910,6 +911,18 @@ export function useRecurringPayments(id: MaybeRefOrGetter<number>) {
   })
 }
 
+/**
+ * Payments to add to a recurring item at their own amount, like a plan's down payment: from around its
+ * dates, or with `q`, any that match (nothing while `id` is null).
+ */
+export function useRecurringPaymentCandidates(id: MaybeRefOrGetter<number | null>, q: MaybeRefOrGetter<string>) {
+  return useQuery({
+    queryKey: computed(() => [...keys.recurring(), 'payment-candidates', toValue(id), toValue(q)]),
+    queryFn: () => lapi.get<RecurringPaymentCandidate[]>(`/recurring/${toValue(id)}/payment-candidates`, { q: toValue(q) || undefined }),
+    enabled: computed(() => toValue(id) !== null),
+  })
+}
+
 export function useRecurringMutations() {
   const invalidate = useInvalidateLedger()
   return {
@@ -923,6 +936,11 @@ export function useRecurringMutations() {
     /** A payment from another payee is the item's: its payee is added to the item. */
     linkPayment: useMutation({
       mutationFn: ({ id, transactionId }: { id: number; transactionId: number }) => lapi.post<RecurringItem>(`/recurring/${id}/link-payment`, { transactionId }),
+      onSuccess: invalidate,
+    }),
+    /** A payment at its own amount (a plan's down payment, say): the item's amount stays. */
+    addPayment: useMutation({
+      mutationFn: ({ id, transactionId }: { id: number; transactionId: number }) => lapi.post<RecurringItem>(`/recurring/${id}/add-payment`, { transactionId }),
       onSuccess: invalidate,
     }),
     notPayment: useMutation({

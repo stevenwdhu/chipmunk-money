@@ -12,6 +12,7 @@ import {
   type Tag,
   type TransactionLink,
   type PayeeNaming,
+  type RecurringPaymentCandidate,
   type Transaction,
   type TransactionPage,
   type TransactionSpan,
@@ -29,7 +30,7 @@ import type { AppContext } from './context'
 import { payeeKeyOf, payeeNamerFor } from './payee-namer'
 import { linksFor } from './links'
 import { isPersonTransfer, releaseLinks } from './matching'
-import { matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
+import { cadenceInfo, getRecurring, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
 
 type CreateInput = z.output<typeof transactionCreateSchema>
 type UpdateInput = z.output<typeof transactionUpdateSchema>
@@ -288,6 +289,46 @@ export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKi
     ranked.map(({ r }) => r),
   )
   return ranked.map(({ r, likely }, i) => ({ transaction: list[i]!, leftMinor: r.left_minor, likely }))
+}
+
+/**
+ * Payments you could add to a recurring item by hand (`addPayment`): not linked to an item, not
+ * transfers, the same way as it (money out or in), from its account if it has one, at any amount.
+ * From around its dates: its first payment (or next due date) back 3 periods, until a period after
+ * its next due date. Searched, at any date. Its payees' and ones like them first, then the newest.
+ */
+export function recurringPaymentCandidates(ctx: AppContext, itemId: number, opts: { q?: string }): RecurringPaymentCandidate[] {
+  const item = getRecurring(ctx, itemId)
+  const where = ['t.deleted_at IS NULL', 't.transfer_pair_id IS NULL', 't.recurring_item_id IS NULL', item.expectedAmountMinor < 0 ? 't.amount_minor < 0' : 't.amount_minor > 0']
+  const params: unknown[] = []
+  if (item.accountId !== null) {
+    where.push('t.account_id = ?')
+    params.push(item.accountId)
+  }
+  if (opts.q) {
+    const [sql, ...search] = textSearch(opts.q)
+    where.push(sql)
+    params.push(...search)
+  } else {
+    const first = ctx.sqlite.prepare('SELECT min(date) FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL').pluck().get(itemId) as string | null
+    const period = cadenceInfo(item.cadence).days
+    const from = first && first < item.nextDueDate ? first : item.nextDueDate
+    where.push('t.date BETWEEN ? AND ?')
+    params.push(addDays(from, -3 * period), addDays(item.nextDueDate, period))
+  }
+  const rows = ctx.sqlite
+    .prepare(`SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')} ORDER BY sort_key DESC LIMIT ${opts.q ? LOOKING_ROWS : AROUND_ROWS}`)
+    .all(...params) as TxRow[]
+  const keys = [item.payeeKey, ...(ctx.sqlite.prepare('SELECT payee_key FROM recurring_payees WHERE item_id = ?').pluck().all(itemId) as string[])]
+  const ranked = rows
+    .map((r) => ({ r, likely: keys.some((k) => k === r.payee_key || payeeSimilarity(k, r.payee_key) >= LIKELY_MERCHANT) }))
+    .sort((a, b) => Number(b.likely) - Number(a.likely))
+    .slice(0, 50)
+  const list = dtos(
+    ctx,
+    ranked.map(({ r }) => r),
+  )
+  return ranked.map(({ likely }, i) => ({ transaction: list[i]!, likely }))
 }
 
 /** A transaction's links, each with the transaction on its other side. */

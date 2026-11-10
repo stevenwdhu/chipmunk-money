@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
@@ -18,13 +18,27 @@ function tempFile(name: string) {
   return path.join(dir, name)
 }
 
+/** The migrations folder with only its first migration, the baseline (the squash): the ones after it are newer. */
+function baselineOnly(folder: string) {
+  const journal = JSON.parse(readFileSync(path.join(folder, 'meta/_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
+  const dir = path.dirname(tempFile('x'))
+  mkdirSync(path.join(dir, 'meta'))
+  const first = journal.entries[0]!
+  copyFileSync(path.join(folder, `${first.tag}.sql`), path.join(dir, `${first.tag}.sql`))
+  writeFileSync(path.join(dir, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: [first] }))
+  return dir
+}
+
+/** Every migration made since the baseline. */
+const sinceBaseline = (folder: string) => (JSON.parse(readFileSync(path.join(folder, 'meta/_journal.json'), 'utf8')) as { entries: unknown[] }).entries.length - 1
+
 /**
  * A database as the migrations from before the squash left it: the baseline's schema, with a run
  * of earlier migrations recorded, the last one at `last`.
  */
 function ranOldMigrations(file: string, folder: string, last: number) {
   const sqlite = new Database(file)
-  migrate(drizzle(sqlite), { migrationsFolder: folder })
+  migrate(drizzle(sqlite), { migrationsFolder: baselineOnly(folder) })
   sqlite.exec('DELETE FROM __drizzle_migrations')
   const insert = sqlite.prepare('INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)')
   for (let i = 34; i >= 0; i--) insert.run(`old-${i}`, last - i * 1000)
@@ -68,18 +82,21 @@ describe('ledger migrations', () => {
     ])
   })
 
-  it('leave a ledger that ran every migration before the squash as it is', () => {
+  it('take a ledger that ran every migration before the squash on from the baseline, without running it again', () => {
     const file = tempFile('ledger.db')
     ranOldMigrations(file, env.ledgerMigrations, shippedMigrations().first)
-    const before = new Database(file).prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all()
+    const fresh = new Database(':memory:')
+    migrate(drizzle(fresh), { migrationsFolder: env.ledgerMigrations })
+    const schema = (db: Database.Database) => db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name <> '__drizzle_migrations' ORDER BY name").all()
 
     const { sqlite } = openLedgerDb(file)
-    expect(sqlite.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all()).toEqual(before)
-    expect(sqlite.prepare('SELECT count(*) FROM __drizzle_migrations').pluck().get()).toBe(35)
+    expect(schema(sqlite)).toEqual(schema(fresh))
+    const newer = sinceBaseline(env.ledgerMigrations)
+    expect(sqlite.prepare('SELECT count(*) FROM __drizzle_migrations').pluck().get()).toBe(35 + newer)
     sqlite.close()
-    // Nothing to migrate, so nothing snapshotted.
+    // Snapshotted only to run the migrations made since.
     const backups = path.join(path.dirname(file), 'backups')
-    expect(existsSync(backups) ? readdirSync(backups) : []).toEqual([])
+    expect((existsSync(backups) ? readdirSync(backups) : []).length).toBe(newer ? 1 : 0)
   })
 
   it('refuse a ledger or backup from before the squash that missed some migrations', () => {

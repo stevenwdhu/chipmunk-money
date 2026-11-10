@@ -1,0 +1,1 @@
+ALTER TABLE `recurring_payment_dues` ADD `one_off` integer DEFAULT false NOT NULL;
