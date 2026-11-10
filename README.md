@@ -12,8 +12,8 @@ A personal, self-hosted spending tracker inspired by [Lunch Money](https://lunch
 - **Bank sync:** connect your banks through [SimpleFIN Bridge](https://www.simplefin.org/), [Plaid](https://plaid.com) or Wealthsimple (unofficial), side by side. Their transactions and balances arrive on a schedule you choose (from every hour to once a day), categorized from your history, with pending charges replaced when they post.
 - **Settings:** *Ledger settings* (name and colour, which categories it uses, tags, CSV import and export, backup, restore, erase) and *App settings* (time zone, appearance, managing all ledgers with a full backup, the shared categories, bank connections, AI providers with a connection test and usage log, API keys).
 - **Categories:** one shared list of groups, categories and Needs/Wants labels in App settings, reordered by dragging their handles (a category can be dragged into another group). Each ledger turns off the ones it doesn't need (choosing where their transactions go), or keeps its own list instead. Switching back matches its categories to the shared list, asking about each one the list doesn't have.
-- **API:** everything the app does goes through a documented REST API (`/api/v1`, docs at `/api/docs`), so scripts and AI agents can do anything you can. Each agent gets its own API key with limited access, and **Activity** shows what each one changed.
-- **MCP server:** AI agents (Claude and others) connect at `/mcp` or over stdio to search transactions, work the review queue, add transactions, and answer questions about your spending.
+- **API:** everything the app does goes through a documented [REST API](docs/api.md) (`/api/v1`, interactive docs at `/api/docs`), so scripts and AI agents can do anything you can. Each agent gets its own API key with limited access, and **Activity** shows what each one changed.
+- **[MCP server](docs/mcp.md):** AI agents (Claude and others) connect at `/mcp` or over stdio to search transactions, work the review queue, add transactions, and answer questions about your spending.
 
 ## Security
 
@@ -21,7 +21,7 @@ Spending Tracker holds your whole financial life, and the access to your banks. 
 
 **Who can use it.** Only two things get an answer:
 - **The app's own web page,** in a browser. The server checks the browser's `Sec-Fetch-Site` header (or `Origin` and `Referer` on plain HTTP over your network) to tell its own page from anything else. Other websites you visit can't call it, and a plain curl or script without a key gets 401.
-- **A valid API key,** sent as `Authorization: Bearer st_…`. Scripts, agents and MCP use these. See [API](#api).
+- **A valid API key,** sent as `Authorization: Bearer st_…`. Scripts, agents and MCP use these. See [docs/api.md](docs/api.md).
 
 Anyone who can open the web page is treated as you. The header check stops other websites, not programs: something on your network can fake those headers. So who can reach the port is what really protects it.
 
@@ -200,59 +200,15 @@ The access each connection gives the app, and your Plaid secret, are stored encr
 
 ## API
 
-The web app and any scripts or agents share one API, so anything you can do in the app is available to them.
+The web app and any scripts or agents share one REST API, so anything you can do in the app is available to them. Create a key for each script in **App settings → API keys**, with only the access it needs. Your server shows interactive docs at `/api/docs`.
 
-- **Docs:** open `/api/docs` for interactive docs (the spec is at `/api/v1/openapi.json`). Ledger data lives under `/api/v1/ledgers/{ledger}/…`, where `{ledger}` is the slug from the app's URL (e.g. `personal`).
-- **Keys:** create one per script or agent in **App settings → API keys** and send it as `Authorization: Bearer st_…`. Choose **Read only**, **Read and write**, or **Full access** (ledgers, settings, API keys, restore and erase), optionally limited to some ledgers and with an expiry. A key limited to some ledgers can't use anything app-wide. The key is shown once, and only a hash is stored.
-- **Activity:** every change records who made it (`web` or the key's name) and the fields before and after. See it under **Activity** in each ledger, filterable by who and what.
-- **Safe for agents:** send an `Idempotency-Key` header on a POST to make retries harmless, give transactions an `externalId` so the same one is never added twice, and add `?dryRun=true` to bulk edits and imports to see what would change first.
-- **Limits:** a JSON request can be up to 1 MB. Restores, imports and `/mcp` can be up to 200 MB.
-
-```bash
-curl -H "Authorization: Bearer $ST_API_KEY" http://localhost:8787/api/v1/ledgers/personal/reports/summary
-```
-
-**Who needs a key.** Everything except the app's own web page. A request without a key from curl, a script or another website gets 401. See [Security](#security) for how the page is told apart, and for `TRUSTED_AUTH_HEADER` behind a proxy.
+How to use it, and every endpoint: [docs/api.md](docs/api.md).
 
 ## MCP (for AI agents)
 
-Spending Tracker is also an [MCP](https://modelcontextprotocol.io) server, so an agent can work with your books directly: "what did I spend on dining out last month?", "work through my review queue", "add these receipts". It goes through the API with the agent's own key, so the key's access applies, and everything it changes shows up in **Activity** under the key's name.
+Spending Tracker is also an [MCP](https://modelcontextprotocol.io) server, so an AI agent can answer questions about your spending, work through your review queue or add receipts. Agents connect at `/mcp` (or over stdio) with their own API key, and what they change shows up in **Activity** under the key's name.
 
-1. Create a key in **App settings → API keys** (*Read only* for questions, *Read and write* to change things), limited to one ledger if you like.
-2. Connect the agent.
-
-**Over HTTP** (simplest, nothing to install). The endpoint is `/mcp` on the app's server, and it always needs a key:
-
-```bash
-claude mcp add --transport http spending http://localhost:8787/mcp --header "Authorization: Bearer st_…"
-```
-
-```ts
-// Claude Agent SDK
-mcpServers: {
-  spending: { type: 'http', url: 'http://localhost:8787/mcp', headers: { Authorization: `Bearer ${process.env.ST_API_KEY}` } },
-}
-```
-
-**Over stdio**, for agents that start their tools as processes. Build it once with `pnpm build` (or `pnpm --filter @st/mcp build`), then point the agent at the bundled file. It needs a key too:
-
-```json
-{
-  "mcpServers": {
-    "spending": {
-      "command": "node",
-      "args": ["/path/to/spending-tracker/apps/mcp/dist/stdio.js"],
-      "env": { "ST_API_URL": "http://localhost:8787", "ST_API_KEY": "st_…" }
-    }
-  }
-}
-```
-
-**What agents get**
-- **Tools** (an agent only sees the ones its key allows): `list_ledgers`, `get_month_summary`, `get_net_worth`, `search_transactions`, `get_transaction`, `list_review_queue`, `list_accounts`, `list_categories`, `list_tags`, `list_recurring`, `upcoming_payments`, `recurring_payment_candidates`, `spending_by_category`, `spending_trend`, `top_payees`, `income_vs_spending`, `list_custom_reports`, `get_report` (read). `add_transactions`, `update_transaction`, `link_transactions`, `set_categories`, `accept_suggestions`, `set_payee_choice`, `delete_transactions`, `create_account`, `update_account`, `rename_institution`, `record_balance`, `create_category`, `update_category`, `merge_category`, `label_categories`, `rename_tag`, `confirm_recurring`, `dismiss_recurring`, `create_recurring`, `add_recurring_payment`, `save_custom_report`, `delete_custom_report`, `import_transactions`, `sync_banks` (write). `create_ledger`, `archive_ledger` (full access).
-- Tools take accounts and categories by name, amounts in dollars, and an optional `ledger`. Results include both a readable summary and structured data. Bulk tools accept `dryRun`, and `add_transactions` uses `externalId` so retries never add duplicates.
-- **Resources:** `ledger://{ledger}/categories` and `ledger://{ledger}/accounts`. **Prompts:** *Monthly review* and *Work through the review queue*.
-- Erasing or restoring data, deleting a ledger and managing API keys are deliberately left out: those stay in the app.
+How to connect an agent, and every tool: [docs/mcp.md](docs/mcp.md).
 
 ## Scripts
 
@@ -265,6 +221,7 @@ mcpServers: {
 | `pnpm test` | Vitest: shared utilities, the server (services, API, security, scopes, idempotency, AI fallback) and MCP (with a real MCP client) |
 | `pnpm typecheck` | `tsc` for shared, MCP and server, `vue-tsc` for web |
 | `pnpm seed:demo [--force] [--ledger <slug>]` | Load sample data into the default (or named) ledger of `DATA_DIR`. It refuses a ledger that has data (accounts, transactions, recurring items, reports or tags) unless you pass `--force`, which first saves that ledger in `backups/` and then replaces all of those. Use a separate `DATA_DIR` for it (see [CONTRIBUTING.md](CONTRIBUTING.md)) |
+| `pnpm docs:reference` | Update the endpoint list in [docs/api.md](docs/api.md) and the tool list in [docs/mcp.md](docs/mcp.md) from the code. A test fails when they're out of date |
 | `pnpm db:generate` | Create migrations after editing `apps/server/src/db/schema.ts` (ledgers) or `meta-schema.ts` (app-wide). Each folder starts from `0000_baseline.sql`: the earlier migrations squashed into one. A database from before the squash that missed some of them can't be upgraded, so the app refuses it |
 
 ## Project layout
@@ -276,6 +233,7 @@ apps/
   mcp/      MCP server (tools, resources, prompts) over the API, served at /mcp and as a stdio bundle
 packages/
   shared/   Zod schemas for requests and responses (and the types from them), money/date utils, payee normalizer, CSV parsing
+docs/       api.md and mcp.md: using the API and connecting agents, with every endpoint and tool
 data/       meta.db, ledgers/<id>.db (one SQLite file per ledger), backups/ and secret.key (git-ignored)
 Dockerfile, compose.yaml   the Docker image and how to run it
 ```
