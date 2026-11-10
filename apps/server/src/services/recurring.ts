@@ -765,7 +765,16 @@ function settleInstalments(ctx: AppContext, id: number, reopen = false) {
   else if (reopen && paid < row.total && row.status === 'ended') ctx.sqlite.prepare("UPDATE recurring_items SET status = 'active' WHERE id = ?").run(id)
 }
 
+/** The account and category an item is given exist (an archived one is fine: it's the item's already). */
+function checkReferences(ctx: AppContext, input: { accountId?: number | null; categoryId?: number | null }) {
+  if (input.accountId != null && !ctx.sqlite.prepare('SELECT 1 FROM accounts WHERE id = ?').get(input.accountId)) badRequest('That account does not exist')
+  if (input.categoryId != null && !ctx.sqlite.prepare('SELECT 1 FROM categories WHERE id = ?').get(input.categoryId)) {
+    badRequest('That category does not exist')
+  }
+}
+
 export function createRecurring(ctx: AppContext, input: CreateInput): RecurringItem {
+  checkReferences(ctx, input)
   const payeeKey = payeeKeyOf(ctx, input.payee)
   const id = Number(
     ctx.sqlite
@@ -799,6 +808,7 @@ export function createRecurring(ctx: AppContext, input: CreateInput): RecurringI
 
 export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput): RecurringItem {
   const before = getRecurring(ctx, id)
+  checkReferences(ctx, input)
   const cols: Record<string, string> = {
     name: 'title',
     payee: 'name',

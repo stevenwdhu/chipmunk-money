@@ -692,6 +692,15 @@ describe('payments added at their own amount', () => {
     expect(addPayment(ctx, item.id, down.id)).toMatchObject({ paidPayments: 4, remainingPayments: 1 })
   })
 
+  it('refuses an account or category that doesn’t exist, instead of failing', () => {
+    const ctx = testContext()
+    const bill = { payee: 'Hydro', expectedAmountMinor: -8000, cadence: 'monthly', anchorDate: '2026-10-01' }
+    expect(() => createRecurring(ctx, recurringCreateSchema.parse({ ...bill, accountId: 99_999 }))).toThrow('That account does not exist')
+    expect(() => createRecurring(ctx, recurringCreateSchema.parse({ ...bill, categoryId: 99_999 }))).toThrow('That category does not exist')
+    const item = createRecurring(ctx, recurringCreateSchema.parse(bill))
+    expect(() => updateRecurring(ctx, item.id, { categoryId: 99_999 })).toThrow('That category does not exist')
+  })
+
   it('adds only a payment from its account, the same way, to an item you track', async () => {
     const { ctx, item } = await plan(testContext())
     const other = makeAccount(ctx, 'Chequing', 'chequing')
