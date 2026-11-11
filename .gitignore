@@ -19,4 +19,4 @@ playwright-report/
 .vite/
 .demo-data/
 .preview-data/
-.claude/worktrees/
+.claude/
