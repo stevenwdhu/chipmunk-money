@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
-import type { SQLite } from '../db/client'
+import { APPLICATION_ID, type SQLite } from '../db/client'
 import { TABLES } from '../db/tables'
 import { env } from '../env'
 
@@ -10,12 +10,20 @@ import { env } from '../env'
  * SQL so the schema's views and triggers are what's tested.
  */
 
-/** A migrated in-memory database without the write guards: the file's schema and nothing else. */
-export function bareDatabase(): SQLite {
-  const sqlite = new Database(':memory:')
+/**
+ * A migrated database without the write guards: the file's schema and nothing else. In memory
+ * unless a file is given, and with another migrations folder only for the migration tests.
+ */
+export function bareDatabase(opts: { file?: string; migrations?: string } = {}): SQLite {
+  const sqlite = new Database(opts.file ?? ':memory:')
+  // As openDatabase makes a new file, so openDatabase takes it.
+  if (opts.file) {
+    sqlite.pragma('auto_vacuum = INCREMENTAL')
+    sqlite.pragma(`application_id = ${APPLICATION_ID}`)
+  }
   sqlite.pragma('foreign_keys = ON')
   sqlite.pragma('recursive_triggers = ON')
-  migrate(drizzle(sqlite), { migrationsFolder: env.migrations })
+  migrate(drizzle(sqlite), { migrationsFolder: opts.migrations ?? env.migrations })
   return sqlite
 }
 
@@ -61,6 +69,9 @@ export interface LedgerRows {
  * One of everything for a ledger on the shared list: accounts, a refund linked to its purchase, a
  * transfer pair, a recurring item with its child rows, tags, rules, activity and settings.
  * `category` and `offCategory` are shared categories (the second one turned off).
+ *
+ * It writes only the baseline's columns: migrations.test.ts fills a database that ran the baseline
+ * alone with it, then upgrades it.
  */
 export function fillLedger(write: Writer, opts: { category: number; offCategory: number }): LedgerRows {
   const institution = write("INSERT INTO institutions (ledger_id, name) VALUES (@ledger, 'Bank')")

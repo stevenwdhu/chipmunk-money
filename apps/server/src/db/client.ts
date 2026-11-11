@@ -29,9 +29,10 @@ export type SQLite = Database.Database
 
 /**
  * Opens (and migrates) chipmunk.db, or an in-memory database when `file` is null (tests). The
- * connection has the write guards (scope.ts) once it's migrated.
+ * connection has the write guards (scope.ts) once it's migrated. `migrations` is another folder
+ * only in tests.
  */
-export function openDatabase(file: string | null): { sqlite: SQLite; db: DB } {
+export function openDatabase(file: string | null, migrations = env.migrations): { sqlite: SQLite; db: DB } {
   if (file) mkdirSync(path.dirname(file), { recursive: true, mode: PRIVATE_DIR })
   const existed = !!file && existsSync(file)
   const sqlite = new Database(file ?? ':memory:')
@@ -46,6 +47,9 @@ export function openDatabase(file: string | null): { sqlite: SQLite; db: DB } {
       sqlite.pragma(`application_id = ${APPLICATION_ID}`)
     } else if (sqlite.pragma('application_id', { simple: true }) !== APPLICATION_ID) {
       throw new Error(`${file} isn't a Chipmunk database.`)
+    } else {
+      // Before anything writes to the file, WAL mode included.
+      checkUpgradable(sqlite, file ?? ':memory:', migrations)
     }
     if (file) sqlite.pragma('journal_mode = WAL')
     sqlite.pragma('foreign_keys = ON')
@@ -57,9 +61,14 @@ export function openDatabase(file: string | null): { sqlite: SQLite; db: DB } {
     sqlite.pragma('synchronous = NORMAL')
     sqlite.pragma('journal_size_limit = 67108864')
     sqlite.pragma('cache_size = -20000')
-    checkUpgradable(sqlite, file ?? ':memory:')
-    if (hasPendingMigrations(sqlite)) snapshotDb(sqlite, 'pre-migrate')
-    migrate(drizzle(sqlite), { migrationsFolder: env.migrations })
+    if (hasPendingMigrations(sqlite, migrations)) snapshotDb(sqlite, 'pre-migrate')
+    // drizzle splits each file at "--> statement-breakpoint" and runs each piece as one statement
+    // (better-sqlite3 refuses a piece with two). It runs every pending migration in one
+    // transaction with foreign keys on, where PRAGMA foreign_keys = OFF does nothing: rebuilding a
+    // table cascade-deletes its children. Pending means made after the newest one the database ran,
+    // by the journal's time. Hashes aren't compared, so an edited migration never runs again. The
+    // rules for migrations after the baseline are checked in static.test.ts and migrations.test.ts.
+    migrate(drizzle(sqlite), { migrationsFolder: migrations })
     installWriteGuards(sqlite)
   } catch (err) {
     sqlite.close()
@@ -97,16 +106,26 @@ export function isTooOld(sqlite: Database.Database, folder = env.migrations): bo
   return last !== null && last < shippedMigrations(folder).first
 }
 
-function checkUpgradable(sqlite: Database.Database, file: string) {
-  if (isTooOld(sqlite)) throw new Error(`${file} is from an older version of Chipmunk that this one can't upgrade.`)
+/**
+ * A database that ran a migration made after the newest this version ships (a newer version
+ * opened it) can't be opened: drizzle would run nothing, and this code doesn't know its schema.
+ */
+export function isTooNew(sqlite: Database.Database, folder = env.migrations): boolean {
+  const last = lastAppliedMigration(sqlite)
+  return last !== null && last > shippedMigrations(folder).last
 }
 
-function hasPendingMigrations(sqlite: Database.Database): boolean {
+function checkUpgradable(sqlite: Database.Database, file: string, folder: string) {
+  if (isTooOld(sqlite, folder)) throw new Error(`${file} is from an older version of Chipmunk that this one can't upgrade.`)
+  if (isTooNew(sqlite, folder)) throw new Error(`${file} is from a newer version of Chipmunk than this one. Update the app to open it.`)
+}
+
+function hasPendingMigrations(sqlite: Database.Database, folder: string): boolean {
   // A brand-new database has nothing worth backing up.
   const last = lastAppliedMigration(sqlite)
   if (sqlite.memory || last === null) return false
   try {
-    return last < shippedMigrations().last
+    return last < shippedMigrations(folder).last
   } catch {
     return false
   }

@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { TABLES } from './db/tables'
+import { env } from './env'
 import { bareDatabase } from './test/world'
 
 /**
@@ -116,5 +117,163 @@ describe('the schema', () => {
       }
     }
     expect(problems).toEqual([])
+  })
+})
+
+/**
+ * SQL as its statements, each with its comments gone, quoted text and names as '' and x, and its
+ * whitespace as one space. A trigger's body (BEGIN ... END, CASE ... END inside) is part of its
+ * statement.
+ */
+export function sqlStatements(sql: string): string[] {
+  let code = ''
+  for (let i = 0; i < sql.length; ) {
+    const two = sql.slice(i, i + 2)
+    if (two === '--' || two === '/*') {
+      const end = two === '--' ? sql.indexOf('\n', i) : sql.indexOf('*/', i + 2) + 2
+      i = end <= 1 || end === -1 ? sql.length : end
+      code += ' '
+      continue
+    }
+    const close = { "'": "'", '"': '"', '`': '`', '[': ']' }[sql[i]!]
+    if (!close) {
+      code += sql[i++]
+      continue
+    }
+    // To the closing quote: a doubled one is a quote inside.
+    let j = i + 1
+    while (j < sql.length && (sql[j] !== close || (close !== ']' && sql[j + 1] === close && ++j))) j++
+    code += sql[i] === "'" ? " '' " : ' x '
+    i = j + 1
+  }
+  const statements: string[] = []
+  const push = (text: string) => {
+    const statement = text.replace(/\s+/g, ' ').trim()
+    if (statement) statements.push(statement)
+  }
+  let start = 0
+  let words: string[] = []
+  let depth = 0
+  for (const m of code.matchAll(/[A-Za-z_][\w$]*|;/g)) {
+    const token = m[0].toUpperCase()
+    if (token === ';') {
+      if (depth > 0) continue
+      push(code.slice(start, m.index))
+      start = m.index + 1
+      words = []
+      continue
+    }
+    words.push(token)
+    const trigger = words[0] === 'CREATE' && words.slice(1, 3).includes('TRIGGER')
+    if (trigger && token === 'BEGIN') depth++
+    else if (depth > 0 && token === 'CASE') depth++
+    else if (depth > 0 && token === 'END') depth--
+  }
+  push(code.slice(start))
+  return statements
+}
+
+/**
+ * What a migration after the baseline may do. drizzle runs it with foreign keys on, so dropping a
+ * table (as a rebuild does) cascade-deletes the rows under it, and the real data must come
+ * through every migration whole. So: new tables, new columns, new indexes, and views and triggers
+ * dropped and made again. Nothing that changes or removes rows, tables or columns.
+ */
+const MIGRATION_STATEMENTS: readonly RegExp[] = [
+  /^CREATE TABLE (IF NOT EXISTS )?\S+ ?\(/i,
+  /^ALTER TABLE \S+ ADD (COLUMN )?/i,
+  /^CREATE (UNIQUE )?INDEX /i,
+  /^(CREATE|DROP) (VIEW|TRIGGER) /i,
+]
+
+/**
+ * How a migration breaks the rules, one line each: a piece (between statement-breakpoint markers)
+ * without exactly one statement, since drizzle runs each piece as one, or a statement of a kind
+ * MIGRATION_STATEMENTS doesn't allow. `rules: false` checks the pieces only (the baseline).
+ */
+export function migrationProblems(sql: string, opts: { rules?: boolean } = {}): string[] {
+  return sql.split('--> statement-breakpoint').flatMap((piece, i) => {
+    const statements = sqlStatements(piece)
+    if (statements.length !== 1) return [`piece ${i + 1} holds ${statements.length} statements`]
+    if (opts.rules === false || MIGRATION_STATEMENTS.some((r) => r.test(statements[0]!))) return []
+    // Its first line of SQL, as written.
+    const line = piece.split('\n').find((l) => l.trim() && !l.trim().startsWith('--'))!
+    return [`piece ${i + 1}: ${line.trim().slice(0, 60)}`]
+  })
+}
+
+describe('the migrations', () => {
+  const journal = JSON.parse(readFileSync(path.join(env.migrations, 'meta/_journal.json'), 'utf8')) as { entries: Array<{ idx: number; when: number; tag: string }> }
+
+  it('are all in the journal, in order, each made after the one before', () => {
+    const files = readdirSync(env.migrations).filter((f) => f.endsWith('.sql'))
+    expect(files.sort()).toEqual(journal.entries.map((e) => `${e.tag}.sql`).sort())
+    // drizzle runs those made after the newest one a database ran: an older time would never run.
+    journal.entries.forEach((e, i) => {
+      expect(e.idx, e.tag).toBe(i)
+      if (i > 0) expect(e.when, e.tag).toBeGreaterThan(journal.entries[i - 1]!.when)
+    })
+  })
+
+  it('hold one statement per piece, and after the baseline only what MIGRATION_STATEMENTS allows', () => {
+    const problems = journal.entries.flatMap((e, i) =>
+      migrationProblems(readFileSync(path.join(env.migrations, `${e.tag}.sql`), 'utf8'), { rules: i > 0 }).map((p) => `${e.tag}: ${p}`),
+    )
+    expect(problems).toEqual([])
+  })
+
+  it('finds a piece with two statements or none, and each kind of statement not allowed', () => {
+    const pieces = (...sql: string[]) => sql.join('\n--> statement-breakpoint\n')
+    // As drizzle-kit writes a column change: the table rebuilt.
+    const rebuild = pieces(
+      'PRAGMA foreign_keys=OFF;',
+      'CREATE TABLE `__new_accounts` (\n\t`id` integer PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL\n);',
+      'INSERT INTO `__new_accounts`("id", "name") SELECT "id", "name" FROM `accounts`;',
+      'DROP TABLE `accounts`;',
+      'ALTER TABLE `__new_accounts` RENAME TO `accounts`;',
+      'PRAGMA foreign_keys=ON;',
+    )
+    expect(migrationProblems(rebuild)).toEqual([
+      'piece 1: PRAGMA foreign_keys=OFF;',
+      expect.stringMatching(/^piece 3: INSERT INTO `__new_accounts`/),
+      'piece 4: DROP TABLE `accounts`;',
+      'piece 5: ALTER TABLE `__new_accounts` RENAME TO `accounts`;',
+      'piece 6: PRAGMA foreign_keys=ON;',
+    ])
+    expect(migrationProblems('CREATE INDEX `a` ON `t` (`x`);\nCREATE INDEX `b` ON `t` (`y`);')).toEqual(['piece 1 holds 2 statements'])
+    expect(migrationProblems(pieces('CREATE INDEX `a` ON `t` (`x`);', '-- nothing left; it moved'))).toEqual(['piece 2 holds 0 statements'])
+    for (const sql of [
+      "UPDATE `accounts` SET `name` = 'x';",
+      'DELETE FROM `tags`;',
+      'ALTER TABLE `accounts` DROP COLUMN `notes`;',
+      'ALTER TABLE `accounts` RENAME COLUMN `notes` TO `memo`;',
+      'DROP INDEX `tx_account_date`;',
+      'CREATE TABLE `copy` AS SELECT * FROM `accounts`;',
+      'CREATE TEMP TRIGGER `t` BEFORE INSERT ON `tags` BEGIN SELECT 1; END;',
+      'REPLACE INTO `tags` SELECT * FROM `tags`;',
+    ]) {
+      expect(migrationProblems(sql), sql).toHaveLength(1)
+    }
+  })
+
+  it('lets each allowed kind through, triggers with their bodies as one statement', () => {
+    const allowed = [
+      'CREATE TABLE `account_ledgers` (\n\t`ledger_id` text NOT NULL,\n\tPRIMARY KEY(`ledger_id`, `account_id`)\n);\n',
+      'ALTER TABLE `accounts` ADD `opening_ledger_id` text REFERENCES ledgers(id);',
+      'ALTER TABLE `transactions` ADD COLUMN `removed_at` text;',
+      'CREATE INDEX `accounts_opening_ledger` ON `accounts` (`opening_ledger_id`);',
+      'CREATE UNIQUE INDEX `tx_split` ON `transactions` (`split_of`,`ledger_id`) WHERE "transactions"."split_of" is not null;',
+      'DROP VIEW `ledger_accounts`;',
+      '-- Home rows and member rows; one view.\nCREATE VIEW `ledger_accounts` AS SELECT a.`id`, \'a;b\' AS `x` FROM `accounts` a;',
+      'DROP TRIGGER IF EXISTS `keep_ledger_transactions`;',
+      `CREATE TRIGGER \`guard\` BEFORE UPDATE ON \`transactions\`
+WHEN NEW.\`ledger_id\` IS NOT OLD.\`ledger_id\`
+BEGIN
+  SELECT CASE WHEN 1 THEN RAISE(ABORT, 'it''s refused; END') END;
+  /* a second statement in the body; */ UPDATE \`tags\` SET \`name\` = \`name\` WHERE 0;
+END;`,
+    ]
+    for (const sql of allowed) expect(migrationProblems(sql), sql).toEqual([])
+    expect(sqlStatements(allowed[allowed.length - 1]!)).toHaveLength(1)
   })
 })
