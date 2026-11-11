@@ -2,7 +2,7 @@
 
 What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
 
-## 0.2.1 (2026-11-10)
+## v0.2.1 (2026-11-10)
 
 ### Added
 
@@ -12,7 +12,7 @@ What changed in each release of Spending Tracker. Versions follow [Semantic Vers
 
 - Review on the Overview opens every transaction to review, not just this month's, as many as the banner counts.
 
-## 0.2.0 (2026-11-10)
+## v0.2.0 (2026-11-10)
 
 ### Added
 
@@ -33,7 +33,7 @@ What changed in each release of Spending Tracker. Versions follow [Semantic Vers
 - The Scan no longer suggests a coffee you buy at one price most weekdays as a weekly, biweekly or semi-monthly payment.
 - Creating a recurring item with an account or category that doesn't exist is a clear error, not a server error.
 
-## 0.1.0 (2026-11-09)
+## v0.1.0 (2026-11-09)
 
 The first release: the first Docker image. Everything the [README](README.md) described then, including:
 

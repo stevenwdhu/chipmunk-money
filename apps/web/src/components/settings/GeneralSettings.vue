@@ -151,12 +151,12 @@ const themes = [
       <CardHeader>
         <CardTitle>About</CardTitle>
         <CardDescription>
-          Spending Tracker <span class="tabular font-medium text-foreground">{{ version }}</span><template v-if="dev">, in development</template>
+          Spending Tracker <span class="tabular font-medium text-foreground">v{{ version }}</span><template v-if="dev">, in development</template>
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-2">
         <Button as-child variant="outline" size="sm">
-          <a :href="releaseUrl" target="_blank" rel="noopener"><ExternalLink />What’s new in {{ version }}</a>
+          <a :href="releaseUrl" target="_blank" rel="noopener"><ExternalLink />What’s new in v{{ version }}</a>
         </Button>
         <Button as-child variant="outline" size="sm">
           <a href="https://github.com/stevenwdhu/spending-tracker/releases" target="_blank" rel="noopener"><ExternalLink />All releases</a>
