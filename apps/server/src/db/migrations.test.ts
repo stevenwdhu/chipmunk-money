@@ -30,7 +30,7 @@ describe('openDatabase', () => {
 
     // Opening it again runs nothing new.
     const again = openDatabase(file).sqlite
-    expect(again.prepare('SELECT count(*) FROM __drizzle_migrations').pluck().get()).toBe(1)
+    expect(again.prepare('SELECT count(*) FROM __drizzle_migrations').pluck().get()).toBe(shippedJournal.entries.length)
     again.close()
   })
 

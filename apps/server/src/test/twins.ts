@@ -240,7 +240,7 @@ export function ledgerHash(storage: Storage, ledgerId: string): Record<string, s
       .select()
       .from(bankAccounts)
       .all()
-      .filter((r) => r.accountId !== null && ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', r.accountId)),
+      .filter((r) => r.accountId !== null && ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND home_ledger_id = @ledger AND id = ?', r.accountId)),
   )
   if (TABLES.some((t) => !(t.name in out) && t.kind !== 'app')) throw new Error('ledgerHash missed a table')
   return out

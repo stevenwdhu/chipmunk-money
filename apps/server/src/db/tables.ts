@@ -29,6 +29,9 @@ export const TABLES: readonly TableDef[] = [
   { name: 'payee_tidy', kind: 'app' },
   { name: 'institutions', kind: 'ledger' },
   { name: 'accounts', kind: 'ledger' },
+  // An account's other ledgers. Right after accounts, so deleting a ledger's rows reaches its member
+  // rows after its transactions and recurring items (the member row can't go while they're there).
+  { name: 'account_ledgers', kind: 'ledger' },
   { name: 'bank_accounts', kind: 'app' },
   { name: 'bank_transactions', kind: 'app' },
   { name: 'category_groups', kind: 'catalog' },
@@ -90,14 +93,8 @@ export const TABLES: readonly TableDef[] = [
     ],
   },
   { name: 'balance_snapshots', kind: 'child', parents: [{ column: 'account_id', table: 'accounts' }] },
-  {
-    name: 'bank_payloads',
-    kind: 'child',
-    parents: [
-      { column: 'account_id', table: 'accounts' },
-      { column: 'transaction_id', table: 'transactions' },
-    ],
-  },
+  // What the bank sent for an account: in the account's home ledger, whichever ledger holds the transaction.
+  { name: 'bank_payloads', kind: 'child', parents: [{ column: 'account_id', table: 'accounts' }] },
   { name: 'custom_reports', kind: 'ledger' },
   { name: 'payee_rules', kind: 'ledger' },
   { name: 'payee_category_stats', kind: 'ledger' },

@@ -57,7 +57,10 @@ describe('deleteLedgerRows', () => {
     const shared = storage.sqlite.prepare('SELECT id FROM categories WHERE ledger_id IS NULL ORDER BY id LIMIT 2').pluck().all() as number[]
     const opts = { category: shared[0]!, offCategory: shared[1]! }
     const rowsA = fillLedger(writer(a), opts)
-    fillLedger(writer(b), opts)
+    const rowsB = fillLedger(writer(b), opts)
+    // B's card is shared with A, with a bank of A's own.
+    const institution = writer(a)("INSERT INTO institutions (ledger_id, name) VALUES (@ledger, 'Family bank')")
+    writer(a)('INSERT INTO account_ledgers (ledger_id, account_id, institution_id) VALUES (@ledger, @account, @institution)', { account: rowsB.account, institution })
     // A bank account linked to one of A's accounts.
     storage.sqlite.prepare("INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c', 'simplefin', 'SimpleFIN', 's')").run()
     storage.sqlite

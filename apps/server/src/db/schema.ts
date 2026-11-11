@@ -13,7 +13,7 @@ import type { AccountType, ApiScope, BankProviderKind, Cadence, CategorySource, 
  * it's in.
  *
  * The views and triggers aren't here (drizzle-kit doesn't make them): they're written by hand at the
- * end of drizzle/0000_baseline.sql.
+ * end of drizzle/0000_baseline.sql, and dropped and made again by later migrations as they change.
  */
 
 const now = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
@@ -333,12 +333,15 @@ export const institutions = sqliteTable(
   (t) => [index('institutions_ledger').on(t.ledgerId)],
 )
 
-/** Read through the ledger_accounts view, which is what lets one account be in several ledgers later. */
+/**
+ * Read through the ledger_accounts view, which gives each account to its home ledger (ledger_id)
+ * and to every ledger it's shared with (account_ledgers).
+ */
 export const accounts = sqliteTable(
   'accounts',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    /** The ledger it's in. */
+    /** Its home ledger: where new rows from sync and CSV land, and where its settings are changed. */
     ledgerId: ledgerId(),
     name: text('name').notNull(),
     type: text('type').$type<AccountType>().notNull(),
@@ -354,8 +357,43 @@ export const accounts = sqliteTable(
     externalId: text('external_id'),
     importMapping: text('import_mapping', { mode: 'json' }).$type<ColumnMapping>(),
     ...timestamps,
+    /**
+     * The ledger whose part carries the opening balance and the recorded balances: null for the
+     * home, otherwise a ledger it's shared with (after the home changed).
+     */
+    openingLedgerId: text('opening_ledger_id').references(() => ledgers.id),
+    /**
+     * On an account made when a ledger stopped sharing an account and kept its rows: the shared
+     * account it came from. No foreign key, so deleting that account later leaves this one be.
+     */
+    splitFromId: integer('split_from_id'),
   },
-  (t) => [index('accounts_ledger').on(t.ledgerId), index('accounts_institution').on(t.institutionId)],
+  (t) => [index('accounts_ledger').on(t.ledgerId), index('accounts_institution').on(t.institutionId), index('accounts_opening_ledger').on(t.openingLedgerId)],
+)
+
+/**
+ * The other ledgers an account is shared with, one row each (its home's is the accounts row): this
+ * ledger's institution, sort order and archive for it. The account's own facts stay on accounts.
+ */
+export const accountLedgers = sqliteTable(
+  'account_ledgers',
+  {
+    ledgerId: ledgerId(),
+    accountId: integer('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    institutionId: integer('institution_id')
+      .notNull()
+      .references(() => institutions.id),
+    sort: integer('sort').notNull().default(0),
+    archivedAt: text('archived_at'),
+    createdAt: timestamps.createdAt,
+  },
+  (t) => [
+    primaryKey({ columns: [t.ledgerId, t.accountId] }),
+    index('account_ledgers_account').on(t.accountId),
+    index('account_ledgers_institution').on(t.institutionId),
+  ],
 )
 
 export const balanceSnapshots = sqliteTable(

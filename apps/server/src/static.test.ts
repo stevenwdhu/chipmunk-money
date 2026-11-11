@@ -74,7 +74,7 @@ describe('the source', () => {
  */
 const NOT_LEDGER_LED: Record<string, string> = {
   tx_external_id: "A bank's transaction id is unique within the account it came to, whatever the ledger.",
-  tx_account_date: "An account's register and balance, by account (an account is in one ledger).",
+  tx_account_date: "An account's register and balance, by account: a shared account's rows are in several ledgers, and reads across them find them by account.",
   labels_shared_name: "The shared list's label names are unique among the shared rows (ledger_id is null).",
 }
 
