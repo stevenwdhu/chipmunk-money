@@ -89,7 +89,7 @@ Everything is in one SQLite database, `chipmunk.db` in the data directory, with 
 - **Restoring is done by hand,** and puts every ledger back to the copy. **Restore from backup** in Ledger settings → Data, and the welcome screen's **Restore a backup**, show these steps:
   1. Stop the server.
   2. In the data directory (where `chipmunk.db` and `secret.key` are), delete `chipmunk.db-wal` and `chipmunk.db-shm` if they're there.
-  3. Replace `chipmunk.db` with the one from the full backup zip, or with a whole-database copy from `backups/` renamed to `chipmunk.db`. Those are the `pre-migrate-…` copies, and the `pre-delete-…`, `pre-erase-…` and `pre-seed-demo-…` copies made by v0.3.0 or later. `deleted-…` and `pre-restore-…` files, and any copy made before updating to v0.3.0, hold one ledger and can't be used this way.
+  3. Replace `chipmunk.db` with the one from the full backup zip, or with a whole-database copy from `backups/` renamed to `chipmunk.db`. Those are the `pre-migrate-…`, `pre-delete-…`, `pre-erase-…` and `pre-seed-demo-…` copies made by v0.3.0 or later. `deleted-…` and `pre-restore-…` files, and any copy made before updating to v0.3.0, hold one ledger and can't be used this way.
   4. Start the server.
 
   To move machines, do the same in the new data directory and copy `secret.key` over from the old one.
