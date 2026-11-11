@@ -467,6 +467,7 @@ export class BankService {
   linkAccount(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }) {
     const acct = this.bankAccount(input.bankAccountId)
     if (!acct) notFound('Bank account not found')
+    accounts.requireHome(ctx, accountId, 'bank')
     const target = accounts.getAccount(ctx, accountId)
     if (acct.ledgerId && (acct.ledgerId !== ctx.ledger.id || acct.accountId !== target.id)) {
       const other = acct.ledgerId === ctx.ledger.id ? accounts.getAccount(ctx, acct.accountId!).name : 'an account in another ledger'
@@ -500,6 +501,7 @@ export class BankService {
    * connection's next sync brings them, and this returns null.
    */
   fill(ctx: AppContext, accountId: number): { added: number; adopted: number } | null {
+    accounts.requireHome(ctx, accountId, 'bank')
     const acct = this.linkedTo(ctx.ledger.id, accountId)
     if (!acct?.fetchedAt || acct.lastSyncedAt) return null
     const provider = this.row(acct.connectionId).provider
@@ -579,6 +581,7 @@ export class BankService {
    * connections involved don't sync on their own (until `endReview`, or 15 minutes on).
    */
   previewSwitch(ctx: AppContext, accountId: number, input: { bankAccountId: string; from?: string | null }): LinkPreview {
+    accounts.requireHome(ctx, accountId, 'bank')
     const target = accounts.getAccount(ctx, accountId)
     const acct = this.switchTarget(ctx, target.id, input.bankAccountId)
     const provider = this.row(acct.connectionId).provider
@@ -627,6 +630,7 @@ export class BankService {
    * (a sync, an edit), nothing changes: review it again. The next sync carries on from there.
    */
   switchAccount(ctx: AppContext, accountId: number, input: z.output<typeof accountBankSwitchSchema>): SwitchResult & { bankAccount: BankAccount } {
+    accounts.requireHome(ctx, accountId, 'bank')
     const target = accounts.getAccount(ctx, accountId)
     const acct = this.switchTarget(ctx, target.id, input.bankAccountId)
     if (input.version !== this.switchVersion(ctx, target.id, acct)) {
@@ -717,8 +721,8 @@ export class BankService {
 
   /** Switches a ledger account back to manual. Its transactions stay; they just stop updating. */
   unlinkAccount(ctx: AppContext, accountId: number) {
-    // Another ledger's account is not found here, as a missing one is.
-    accounts.getAccount(ctx, accountId)
+    // Another ledger's account is not found here, as a missing one is. A shared one is unlinked in its home.
+    accounts.requireHome(ctx, accountId, 'bank')
     const linked = this.linkedTo(ctx.ledger.id, accountId)
     if (!linked) throw new HTTPException(409, { message: 'This account isn’t synced.' })
     this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, linked.id)).run()
@@ -944,13 +948,16 @@ export class BankService {
    * adds up to what the bank shows.
    */
   private alignWithBank(ctx: AppContext, accountId: number, remote: Pick<RemoteAccount, 'balanceMinor' | 'balanceDate'>) {
-    const current = accounts.getAccount(ctx, accountId)
-    const gap = remote.balanceMinor - current.balanceMinor
+    // The bank's balance is the account's total: for a shared account, every ledger's part of it.
+    // So the total, the opening balance and the latest recorded balance are the account's own, not
+    // this ledger's part (a difference then lands in the opening ledger's part).
+    const facts = ctx.accountWide.account(accountId)!
+    const gap = remote.balanceMinor - accounts.currentParts(ctx, accountId).totalMinor
     if (!gap) return
-    if (accountTypeInfo(current.type).revalued || current.balanceAsOf) {
+    if (accountTypeInfo(facts.type).revalued || facts.recorded) {
       accounts.setBalance(ctx, accountId, { date: this.localDate(remote.balanceDate), balanceMinor: remote.balanceMinor }, 'sync')
     } else {
-      accounts.updateAccount(ctx, accountId, { openingBalanceMinor: current.openingBalanceMinor + gap })
+      accounts.updateAccount(ctx, accountId, { openingBalanceMinor: facts.openingBalanceMinor + gap })
     }
   }
 

@@ -98,7 +98,6 @@ import {
   transactionUpdateSchema,
   trendReportSchema,
   upcomingPaymentSchema,
-  type Account,
   type AiUsage,
   type CustomReport,
   type Transaction,
@@ -187,14 +186,6 @@ function requireOwnBankAccount(c: C, bank: BankService, bankAccountId: string) {
 /** A ledger that uses the shared category list changes it in App settings, not here. */
 function ownList(c: C) {
   requireOwnList(c.var.ctx)
-}
-
-/** A synced account's balance is the bank's: only a manual account's can be set by hand. */
-function requireManualBalance(a: Account) {
-  if (!a.bank) return
-  throw new HTTPException(409, {
-    message: `${a.name} syncs from ${a.bank.institution ?? 'your bank'}, so its balance is the bank’s. Switch it to manual to set the balance yourself.`,
-  })
 }
 
 /** Logs an update with only the fields that changed (nothing when nothing did). */
@@ -707,7 +698,10 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     { ...acc, scope: 'write', summary: 'Update an account', description: 'Set `archived` to hide it from lists while keeping its history.', body: accountUpdateSchema, response: accountSchema },
     (c, { params, body }) => {
       const before = accounts.getAccount(c.var.ctx, params.id)
-      if (body.openingBalanceMinor !== undefined && body.openingBalanceMinor !== before.openingBalanceMinor) requireManualBalance(before)
+      // The account's own opening balance (a shared account's other ledgers show none of it).
+      if (body.openingBalanceMinor !== undefined && body.openingBalanceMinor !== c.var.ctx.accountWide.account(params.id)?.openingBalanceMinor) {
+        accounts.requireManualBalance(c.var.ctx, params.id)
+      }
       const { institutionId, institution, ...rest } = body
       const placed = institutionId !== undefined || institution !== undefined ? institutions.resolveInstitution(c.var.ctx, { institutionId, institution }) : null
       if (placed) logNewInstitution(c, placed)
@@ -744,7 +738,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       response: accountSchema,
     },
     (c, { params, body }) => {
-      requireManualBalance(accounts.getAccount(c.var.ctx, params.id))
+      accounts.requireManualBalance(c.var.ctx, params.id)
       const a = accounts.setBalance(c.var.ctx, params.id, body)
       log(c, { action: 'record_balance', entity: 'account', entityId: a.id, summary: `Recorded ${a.name}’s balance as ${formatMoney(body.balanceMinor, a.currency)} on ${body.date}`, after: body })
       return a
@@ -771,7 +765,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     '/accounts/:id/snapshots/:snapshotId',
     { ...acc, scope: 'write', summary: 'Delete a recorded balance', status: 204 },
     (c, { params }) => {
-      requireManualBalance(accounts.getAccount(c.var.ctx, params.id))
+      accounts.requireManualBalance(c.var.ctx, params.id)
       const before = accounts.deleteSnapshot(c.var.ctx, params.id, params.snapshotId)
       log(c, { action: 'delete_balance', entity: 'account', entityId: params.id, summary: `Deleted the balance recorded on ${before.date}`, before })
     },

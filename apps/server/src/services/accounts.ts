@@ -1,3 +1,4 @@
+import { HTTPException } from 'hono/http-exception'
 import {
   accountTypeInfo,
   type Account,
@@ -88,12 +89,51 @@ function thisMonth(ctx: AppContext, accountId?: number) {
   return (id: number) => sums.get(id)?.[0] ?? 0
 }
 
+/** What a shared account's home does for it, and the other ledgers that have it don't: said in the 409 of `requireHome`. */
+const HOME_ONLY = {
+  account: 'Its name, type, opening balance and notes are changed there.',
+  balance: 'Its balance is updated there.',
+  import: 'CSV files are imported into it there.',
+  bank: 'Its bank sync is set up there.',
+  sharing: 'Its sharing is changed there.',
+} as const
+
+/**
+ * Refuses, with a 409 naming the home, what only a shared account's home does (HOME_ONLY), in another
+ * ledger that has it. A 404 when this ledger doesn't have the account. Any account of this ledger
+ * that isn't shared has it as its home.
+ */
+export function requireHome(ctx: AppContext, id: number, what: keyof typeof HOME_ONLY) {
+  const row = ctx.q.mustGet<{ name: string; home: string }>(
+    'SELECT name, home_ledger_id AS home FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?',
+    'Account not found',
+    id,
+  )
+  if (row.home === ctx.ledger.id) return
+  const home = ctx.accountWide.ledgers(id).find((l) => l.isHome)!
+  throw new HTTPException(409, { message: `${row.name}’s home is ${home.name}. ${HOME_ONLY[what]}` })
+}
+
+/** A synced account's balance is the bank's: only a manual account's can be set by hand, and only in its home. */
+export function requireManualBalance(ctx: AppContext, id: number) {
+  requireHome(ctx, id, 'balance')
+  const a = getAccount(ctx, id)
+  if (!a.bank) return
+  throw new HTTPException(409, {
+    message: `${a.name} syncs from ${a.bank.institution ?? 'your bank'}, so its balance is the bank’s. Switch it to manual to set the balance yourself.`,
+  })
+}
+
 /**
  * A shared account's balance in each ledger that has it, and its total, counting every live row
  * (as LIST_SQL does). The total is the latest recorded balance (or the opening balance) plus every
  * ledger's rows dated after it. Each ledger's part is what it holds, except the opening ledger's,
  * which is the rest of the total: so it carries the opening balance and the recorded balances, and
- * the parts always sum to the total.
+ * the parts always sum to the total. That is the latest recorded balance, plus its own rows after
+ * it, less the other ledgers' rows up to it (a recorded balance is the account's total on its day,
+ * so they're in it); or, with none recorded, the opening balance plus its own rows. For an account
+ * that isn't shared the total is its balance, so this is also what the bank's balance is checked
+ * against.
  */
 export function currentParts(ctx: AppContext, accountId: number): { totalMinor: number; parts: Map<string, number> } {
   const facts = ctx.accountWide.account(accountId)
@@ -197,42 +237,73 @@ export function createAccount(ctx: AppContext, input: Omit<AccountCreate, 'bank'
   return getAccount(ctx, Number(lastInsertRowid))
 }
 
+/**
+ * Changes what's given of an account (left out means unchanged; a null note clears it). Its name,
+ * type, opening balance and notes are the account's own, the same in every ledger that has it, and
+ * only its home changes them: another ledger may send them only as they are. Its institution, place
+ * and archive are each ledger's own (in another ledger than the home, on its member row). A shared
+ * account stays the type it is.
+ */
 export function updateAccount(ctx: AppContext, id: number, input: AccountUpdate) {
-  getAccount(ctx, id)
+  const home = ctx.q.mustGet<{ id: string }>('SELECT home_ledger_id AS id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', 'Account not found', id)
+  const facts = ctx.accountWide.account(id)!
   const { archived, institutionId, institution, name, type, openingBalanceMinor, notes, sort } = input
+  const changing = {
+    name: name !== undefined && name.trim() !== facts.name,
+    type: type !== undefined && type !== facts.type,
+    opening: openingBalanceMinor !== undefined && openingBalanceMinor !== facts.openingBalanceMinor,
+    notes: notes !== undefined && (notes?.trim() || null) !== facts.notes,
+  }
+  const isHome = home.id === ctx.ledger.id
+  if (!isHome && Object.values(changing).some(Boolean)) requireHome(ctx, id, 'account')
+  if (isHome && changing.type && ctx.accountWide.isShared(id)) {
+    throw new HTTPException(409, { message: `${facts.name} is shared with other ledgers, so its type can’t change.` })
+  }
   const placed = institutionId !== undefined || institution !== undefined ? resolveInstitution(ctx, { institutionId, institution }) : null
-  // Only what's given changes (left out means unchanged; a null note clears it).
-  const set: Record<string, unknown> = {
-    name,
-    type,
-    opening_balance_minor: openingBalanceMinor,
-    notes,
+  const mine: Record<string, unknown> = {
     sort,
     institution_id: placed?.id,
     archived_at: archived === undefined ? undefined : archived ? new Date().toISOString() : null,
-    updated_at: new Date().toISOString(),
   }
+  const set: Record<string, unknown> = isHome
+    ? { name, type, opening_balance_minor: openingBalanceMinor, notes, ...mine, updated_at: new Date().toISOString() }
+    : mine
   const columns = Object.keys(set).filter((k) => set[k] !== undefined)
-  ctx.q.run(
-    `UPDATE accounts SET ${columns.map((c) => `${c} = @${c}`).join(', ')} WHERE id = @id AND ledger_id = @ledger`,
-    Object.fromEntries([...columns.map((c) => [c, set[c]]), ['id', id]]),
-  )
+  if (columns.length) {
+    const { changes } = ctx.q.run(
+      isHome
+        ? `UPDATE accounts SET ${columns.map((c) => `${c} = @${c}`).join(', ')} WHERE id = @id AND ledger_id = @ledger`
+        : `UPDATE account_ledgers SET ${columns.map((c) => `${c} = @${c}`).join(', ')} WHERE account_id = @id AND ledger_id = @ledger`,
+      Object.fromEntries([...columns.map((c) => [c, set[c]]), ['id', id]]),
+    )
+    if (changes !== 1) throw new Error(`Expected to update account ${id} in ledger ${ctx.ledger.id}, updated ${changes}`)
+  }
   return getAccount(ctx, id)
 }
 
-/** Deletes one of this ledger's accounts. Its transactions, balances and imports go with it, and its bank link is unlinked (foreign keys). */
+/**
+ * Deletes one of this ledger's accounts. Its transactions, balances and imports go with it, and its
+ * bank link is unlinked (foreign keys). A shared account is refused in every ledger that has it:
+ * the other ledgers hold rows on it.
+ */
 export function deleteAccount(ctx: AppContext, id: number) {
-  getAccount(ctx, id)
+  const a = getAccount(ctx, id)
+  if (ctx.accountWide.isShared(id)) throw new HTTPException(409, { message: `Stop sharing ${a.name} first.` })
   ctx.q.run('DELETE FROM accounts WHERE id = ? AND ledger_id = @ledger', id)
 }
 
 export function saveImportMapping(ctx: AppContext, id: number, mapping: ColumnMapping) {
+  // Another ledger's account is left as it is. A shared account's mapping is its home's.
+  if (ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', id)) requireHome(ctx, id, 'import')
   ctx.q.run('UPDATE accounts SET import_mapping = ? WHERE id = ? AND ledger_id = @ledger', JSON.stringify(mapping), id)
 }
 
-/** Records the account balance at the end of `date` (upserts one snapshot per day). */
+/**
+ * Records the account balance at the end of `date` (upserts one snapshot per day). It is the
+ * account's total, so for a shared account it's recorded in its home, for every ledger that has it.
+ */
 export function setBalance(ctx: AppContext, id: number, input: BalanceUpdate, source: 'manual' | 'sync' = 'manual') {
-  getAccount(ctx, id)
+  requireHome(ctx, id, 'balance')
   ctx.q.run(
     `INSERT INTO balance_snapshots (account_id, date, balance_minor, source) VALUES (?, ?, ?, ?)
      ON CONFLICT (account_id, date) DO UPDATE SET balance_minor = excluded.balance_minor, source = excluded.source`,
@@ -247,14 +318,18 @@ export function setBalance(ctx: AppContext, id: number, input: BalanceUpdate, so
 const SNAPSHOT_SQL = `SELECT s.id, s.date, s.balance_minor AS balanceMinor, s.source
   FROM balance_snapshots s JOIN ledger_accounts a ON a.id = s.account_id AND a.ledger_id = @ledger`
 
+/** The balances recorded on an account. None in a ledger a shared account is shared with: they're its home's, and the account's totals. */
 export function listSnapshots(ctx: AppContext, id: number): BalanceSnapshot[] {
   getAccount(ctx, id)
+  const home = ctx.q.pluck<string>('SELECT home_ledger_id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', id)
+  if (home !== ctx.ledger.id) return []
   return ctx.q.all<BalanceSnapshot>(`${SNAPSHOT_SQL} WHERE s.account_id = ? ORDER BY s.date DESC`, id)
 }
 
 /** Deletes a recorded balance and returns it. */
 export function deleteSnapshot(ctx: AppContext, accountId: number, snapshotId: number): BalanceSnapshot {
   const row = ctx.q.mustGet<BalanceSnapshot>(`${SNAPSHOT_SQL} WHERE s.id = ? AND s.account_id = ?`, 'Balance update not found', snapshotId, accountId)
+  requireHome(ctx, accountId, 'balance')
   ctx.q.run('DELETE FROM balance_snapshots WHERE id = ? AND account_id IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger)', snapshotId)
   return row
 }
@@ -262,10 +337,13 @@ export function deleteSnapshot(ctx: AppContext, accountId: number, snapshotId: n
 /**
  * Balances for every account of this ledger at each requested date (dates ascending). Computed in
  * memory from per-day transaction sums and snapshots, so back-dated edits are always reflected.
+ * A shared account's is this ledger's part at each date (as currentParts, up to that date): in its
+ * opening ledger, the latest balance recorded by then (or the opening balance) with the other
+ * ledgers' rows up to that recorded balance taken out; in any other, what this ledger holds.
  */
 export function balancesAt(ctx: AppContext, dates: ISODate[]): Map<number, number[]> {
-  const accs = ctx.q.all<{ id: number; opening: number; openingDate: string | null }>(
-    'SELECT id, opening_balance_minor AS opening, opening_date AS openingDate FROM ledger_accounts WHERE ledger_id = @ledger',
+  const accs = ctx.q.all<{ id: number; opening: number; openingDate: string | null; openingLedgerId: string }>(
+    'SELECT id, opening_balance_minor AS opening, opening_date AS openingDate, opening_ledger_id AS openingLedgerId FROM ledger_accounts WHERE ledger_id = @ledger',
   )
   const sums = ctx.q.all<{ accountId: number; date: string; total: number }>(
     `SELECT account_id AS accountId, date, sum(amount_minor) AS total
@@ -276,16 +354,29 @@ export function balancesAt(ctx: AppContext, dates: ISODate[]): Map<number, numbe
      FROM balance_snapshots s JOIN ledger_accounts a ON a.id = s.account_id AND a.ledger_id = @ledger ORDER BY s.date`,
   )
 
+  const shared = new Set(ctx.accountWide.sharedAccounts(ctx.ledger.id))
+
   const out = new Map<number, number[]>()
   for (const acc of accs) {
     const txs = sums.filter((s) => s.accountId === acc.id)
-    const ss = snaps.filter((s) => s.accountId === acc.id)
+    const opening = acc.openingLedgerId === ctx.ledger.id
+    const ss = opening ? snaps.filter((s) => s.accountId === acc.id) : []
+    // The other ledgers' rows on a shared account up to each recorded balance, which is the account's total on its day.
+    const elsewhere = new Map<string, number>()
+    const othersTo = (date: string) => {
+      if (!shared.has(acc.id)) return 0
+      if (!elsewhere.has(date)) {
+        const held = ctx.accountWide.held(acc.id, { to: date })
+        elsewhere.set(date, held.filter((h) => h.ledgerId !== ctx.ledger.id).reduce((sum, h) => sum + h.totalMinor, 0))
+      }
+      return elsewhere.get(date)!
+    }
     out.set(
       acc.id,
       dates.map((d) => {
         if (acc.openingDate && d < acc.openingDate) return 0
         const snap = [...ss].reverse().find((s) => s.date <= d)
-        const base = snap ? snap.balance : acc.opening
+        const base = snap ? snap.balance - othersTo(snap.date) : opening ? acc.opening : 0
         let total = base
         for (const t of txs) {
           if (t.date > d) break

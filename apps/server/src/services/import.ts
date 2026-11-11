@@ -11,7 +11,7 @@ import type { z } from 'zod'
 import type { importCommitSchema, importPreviewSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../ai/runner'
 import { badRequest } from '../lib/http'
-import { saveImportMapping } from './accounts'
+import { requireHome, saveImportMapping } from './accounts'
 import { aiSuggestion, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
 import type { AppContext } from './context'
 import { payeeKeyOf } from './payee-namer'
@@ -99,6 +99,7 @@ const hasAccount = (ctx: AppContext, id: number) => ctx.q.pluck('SELECT 1 FROM l
 
 export function previewImport(ctx: AppContext, input: PreviewInput): ImportPreviewRow[] {
   if (!hasAccount(ctx, input.accountId)) badRequest('That account does not exist')
+  requireHome(ctx, input.accountId, 'import')
   const dupes = findDuplicates(ctx, input.accountId, input.rows)
   const cache = new Map<string, SuggestionResult | null>()
   return input.rows.map((row, i) => {
@@ -124,6 +125,7 @@ export function previewImport(ctx: AppContext, input: PreviewInput): ImportPrevi
  */
 export function commitImport(ctx: AppContext, input: CommitInput, opts: { background?: boolean } = {}): ImportResult {
   if (!hasAccount(ctx, input.accountId)) badRequest('That account does not exist')
+  requireHome(ctx, input.accountId, 'import')
 
   // Re-check duplicates server-side so a double submit can't import twice.
   const dupes = findDuplicates(ctx, input.accountId, input.rows)

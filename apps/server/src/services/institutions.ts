@@ -71,7 +71,11 @@ export function deleteInstitution(ctx: AppContext, id: number, moveTo?: number):
     })
   }
   ctx.q.transaction(() => {
-    if (target) ctx.q.run('UPDATE accounts SET institution_id = ? WHERE institution_id = ? AND ledger_id = @ledger', target.id, id)
+    if (target) {
+      ctx.q.run('UPDATE accounts SET institution_id = ? WHERE institution_id = ? AND ledger_id = @ledger', target.id, id)
+      // The accounts other ledgers share with this one are here on their member rows.
+      ctx.q.run('UPDATE account_ledgers SET institution_id = ? WHERE institution_id = ? AND ledger_id = @ledger', target.id, id)
+    }
     ctx.q.run('DELETE FROM institutions WHERE id = ? AND ledger_id = @ledger', id)
   })
   return { before, movedTo: target ? getInstitution(ctx, target.id) : null }

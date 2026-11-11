@@ -41,6 +41,7 @@ export interface AccountFacts {
   name: string
   type: AccountType
   currency: string
+  notes: string | null
   homeLedgerId: string
   openingLedgerId: string
   openingBalanceMinor: number
@@ -107,7 +108,7 @@ const READS = {
   /** The account's own facts, with its latest recorded balance (on or before `asOf` when given). Undefined when there's no such account. */
   account(db: UnscopedQuery, accountId: number, asOf?: ISODate): AccountFacts | undefined {
     const row = db.get<Omit<AccountFacts, 'recorded'>>(
-      `SELECT a.id, a.name, a.type, a.currency, a.ledger_id AS homeLedgerId, coalesce(a.opening_ledger_id, a.ledger_id) AS openingLedgerId,
+      `SELECT a.id, a.name, a.type, a.currency, a.notes, a.ledger_id AS homeLedgerId, coalesce(a.opening_ledger_id, a.ledger_id) AS openingLedgerId,
          a.opening_balance_minor AS openingBalanceMinor, a.opening_date AS openingDate
        FROM accounts a WHERE a.id = ?`,
       accountId,

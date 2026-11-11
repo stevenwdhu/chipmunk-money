@@ -4,7 +4,7 @@ import type { Account, AccountSharing } from '@chipmunk/shared'
 import { ledgers as ledgersTable } from '../db/schema'
 import { badRequest } from '../lib/http'
 import type { AccountLedger } from './account-rows'
-import { currentParts, getAccount } from './accounts'
+import { currentParts, getAccount, requireHome } from './accounts'
 import { recordActivity, type ActivityActor } from './activity'
 import type { AppContext, CtxOf } from './context'
 import { getInstitution, removeIfEmpty, resolveInstitution } from './institutions'
@@ -25,13 +25,10 @@ function ledgerArchived(ctx: AppContext, ledgerId: string): boolean {
 
 /** The account, as this ledger sees it, and the ledgers that have it. A 409 naming the home when this ledger isn't the home. */
 function inHome(ctx: AppContext, accountId: number): { account: Account; ledgers: AccountLedger[]; home: AccountLedger } {
+  requireHome(ctx, accountId, 'sharing')
   const account = getAccount(ctx, accountId)
   const ledgers = ctx.accountWide.ledgers(accountId)
-  const home = ledgers.find((l) => l.isHome)!
-  if (home.ledgerId !== ctx.ledger.id) {
-    throw new HTTPException(409, { message: `${account.name}’s home is ${home.name}. Its sharing is changed there.` })
-  }
-  return { account, ledgers, home }
+  return { account, ledgers, home: ledgers.find((l) => l.isHome)! }
 }
 
 /**

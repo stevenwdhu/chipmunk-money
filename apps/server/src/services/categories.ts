@@ -290,7 +290,11 @@ export function reorder(ctx: AppContext, table: keyof typeof REORDER_SOURCE, ids
     const known = new Set(ctx.q.column<number>(`SELECT id FROM ${source} WHERE ledger_id = @ledger`))
     const missing = ids.filter((id) => !known.has(id))
     if (missing.length) notFound(`Not found: ${missing.join(', ')}`)
-    const set = (sort: number, id: number) => ctx.q.run(`UPDATE ${table} SET sort = @sort WHERE ledger_id = @ledger AND id = @id`, { sort, id })
+    const set = (sort: number, id: number) => {
+      const { changes } = ctx.q.run(`UPDATE ${table} SET sort = @sort WHERE ledger_id = @ledger AND id = @id`, { sort, id })
+      // An account shared with this ledger by its home has its place here on its member row.
+      if (table === 'accounts' && !changes) ctx.q.run('UPDATE account_ledgers SET sort = @sort WHERE ledger_id = @ledger AND account_id = @id', { sort, id })
+    }
     ids.forEach((id, i) => set(i, id))
     const rest = ctx.q.column<number>(`SELECT id FROM ${source} WHERE ledger_id = @ledger AND id NOT IN (SELECT value FROM json_each(@ids)) ORDER BY sort, id`, {
       ids: JSON.stringify(ids),
