@@ -1324,7 +1324,9 @@ export const TOOLS: ToolDef[] = [
         anchorDate: args.nextDate,
         categoryId: args.category === undefined ? null : lk.category(args.category),
         accountId: args.account === undefined ? null : lk.account(args.account).id,
-        ...(args.payments ? { totalPayments: args.payments, paidPayments: args.paidSoFar, ...(args.fullPrice !== undefined ? { fullPriceMinor: toMinor(args.fullPrice) } : {}) } : {}),
+        ...(args.payments ? { totalPayments: args.payments, paidPayments: args.paidSoFar } : {}),
+        // Without `payments` the API says a full price is only a plan's.
+        ...(args.fullPrice !== undefined ? { fullPriceMinor: toMinor(args.fullPrice) } : {}),
         ...(args.secondDay ? { secondDay: args.secondDay } : {}),
       })
       const plan = r.totalPayments ? `, ${r.paidPayments} of ${r.totalPayments} paid` : ''

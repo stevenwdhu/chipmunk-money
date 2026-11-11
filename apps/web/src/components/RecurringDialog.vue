@@ -98,8 +98,8 @@ async function stop() {
 
 /**
  * What the full price makes the last payment, as you type (the server works it out for good): what's left
- * after what's paid (its payments as they were, while Paid so far is as the app counted it, or else at the
- * usual amount) and the others to come at the usual amount. Null until there's enough to say.
+ * after what's paid (its linked payments as they were, while Paid so far is as the app counted it, the
+ * others at the usual amount) and the others to come at the usual amount. Null until there's enough to say.
  */
 const lastPayment = computed(() => {
   const full = parseMoney(fullPrice.value)
@@ -109,7 +109,10 @@ const lastPayment = computed(() => {
   if (!full || !usual || !Number.isInteger(total) || total < 2 || !Number.isInteger(paid) || paid >= total) return null
   const it = props.item
   const counted = it && it.paidPayments === paid && it.totalAmountMinor !== null && it.remainingAmountMinor !== null
-  const paidAmount = counted ? Math.abs(it.totalAmountMinor! - it.remainingAmountMinor!) : paid * Math.abs(usual)
+  // Its linked payments as they were, and the ones from before your history at the usual amount as you've typed it.
+  const before = it ? it.paidPayments - it.occurrences : 0
+  const linked = counted ? Math.abs(it.totalAmountMinor! - it.remainingAmountMinor!) - before * Math.abs(it.expectedAmountMinor) : 0
+  const paidAmount = counted ? linked + before * Math.abs(usual) : paid * Math.abs(usual)
   return Math.abs(full) - paidAmount - (total - paid - 1) * Math.abs(usual)
 })
 

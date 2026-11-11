@@ -117,8 +117,13 @@ interface ItemRow {
 
 // Linked payments; a suggestion's aren't linked yet, so `suggestedEvidence` finds them.
 const ITEM_TX = 't.deleted_at IS NULL AND t.recurring_item_id = r.id'
-/** A payment added at its own amount (`addPayment`), like a plan's down payment: not its amount. */
-const ONE_OFF = (item: string, tx: string) => `${tx} IN (SELECT transaction_id FROM recurring_payment_dues WHERE item_id = ${item} AND one_off = 1)`
+/**
+ * A payment added at its own amount (`addPayment`), like a plan's down payment: not its amount. In
+ * recurring_payment_dues, one_off is 1, or 2 when it was one of the plan's payments from before your
+ * history (taking it off gives that back).
+ */
+const ONE_OFF = (item: string, tx: string) => `${tx} IN (SELECT transaction_id FROM recurring_payment_dues WHERE item_id = ${item} AND one_off <> 0)`
+const FROM_BEFORE = 2
 const ITEM_SQL = `
   SELECT r.*,
     (SELECT count(*) FROM transactions t WHERE ${ITEM_TX}) AS occurrences,
@@ -420,10 +425,11 @@ export function linkPossiblePayment(ctx: AppContext, itemId: number, txId: numbe
  * like the others, counted and categorized, but the item's amount stays: it's no price change, and
  * later payments still match the usual amount. Its payee isn't added to the item's.
  *
- * It's for the due date whose period it's in. When another payment has that one, the date before it
- * (a down payment a few days before the first payment) or after it. A plan takes no more payments than
- * it has, and one from before its linked payments was one of those paid before your history, if you
- * said there were some. An active or ended item, in the item's account and the same way (money out or in).
+ * It's for the due date whose period it's in, and an extra payment there: the one due then is still
+ * expected (a down payment a few days before the first payment, a charge besides the bill). A plan takes
+ * no more payments than it has, and one from before its other payments and its next due date was one of
+ * those paid before your history, if you said there were some. An active or ended item, in the item's
+ * account and the same way (money out or in).
  */
 export function addPayment(ctx: AppContext, itemId: number, txId: number): RecurringItem {
   const item = getRecurring(ctx, itemId)
@@ -442,29 +448,22 @@ export function addPayment(ctx: AppContext, itemId: number, txId: number): Recur
     )
     .all(itemId) as Array<{ date: string; due: string | null }>
   const plan = item.totalPayments
-  const fromBefore = plan !== null && paidBefore > 0 && (!linked.length || tx.date < linked[0]!.date)
+  const window = matchWindow(item.cadence)
+  // Before the plan's other payments, and its next one isn't due yet: one of those paid before your history.
+  const fromBefore =
+    plan !== null && paidBefore > 0 && tx.date < addDays(item.nextDueDate, -window) && (!linked.length || tx.date < linked[0]!.date)
   if (plan !== null && linked.length + paidBefore - (fromBefore ? 1 : 0) >= plan) {
     badRequest(`${recurringLabel(item)} has all ${plan} payments already. Take one off first, or change how many it has.`)
   }
-
-  const window = matchWindow(item.cadence)
-  const dates = [...linked.map((t) => t.date), tx.date].sort()
-  const dues = duesCovering(item, dates[0]!, dates[dates.length - 1]!, window)
-  const periodOf = (date: string) => dues.find((d) => addDays(d, -window) <= date) ?? dues[dues.length - 1]!
-  const taken = new Map(linked.map((t) => [t.due ?? periodOf(t.date), t.date]))
-  const own = periodOf(tx.date)
-  const sooner = (taken.get(own) ?? tx.date) > tx.date
-  const [before, after] = [stepDue(item, own, -1), stepDue(item, own)]
-  const due = [own, ...(sooner ? [before, after] : [after, before])].find((d) => !taken.has(d))
-  if (!due) badRequest('Other payments are already the ones for its due dates around then')
+  const due = duesCovering(item, tx.date, tx.date, window).at(-1)!
 
   const wasPaidOff = paidOff(ctx, itemId)
   ctx.sqlite.transaction(() => {
     if (fromBefore) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = paid_before - 1 WHERE id = ?').run(itemId)
     ctx.sqlite.prepare('DELETE FROM recurring_not_payments WHERE item_id = ? AND transaction_id = ?').run(itemId, txId)
     ctx.sqlite
-      .prepare('INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, 1)')
-      .run(itemId, txId, due)
+      .prepare('INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)')
+      .run(itemId, txId, due, fromBefore ? FROM_BEFORE : 1)
     ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?').run(itemId, txId)
   })()
   recalculateRecurring(ctx, itemId, { wasPaidOff })
@@ -481,11 +480,24 @@ export function notItsPayment(ctx: AppContext, itemId: number, txId: number): Re
   const wasPaidOff = paidOff(ctx, itemId)
   ctx.sqlite.transaction(() => {
     ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)').run(itemId, txId)
+    giveBackPaidBefore(ctx, itemId, [txId])
     ctx.sqlite.prepare('DELETE FROM recurring_payment_dues WHERE item_id = ? AND transaction_id = ?').run(itemId, txId)
     if (linked) unlinkPayment(ctx, itemId, txId)
   })()
   if (linked) recalculateRecurring(ctx, itemId, { removed: true, followAmount: true, wasPaidOff })
   return getRecurring(ctx, itemId)
+}
+
+/**
+ * Added payments taken off (or deleted) that were among a plan's payments from before your history:
+ * they count as paid before again.
+ */
+function giveBackPaidBefore(ctx: AppContext, itemId: number, txIds: number[]) {
+  const n = ctx.sqlite
+    .prepare(`SELECT count(*) FROM recurring_payment_dues WHERE item_id = ? AND one_off = ${FROM_BEFORE} AND transaction_id IN (SELECT value FROM json_each(?))`)
+    .pluck()
+    .get(itemId, JSON.stringify(txIds)) as number
+  if (n) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = paid_before + ? WHERE id = ?').run(n, itemId)
 }
 
 export function listRecurring(ctx: AppContext, status?: RecurringStatus): RecurringItem[] {
@@ -615,6 +627,19 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
     | (KnownItem & { accountId: number | null; tolerance: number; paidBefore: number; fullPrice: number | null; status: RecurringStatus })
     | undefined
   if (!item || (item.status !== 'active' && item.status !== 'ended')) return 0
+  // An added payment that was deleted: if it was one paid before your history, it's that again.
+  const gone = ctx.sqlite
+    .prepare(
+      `SELECT d.transaction_id FROM recurring_payment_dues d JOIN transactions t ON t.id = d.transaction_id
+       WHERE d.item_id = ? AND d.one_off <> 0 AND t.deleted_at IS NOT NULL`,
+    )
+    .pluck()
+    .all(itemId) as number[]
+  if (gone.length) {
+    giveBackPaidBefore(ctx, itemId, gone)
+    item.paidBefore = ctx.sqlite.prepare('SELECT paid_before FROM recurring_items WHERE id = ?').pluck().get(itemId) as number
+    ctx.sqlite.prepare('DELETE FROM recurring_payment_dues WHERE item_id = ? AND transaction_id IN (SELECT value FROM json_each(?))').run(itemId, JSON.stringify(gone))
+  }
   const others = ctx.sqlite
     .prepare(`SELECT expected_amount_minor FROM recurring_items WHERE payee_key = ? AND status = 'active' AND id <> ?`)
     .pluck()
@@ -634,8 +659,15 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
   const candidates = txs.filter((t) => (item.accountId === null || t.accountId === item.accountId) && (linking || t.itemId === itemId))
   // Payments linked to it another way (by hand, from another payee) keep their due dates.
   const fixed = ctx.sqlite
-    .prepare('SELECT id, date FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL AND payee_key NOT IN (SELECT value FROM json_each(?))')
-    .all(itemId, JSON.stringify(keys)) as Array<{ id: number; date: string }>
+    .prepare(
+      'SELECT id, date, amount_minor AS amount FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL AND payee_key NOT IN (SELECT value FROM json_each(?))',
+    )
+    .all(itemId, JSON.stringify(keys)) as Array<{ id: number; date: string; amount: number }>
+  // Payments added at their own amount (`addPayment`): extra ones, kept, that don't take a due date's place.
+  const oneOff = new Set(
+    ctx.sqlite.prepare('SELECT transaction_id FROM recurring_payment_dues WHERE item_id = ? AND one_off <> 0').pluck().all(itemId) as number[],
+  )
+  const extras = candidates.filter((t) => oneOff.has(t.id))
   const window = matchWindow(item.cadence)
   const gap = (t: { amount: number }, expected: number) => Math.abs(t.amount - expected)
   // Payments you said are its, each for a due date (one that came early or late stays that date's).
@@ -652,10 +684,13 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
     const periodOf = (date: string) => dues.find((d) => addDays(d, -window) <= date)
     const byDue = new Map<string, typeof candidates>()
     for (const t of candidates) {
+      if (oneOff.has(t.id)) continue
       const due = pinned.get(t.id) ?? periodOf(t.date)
       if (due) byDue.set(due, [...(byDue.get(due) ?? []), t])
     }
-    const taken = new Set(fixed.map((f) => pinned.get(f.id) ?? periodOf(f.date)))
+    const taken = new Set(fixed.filter((f) => !oneOff.has(f.id)).map((f) => pinned.get(f.id) ?? periodOf(f.date)))
+    // A plan's payment much later than its due date isn't taken without asking (`possiblePayment`): it may be another plan's.
+    const onTime = (t: { date: string }, due: ISODate) => item.total === null || daysBetween(due, t.date) <= window
     const changes = ctx.sqlite
       .prepare('SELECT from_date AS fromDate, previous_amount_minor AS previous FROM recurring_price_changes WHERE item_id = ? ORDER BY from_date DESC')
       .all(itemId) as Array<{ fromDate: string; previous: number }>
@@ -670,30 +705,37 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
       const best =
         here.filter((t) => pinned.get(t.id) === due).sort((a, b) => gap(a, ref) - gap(b, ref))[0] ??
         here
-          .filter((t) => !pinned.has(t.id) && amountWithin(t.amount, ref, item.tolerance) && others.every((o) => gap(t, o) >= gap(t, ref)))
+          .filter(
+            (t) => !pinned.has(t.id) && onTime(t, due) && amountWithin(t.amount, ref, item.tolerance) && others.every((o) => gap(t, o) >= gap(t, ref)),
+          )
           .sort((a, b) => gap(a, ref) - gap(b, ref) || a.id - b.id)[0]
       if (!best) continue
+      const newestFound = matching.length === 0
       matching.push(best)
-      // A plan's payments are all its amount (a price change aside): one that's a little off, like a
-      // smaller last payment, isn't what the ones before it are compared with. Other items follow their
-      // payments (prices drift), but not one at its own amount (`addPayment`).
-      if (item.total === null && amountWithin(best.amount, ref, item.tolerance)) amount = best.amount
+      // Going back, the amount follows the payments found (prices drift), within the variation. Not a
+      // plan's newest: its last payment is often a little different, and isn't what the ones before it
+      // are compared with.
+      if (amountWithin(best.amount, ref, item.tolerance) && !(item.total !== null && newestFound)) amount = best.amount
     }
     matching.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id))
 
-    // A plan with a full price and one payment to go: its last is what's left of the price, in the period
-    // after its latest payment's.
+    // A plan with a full price and one payment to go: its last is what's left of the price (after all its
+    // payments: the ones found, added ones and ones from other payees), in the period after its latest's.
     const newest = matching[matching.length - 1]
-    if (newest && item.total !== null && item.fullPrice !== null && item.paidBefore + matching.length === item.total - 1) {
-      const last = item.fullPrice - matching.reduce((n, t) => n + t.amount, 0) - item.paidBefore * item.expected
+    const besides = [...extras, ...fixed]
+    if (newest && item.total !== null && item.fullPrice !== null && item.paidBefore + besides.length + matching.length === item.total - 1) {
+      const paid = [...matching, ...besides].reduce((n, t) => n + t.amount, 0)
+      const last = item.fullPrice - paid - item.paidBefore * item.expected
       const due = stepDue(item, pinned.get(newest.id) ?? periodOf(newest.date)!)
       const found = (taken.has(due) ? [] : (byDue.get(due) ?? []))
-        .filter((t) => !pinned.has(t.id) && Math.sign(last) === Math.sign(item.expected) && amountWithin(t.amount, last, item.tolerance))
+        .filter((t) => !pinned.has(t.id) && onTime(t, due) && Math.sign(last) === Math.sign(item.expected) && amountWithin(t.amount, last, item.tolerance))
         .sort((a, b) => gap(a, last) - gap(b, last) || a.id - b.id)[0]
       if (found) matching.push(found)
     }
   }
-  if (item.total !== null) matching = matching.slice(-Math.max(0, item.total - item.paidBefore))
+  // A plan keeps no more payments than it has: the newest, besides its added ones and other payees'.
+  if (item.total !== null) matching = matching.slice(-Math.max(0, item.total - item.paidBefore - extras.length - fixed.length))
+  matching.push(...extras)
   const wanted = new Set(matching.map((t) => t.id))
   const unlink = txs.filter((t) => t.itemId === itemId && !wanted.has(t.id))
   const link = matching.filter((t) => t.itemId !== itemId)
@@ -1178,15 +1220,17 @@ export function detectRecurring(ctx: AppContext): { created: number } {
           (t) => !used.has(t.id) && !series.includes(t) && !t.recurringItemId && !known(t) && amountWithin(t.amount, anchor.amount, pct),
         ).length >= series.length
       /**
-       * Payments of this amount that a schedule can't account for. A coffee bought on most weekdays lands
-       * in a weekly or semi-monthly schedule's windows often enough to make one, but anywhere in them, and
-       * on other days as often. A bill lands on its date, and there are no others. So: over the due dates
-       * looked back at, more payments of this amount besides the schedule's than a quarter of its own. Or,
-       * for a schedule this short, its payments on average more than 0.4 of a day from their dates (one day
-       * off in three is fine, every other one isn't), or a day for semi-monthly, whose dates are approximate. One due on a weekend and paid the Friday before or the
-       * Monday after is on its date.
+       * Payments of this amount that a weekly, biweekly or semi-monthly schedule can't account for. A coffee
+       * bought on most weekdays lands in such a schedule's windows often enough to make one, but anywhere in
+       * them, and on other days as often. A bill lands on its date, and there are no others. So: over the
+       * due dates looked back at, more payments of this amount besides the schedule's than a quarter of its
+       * own. Or its payments on average more than 0.4 of the date variation from their dates (one day off in
+       * three is fine, every other one isn't), or the whole variation for semi-monthly, whose dates are
+       * approximate. One due on a weekend and paid the Friday before or the Monday after is on its date.
+       * Monthly and longer schedules have windows a coffee rarely fits: they're left as they were.
        */
       const scattered = (cadence: Cadence, series: DetectRow[]) => {
+        if (cadence !== 'weekly' && cadence !== 'biweekly' && cadence !== 'semimonthly') return false
         const spread = monthsPer[cadence] ? Math.max(days, cadenceInfo(cadence).tolerance) : days
         const windows: Array<ReturnType<typeof lookback>> = []
         // The anchor's own window, then each due date's before it (semi-monthly's lookback starts at the other payday).
@@ -1199,8 +1243,7 @@ export function detectRecurring(ctx: AppContext): { created: number } {
         // All of them, also ones another suggestion took (it's how often you pay this), but not another item's.
         const others = within(from, anchor.date).filter((t) => !series.includes(t) && !t.recurringItemId && amountWithin(t.amount, anchor.amount, pct))
         if (others.length > series.length / 4) return true
-        const limit = cadence === 'weekly' || cadence === 'biweekly' ? 0.4 : cadence === 'semimonthly' ? 1 : null
-        if (limit === null) return false
+        const limit = (cadence === 'semimonthly' ? 1 : 0.4) * Math.max(1, days)
         const onDate = (due: ISODate, date: ISODate) => {
           const dates = weekday(due) === 6 ? [due, addDays(due, -1), addDays(due, 2)] : weekday(due) === 0 ? [due, addDays(due, -2), addDays(due, 1)] : [due]
           return Math.min(...dates.map((d) => Math.abs(daysBetween(d, date))))

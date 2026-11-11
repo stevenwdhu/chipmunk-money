@@ -41,7 +41,7 @@ const isPlan = computed(() => props.item.totalPayments !== null)
 const full = computed(() => isPlan.value && props.item.remainingPayments === 0)
 const tip = computed(() =>
   full.value
-    ? `All ${props.item.totalPayments} payments are paid. To add another, take one off or change how many it has.`
+    ? `All ${props.item.totalPayments} payments are paid. You can still add one you counted as paid before your history. To add another, take one off or change how many it has.`
     : 'For a payment the app didn’t link because its amount is its own, like a down payment or a last payment that’s the remainder. It counts as one of its payments, and the usual amount stays.',
 )
 
@@ -53,6 +53,8 @@ function details(c: RecurringPaymentCandidate) {
 }
 
 async function choose(c: RecurringPaymentCandidate) {
+  // A list item fires even while disabled: one at a time.
+  if (m.addPayment.isPending.value) return
   try {
     const updated = await m.addPayment.mutateAsync({ id: props.item.id, transactionId: c.transaction.id })
     const usual = formatMoney(Math.abs(updated.expectedAmountMinor), c.transaction.currency)
@@ -75,8 +77,7 @@ async function choose(c: RecurringPaymentCandidate) {
       <PopoverTrigger as-child>
         <button
           type="button"
-          class="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
-          :disabled="full"
+          class="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
         >
           <Plus class="size-3.5" />Add a payment
         </button>

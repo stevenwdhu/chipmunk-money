@@ -316,10 +316,14 @@ export function recurringPaymentCandidates(ctx: AppContext, itemId: number, opts
     where.push('t.date BETWEEN ? AND ?')
     params.push(addDays(from, -3 * period), addDays(item.nextDueDate, period))
   }
-  const rows = ctx.sqlite
-    .prepare(`SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')} ORDER BY sort_key DESC LIMIT ${opts.q ? LOOKING_ROWS : AROUND_ROWS}`)
-    .all(...params) as TxRow[]
   const keys = [item.payeeKey, ...(ctx.sqlite.prepare('SELECT payee_key FROM recurring_payees WHERE item_id = ?').pluck().all(itemId) as string[])]
+  // Its payees' first, so a busy card's other payments don't crowd them out of the rows read.
+  const rows = ctx.sqlite
+    .prepare(
+      `SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')}
+       ORDER BY t.payee_key IN (SELECT value FROM json_each(?)) DESC, sort_key DESC LIMIT ${opts.q ? LOOKING_ROWS : AROUND_ROWS}`,
+    )
+    .all(...params, JSON.stringify(keys)) as TxRow[]
   const ranked = rows
     .map((r) => ({ r, likely: keys.some((k) => k === r.payee_key || payeeSimilarity(k, r.payee_key) >= LIKELY_MERCHANT) }))
     .sort((a, b) => Number(b.likely) - Number(a.likely))
