@@ -2,6 +2,13 @@
 
 What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
 
+## v0.2.2 (2026-11-10)
+
+### Changed
+
+- Versions are written with a v, like v0.2.2: in App settings, here, and in the release titles.
+- A release's checks run once, on its tag. Pushes that change only docs run nothing.
+
 ## v0.2.1 (2026-11-10)
 
 ### Added
