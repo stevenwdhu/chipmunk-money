@@ -2,6 +2,16 @@
 
 What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
 
+## v0.2.3 (2026-11-10)
+
+### Fixed
+
+- The Overview's transactions fill their card on a wide screen, as many as fit beside the cards on the right, not just the latest 8.
+
+### Changed
+
+- Release images build faster: the app is built once for both amd64 and arm64, and the checks run side by side.
+
 ## v0.2.2 (2026-11-10)
 
 ### Changed
