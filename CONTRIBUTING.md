@@ -37,7 +37,7 @@ pnpm typecheck   # tsc for shared, MCP and server, vue-tsc for web
 pnpm build       # the web app, the stdio MCP bundle and the server bundle
 ```
 
-All three run in CI on every push and pull request, plus a Docker build. Please run them before you open a pull request.
+All three run in CI when a push to `main` or a pull request changes code. The Docker image is built only for a release, so if you change the `Dockerfile`, run `docker build .` too. Please run them before you open a pull request.
 
 - Server tests open their databases in memory or in a temporary folder, never in `data/`. Use the helpers in `apps/server/src/test/`.
 - Tests never call the real network. Bank, Plaid, Wealthsimple, ChatGPT and AI tests pass in a fake `fetch`.

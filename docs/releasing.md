@@ -1,6 +1,6 @@
 # Releasing
 
-A release is a version of Spending Tracker that people run: a Git tag, a GitHub release with its notes, and Docker images. Commits to `main` aren't releases. CI checks them, but publishes nothing. A release is made when the maintainer decides it's time, not on every push.
+A release is a version of Spending Tracker that people run: a Git tag, a GitHub release with its notes, and Docker images. Commits to `main` aren't releases. CI runs the checks on them, but builds and publishes no image. A release is made when the maintainer decides it's time, not on every push.
 
 ## Version numbers
 
@@ -33,6 +33,6 @@ Each release is published as `ghcr.io/stevenwdhu/spending-tracker` with three ta
 2. **Write the changelog.** In [CHANGELOG.md](../CHANGELOG.md), turn *Unreleased* into the version and the date (`## 0.5.0 (2026-12-01)`), with what changed under *Added*, *Changed*, *Fixed* and *Removed*, in words for the person using the app. Breaking changes go first, with what to do.
 3. **Set the version** in the root `package.json`.
 4. **Commit and tag** on `main`: `chore(release): 0.5.0`, then `git tag v0.5.0`.
-5. **Push both:** `git push origin main v0.5.0`. CI runs the checks and builds the image. Its publish job stops if the tag isn't `package.json`'s version.
+5. **Push both:** `git push origin main v0.5.0`. CI runs the checks, then builds and publishes the image. Its publish job stops if the tag isn't `package.json`'s version.
 6. **Publish the notes:** `gh release create v0.5.0 --title 0.5.0 --notes-file <that version's changelog section>`.
 7. **Check** that the images are on the registry under the three tags, and that `docker compose pull && docker compose up -d` runs it.
