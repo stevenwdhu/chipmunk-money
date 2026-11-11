@@ -76,8 +76,8 @@ const ledgerParam = z.object({ ledger: z.string().min(1) })
 
 /** App-wide routes: who's calling, ledgers, app settings, API keys and the full backup. */
 export function appRoutes(storage: Storage, bank: BankService) {
-  const r = new ApiRouter<BaseEnv>({ mount: '', tag: 'Ledgers' })
-  const { registry, meta } = storage
+  const r = new ApiRouter<BaseEnv>({ mount: '', tag: 'Ledgers', sqlite: storage.sqlite })
+  const { registry, app: meta } = storage
   const logTo = (ledgerId: string, actor: BaseEnv['Variables']['actor'], summary: string, extra: { before?: unknown; after?: unknown } = {}) =>
     recordActivity(registry.context(ledgerId), { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null }, {
       action: 'update',
@@ -189,7 +189,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     {
       scope: 'admin',
       summary: 'Delete a ledger',
-      description: 'Deletes the ledger and its file, after saving a copy in data/backups. Send its name as `confirm`.',
+      description: 'Deletes the ledger and all its data, after saving its backup in data/backups (`deleted-<slug>-<time>.db`, restorable like any ledger backup). Send its name as `confirm`.',
       params: ledgerParam,
       body: ledgerDeleteSchema,
       response: backupResultSchema,
@@ -208,8 +208,8 @@ export function appRoutes(storage: Storage, bank: BankService) {
       tag: 'Data',
       scope: 'admin',
       summary: 'Download a full backup',
-      description: 'A zip of every ledger and the app settings, for moving to another machine.',
-      file: { contentType: 'application/zip', description: 'meta.db, ledgers/*.db and manifest.json' },
+      description: 'A zip of the whole database (every ledger and the app settings) and a manifest saying how to restore it, for moving to another machine. secret.key isn’t in it, so copy that file over separately.',
+      file: { contentType: 'application/zip', description: 'chipmunk.db and manifest.json' },
     },
     (c) => {
       requireAllLedgers(c.var.actor)
@@ -513,7 +513,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
       response: categoryListSchema,
     },
     // Counted only in the ledgers the caller can use.
-    (c) => catalog.listCatalog(meta, catalog.catalogUsage(storage, (id) => canUseLedger(c.var.actor, id))),
+    (c) => catalog.listCatalog(storage, catalog.catalogUsage(storage, (id) => canUseLedger(c.var.actor, id))),
   )
   r.post(
     '/categories',
@@ -531,7 +531,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     (c, { body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
       catalog.reorderCatalog(storage, 'categories', body.ids)
-      return catalog.listCatalog(meta, catalog.catalogUsage(storage))
+      return catalog.listCatalog(storage, catalog.catalogUsage(storage))
     },
   )
   r.patch(
@@ -539,7 +539,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     { ...cat, scope: 'write', summary: 'Update a shared category', description: 'Name, group, labels and how it counts, in every ledger.', params: numId, body: categoryUpdateSchema, response: categorySchema },
     (c, { params, body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
-      const before = catalog.getCatalogCategory(meta, params.id)
+      const before = catalog.getCatalogCategory(storage, params.id)
       const after = catalog.updateCatalogCategory(storage, params.id, body)
       const d = changes(before, after)
       if (d) logAll(c.var.actor, { entity: 'category', entityId: after.id, summary: `Edited the category ${before.name}`, ...d })
@@ -605,7 +605,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     (c, { body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
       catalog.reorderCatalog(storage, 'category_groups', body.ids)
-      return catalog.listCatalog(meta, catalog.catalogUsage(storage))
+      return catalog.listCatalog(storage, catalog.catalogUsage(storage))
     },
   )
   r.patch(
@@ -613,7 +613,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     { ...cat, scope: 'write', summary: 'Update a shared category group', params: numId, body: groupUpdateSchema, response: categoryGroupSchema },
     (c, { params, body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
-      const before = catalog.getCatalogGroup(meta, params.id)
+      const before = catalog.getCatalogGroup(storage, params.id)
       const after = catalog.updateCatalogGroup(storage, params.id, body)
       const d = changes(before, after)
       if (d) logAll(c.var.actor, { entity: 'category_group', entityId: after.id, summary: `Edited the group ${before.name}`, ...d })
@@ -632,7 +632,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
-      const before = catalog.getCatalogGroup(meta, params.id)
+      const before = catalog.getCatalogGroup(storage, params.id)
       const removed = catalog.deleteCatalogGroup(storage, params.id)
       const what = removed.length ? ` and its categories (${removed.map((x) => x.name).join(', ')})` : ''
       logAll(c.var.actor, { action: 'delete', entity: 'category_group', entityId: before.id, summary: `Deleted the group ${before.name}${what}`, before })
@@ -655,7 +655,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     { ...cat, scope: 'write', summary: 'Update a shared label', params: numId, body: labelUpdateSchema, response: labelSchema },
     (c, { params, body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
-      const before = catalog.getCatalogLabel(meta, params.id)
+      const before = catalog.getCatalogLabel(storage, params.id)
       const after = catalog.updateCatalogLabel(storage, params.id, body)
       const d = changes(before, after)
       if (d) logAll(c.var.actor, { entity: 'label', entityId: after.id, summary: `Edited the label ${before.name}`, ...d })
@@ -685,7 +685,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     (c, { params, body }) => {
       requireAllLedgers(c.var.actor, SHARED_LIST)
       const l = catalog.applyCatalogLabel(storage, params.id, body)
-      const names = (ids: number[]) => ids.map((id) => catalog.getCatalogCategory(meta, id).name).join(', ')
+      const names = (ids: number[]) => ids.map((id) => catalog.getCatalogCategory(storage, id).name).join(', ')
       const parts = [body.add.length && `put it on ${names(body.add)}`, body.remove.length && `took it off ${names(body.remove)}`].filter(Boolean)
       if (parts.length) logAll(c.var.actor, { entity: 'label', entityId: l.id, summary: `Label ${l.name}: ${parts.join('; ')}`, after: body })
       return l

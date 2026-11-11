@@ -17,8 +17,8 @@ You'll get a reply as soon as possible. Once it's fixed, the fix and the advisor
 Chipmunk is a self-hosted app for one person or one household. It runs on a machine you control, and the people who can reach it are you and the agents you gave a key to.
 
 **What's sensitive**
-- Every ledger and `meta.db` in the data directory: transactions, balances, accounts, payees and notes.
-- `secret.key`, which encrypts the access to your banks (SimpleFIN access URLs, Plaid access tokens, the Wealthsimple session), your Plaid secret, the ChatGPT sign-in and your AI providers' keys. Anyone with both `secret.key` and `meta.db` can read all of them.
+- `chipmunk.db` in the data directory, which holds every ledger: transactions, balances, accounts, payees and notes.
+- `secret.key`, which encrypts the access to your banks (SimpleFIN access URLs, Plaid access tokens, the Wealthsimple session), your Plaid secret, the ChatGPT sign-in and your AI providers' keys. Anyone with both `secret.key` and `chipmunk.db` (or a full backup) can read all of them.
 - API keys. Only a SHA-256 hash of each is stored, and the key itself is shown once.
 - Backups and exports, which hold the same data (but never `secret.key`).
 
@@ -37,3 +37,4 @@ Chipmunk is a self-hosted app for one person or one household. It runs on a mach
 - **Plain HTTP on your network.** Traffic between your phone and the server can be read by others on the same network. Use HTTPS (Tailscale Serve gives you that) when the network isn't yours alone.
 - **The services you connect.** SimpleFIN, Plaid, Wealthsimple, OpenAI and your AI providers see what you send them. The Wealthsimple integration is unofficial and uses a private API.
 - **A malicious API key holder.** A key with write or full access can change or delete what it's allowed to. Every change is in **Activity**, under the key's name.
+- **Guessing how busy other ledgers are.** Ids are numbered across all ledgers, so a key limited to one ledger can tell from gaps in its ids roughly how much was added elsewhere. It can't see any of it.

@@ -26,13 +26,13 @@ export interface StoredAiConfig {
   kind: AiKind
   model: string
   baseUrl: string | null
-  /** The key itself here; in meta.db it's encrypted (see openStored). */
+  /** The key itself here; in app_settings it's encrypted (see openStored). */
   apiKey: string | null
 }
 
 export type AiSlot = 'primary' | 'fallback'
 
-/** Settings that belong to the whole app (stored in meta.db), not to one ledger. */
+/** Settings that belong to the whole app (in app_settings), not to one ledger. */
 export const APP_SETTING_KEYS = ['timezone', 'firstDayOfWeek', 'ai.primary', 'ai.fallback'] as const
 
 export function systemTimezone(): string {
@@ -41,7 +41,7 @@ export function systemTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
 
-// App-wide settings (meta.db) -------------------------------------------------
+// App-wide settings (app_settings) ---------------------------------------------
 
 export function getAppSetting<T>(meta: MetaStore, key: string, fallback: T): T {
   const row = meta.db.select().from(metaSettings).where(eq(metaSettings.key, key)).get()
@@ -79,18 +79,8 @@ export function setLedgerSetting(ctx: AppContext, key: string, value: unknown) {
   )
 }
 
-/**
- * Removes app-wide settings from a ledger file (a restored backup). They belong in meta.db, and taking
- * them from a backup would let whoever restores one change the whole app (where AI requests go, say).
- */
-export function dropAppSettings(sqlite: AppContext['sqlite']) {
-  const hasSettings = sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'`).get()
-  if (!hasSettings) return
-  sqlite.prepare(`DELETE FROM settings WHERE key IN (${APP_SETTING_KEYS.map(() => '?').join(',')})`).run(...APP_SETTING_KEYS)
-}
-
 // Secrets at rest ---------------------------------------------------------------
-// API keys and Plaid's secret are encrypted in meta.db with data/secret.key, like bank access, so a
+// API keys and Plaid's secret are encrypted in app_settings with data/secret.key, like bank access, so a
 // copied database or backup zip doesn't give them away.
 
 const isSealed = (value: string) => /^v1:[^:]+:[^:]+:[^:]+$/.test(value)
@@ -98,7 +88,7 @@ const seal = (meta: MetaStore, plain: string | null) => (plain ? meta.secrets.se
 
 /**
  * A stored secret, decrypted. One saved before secrets were encrypted is read as it is; one that
- * can't be decrypted (meta.db copied without its secret.key) reads as missing, so you're asked again.
+ * can't be decrypted (the database copied without its secret.key) reads as missing, so you're asked again.
  */
 function openStored(meta: MetaStore, stored: string | null | undefined): string | null {
   if (!stored) return null

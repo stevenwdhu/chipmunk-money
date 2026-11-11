@@ -70,20 +70,27 @@ export function pathParams(path: string): string[] {
   return [...path.matchAll(/:([A-Za-z_]\w*)/g)].map((m) => m[1]!)
 }
 
+/** Thrown to end a dry run's transaction: a throw out of a transaction rolls it back. */
+const ROLL_BACK = new Error('dry run')
+
 /**
- * Runs `fn` and rolls back everything it wrote. `fn` must be synchronous: nothing else can touch
- * the database between the savepoint and the rollback.
+ * Runs `fn` and rolls back everything it wrote, in every ledger and in the app-wide tables: they
+ * share one connection. `fn` must be synchronous: nothing else can touch the database between the
+ * start of the transaction and its rollback.
  */
 export function withDryRun<T>(sqlite: SQLite, fn: () => T): T {
-  sqlite.exec('SAVEPOINT dry_run')
+  let out: T
   try {
-    const out = fn()
-    if (out instanceof Promise) throw new Error('Dry runs need a synchronous handler')
-    return out
-  } finally {
-    sqlite.exec('ROLLBACK TO dry_run')
-    sqlite.exec('RELEASE dry_run')
+    // A savepoint when a transaction is open already.
+    sqlite.transaction(() => {
+      out = fn()
+      if (out instanceof Promise) throw new Error('Dry runs need a synchronous handler')
+      throw ROLL_BACK
+    })()
+  } catch (err) {
+    if (err !== ROLL_BACK) throw err
   }
+  return out!
 }
 
 /**
@@ -99,8 +106,8 @@ export class ApiRouter<E extends BaseEnv> {
       /** Where this router is mounted under /api/v1, e.g. `/ledgers/:ledger`. */
       mount: string
       tag: string
-      /** The database a dry run rolls back. */
-      dryRunDb?: (c: Context<E>) => SQLite
+      /** The one connection, which a dry run rolls back. */
+      sqlite: SQLite
     },
   ) {}
 
@@ -122,7 +129,6 @@ export class ApiRouter<E extends BaseEnv> {
 
   private add<P extends string, M extends RouteMeta>(method: Method, path: P, meta: M, handler: Handler<E, P, M>) {
     const spec: RouteSpec = { ...meta, method, path: `${this.opts.mount}${path}`, tag: meta.tag ?? this.opts.tag }
-    if (spec.dryRun && !this.opts.dryRunDb) throw new Error(`${spec.path}: dry runs need a database`)
     this.specs.push(spec)
     const names = pathParams(path)
     const paramsSchema = meta.params ?? z.object(Object.fromEntries(names.map((n) => [n, positiveId])))
@@ -136,7 +142,7 @@ export class ApiRouter<E extends BaseEnv> {
       const dryRun = meta.dryRun ? parseWith(dryRunFlag, c.req.query('dryRun')) : false
       const input = { params, query, body, dryRun } as RouteInput<P, M>
 
-      const result = dryRun ? withDryRun(this.opts.dryRunDb!(c), () => handler(c, input)) : await handler(c, input)
+      const result = dryRun ? withDryRun(this.opts.sqlite, () => handler(c, input)) : await handler(c, input)
       if (result instanceof Response) return result
       if (status === 204) return c.body(null, 204)
       return c.json(result as object, status as ContentfulStatusCode)

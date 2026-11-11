@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type { ApiKeyCreated, BulkResult, Transaction } from '@chipmunk/shared'
 import { createApi, createApp, type AppOptions } from './app'
 import { openApiPath } from './api/openapi'
-import { setAppSetting } from './services/settings'
+import { withDryRun } from './api/router'
+import type { AppContext } from './services/context'
+import { getAppSetting, setAppSetting } from './services/settings'
 import { setupStatus, startDemo } from './services/setup'
-import { categoryId, makeAccount, testStorage } from './test/helpers'
+import { categoryId, makeAccount, testLedger, testStorage } from './test/helpers'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -222,7 +224,7 @@ describe('API keys and scopes', () => {
     expect(await columns()).toEqual(['amount', 'date', 'notes', 'payee', 'category', 'account', 'balance'])
     // A column added since an order was saved goes after the one before it by default, and one that's
     // gone since (Name) drops out.
-    setAppSetting(storage.meta, 'transactionColumns', ['amount', 'date', 'payee', 'name', 'category', 'account', 'balance'])
+    setAppSetting(storage.app, 'transactionColumns', ['amount', 'date', 'payee', 'name', 'category', 'account', 'balance'])
     expect(await columns()).toEqual(['amount', 'date', 'payee', 'notes', 'category', 'account', 'balance'])
     expect((await call('PATCH', '/settings', { transactionColumns: ['date', 'date'] })).status).toBe(400)
     expect((await call('PATCH', '/settings', { transactionColumns: ['running-total'] })).status).toBe(400)
@@ -230,9 +232,9 @@ describe('API keys and scopes', () => {
     expect(await columns()).toEqual(['date', 'payee', 'notes', 'category', 'account', 'amount', 'balance'])
 
     // Widths too: only the ones you set, within limits. A gone column's drops out.
-    setAppSetting(storage.meta, 'transactionColumnWidths', { name: 200, payee: 300 })
+    setAppSetting(storage.app, 'transactionColumnWidths', { name: 200, payee: 300 })
     expect((await call('GET', '/settings')).body.transactionColumnWidths).toEqual({ payee: 300 })
-    setAppSetting(storage.meta, 'transactionColumnWidths', {})
+    setAppSetting(storage.app, 'transactionColumnWidths', {})
     expect((await call('GET', '/settings')).body.transactionColumnWidths).toEqual({})
     expect((await call('PATCH', '/settings', { transactionColumnWidths: { payee: 280, notes: 160 } })).body.transactionColumnWidths).toEqual({ payee: 280, notes: 160 })
     expect((await call('PATCH', '/settings', { transactionColumnWidths: { payee: 10 } })).status).toBe(400)
@@ -394,6 +396,114 @@ describe('reordering', () => {
     expect(res.body.map((x: Json) => x.name)).toEqual(['C', 'A', 'B'])
     expect((await call('POST', '/ledgers/personal/accounts/reorder', { ids: [999] })).status).toBe(404)
     expect(b).toBeGreaterThan(a)
+  })
+})
+
+describe('two ledgers', () => {
+  const tags = (ctx: AppContext) => ctx.q.column<string>('SELECT name FROM tags WHERE ledger_id = @ledger ORDER BY name')
+  const addTag = (ctx: AppContext, name: string) => ctx.q.run('INSERT INTO tags (ledger_id, name) VALUES (@ledger, @name)', { name })
+
+  function twoLedgers() {
+    const s = setup()
+    const personal = s.storage.registry.defaultContext()
+    const family = testLedger(s.storage)
+    return { ...s, personal, family }
+  }
+
+  it('keeps each ledger’s routes to its own rows, and another ledger’s ids are not found', async () => {
+    const { call, personal, family } = twoLedgers()
+    const add = async (ctx: AppContext) => {
+      const body = { accountId: makeAccount(ctx), date: '2026-10-01', amountMinor: -1234, payee: 'Costco' }
+      const res = await call('POST', `/ledgers/${ctx.ledger.slug}/transactions`, body)
+      expect(res.status).toBe(201)
+      return res.body.id as number
+    }
+    const mine = await add(personal)
+    const theirs = await add(family)
+    expect(mine).not.toBe(theirs)
+    expect((await call('GET', '/ledgers/family/transactions')).body.items.map((t: Json) => t.id)).toEqual([theirs])
+    expect((await call('GET', '/ledgers/personal/transactions')).body.items.map((t: Json) => t.id)).toEqual([mine])
+
+    const missing = await call('GET', '/ledgers/family/transactions/999999')
+    expect(missing.status).toBe(404)
+    for (const [method, body] of [
+      ['GET', undefined],
+      ['PATCH', { notes: 'Not yours' }],
+      ['DELETE', undefined],
+    ] as const) {
+      const res = await call(method, `/ledgers/family/transactions/${mine}`, body)
+      expect([method, res.status, res.body.error]).toEqual([method, 404, missing.body.error])
+    }
+    // Bulk changes skip ids they don't find.
+    const bulk = await call('POST', '/ledgers/family/transactions/bulk', { ids: [mine], addTags: ['work'] })
+    expect([bulk.status, bulk.body.updated]).toEqual([200, 0])
+    expect((await call('GET', `/ledgers/personal/transactions/${mine}`)).body).toMatchObject({ id: mine, notes: null, tags: [] })
+  })
+
+  it('rolls back a dry run in every ledger and in the app-wide tables', () => {
+    const { storage, personal, family } = twoLedgers()
+    const out = withDryRun(storage.sqlite, () => {
+      addTag(personal, 'gone')
+      addTag(family, 'gone')
+      setAppSetting(storage.app, 'dry', true)
+      return 'ran'
+    })
+    expect(out).toBe('ran')
+    expect([tags(personal), tags(family), getAppSetting(storage.app, 'dry', null)]).toEqual([[], [], null])
+
+    // In an open transaction, only what the dry run did.
+    personal.q.transaction(() => {
+      addTag(personal, 'kept')
+      withDryRun(storage.sqlite, () => addTag(family, 'gone'))
+    })
+    expect([tags(personal), tags(family)]).toEqual([['kept'], []])
+
+    // A handler that fails is rolled back too, and its error comes through.
+    expect(() =>
+      withDryRun(storage.sqlite, () => {
+        addTag(family, 'gone')
+        throw new Error('boom')
+      }),
+    ).toThrow('boom')
+    expect(tags(family)).toEqual([])
+  })
+
+  it('treats an Idempotency-Key sent to another ledger as a different request', async () => {
+    const { call, personal, family } = twoLedgers()
+    const headers = { 'idempotency-key': 'same-key' }
+    expect((await call('POST', '/ledgers/personal/tags', { name: 'trip' }, headers)).status).toBe(201)
+    const other = await call('POST', '/ledgers/family/tags', { name: 'trip' }, headers)
+    expect([other.status, other.body.error.code]).toEqual([409, 'conflict'])
+    expect([tags(personal), tags(family)]).toEqual([['trip'], []])
+  })
+
+  it('counts each ledger’s AI calls in its own usage, and only the usable ones app-wide', async () => {
+    const { call, key, personal, family } = twoLedgers()
+    const aiCall = (ctx: AppContext, model: string, tokens: number, at: string) =>
+      ctx.q.run(
+        `INSERT INTO ai_calls (ledger_id, created_at, slot, model, latency_ms, ok, input_tokens, output_tokens)
+         VALUES (@ledger, @at, 'primary', @model, 10, 1, @tokens, 1)`,
+        { model, tokens, at },
+      )
+    aiCall(personal, 'p1', 100, '2026-10-01T10:00:00Z')
+    aiCall(personal, 'p2', 100, '2026-10-01T12:00:00Z')
+    aiCall(family, 'f1', 7, '2026-10-01T11:00:00Z')
+
+    const mine = (await call('GET', '/ledgers/family/ai/usage')).body
+    expect(mine).toMatchObject({ calls: 1, inputTokens: 7 })
+    expect(mine.recent.map((r: Json) => r.model)).toEqual(['f1'])
+
+    const all = (await call('GET', '/ai/usage')).body
+    expect(all).toMatchObject({ calls: 3, inputTokens: 207 })
+    expect(all.recent.map((r: Json) => [r.model, r.ledger])).toEqual([
+      ['p2', 'Personal'],
+      ['f1', 'Family'],
+      ['p1', 'Personal'],
+    ])
+    const limited = await key({ scopes: ['read'], ledgers: ['family'] })
+    const theirs = (await call('GET', '/ai/usage', undefined, limited.auth)).body
+    expect(theirs).toMatchObject({ calls: 1, inputTokens: 7 })
+    expect(theirs.recent.map((r: Json) => r.ledger)).toEqual(['Family'])
   })
 })
 

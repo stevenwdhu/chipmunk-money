@@ -117,7 +117,7 @@ describe('the ledger registry', () => {
     const b = testLedger(storage)
     expect(a.app).toBe(b.app)
     expect(a.meta).toBe(a.app)
-    expect(storage.meta).toBe(storage.app)
+    expect('meta' in storage).toBe(false)
     expect(a.q.ledgerId).toBe(a.ledger.id)
   })
 })

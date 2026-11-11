@@ -11,7 +11,7 @@ services:
       # a reverse proxy that signs people in (see TRUSTED_AUTH_HEADER below).
       - "127.0.0.1:8787:8787"
     volumes:
-      # meta.db, ledgers/, backups/ and secret.key. Back this volume up.
+      # chipmunk.db, backups/ and secret.key. Back this volume up.
       - chipmunk-data:/data
     # Optional: your settings (AI and Plaid keys and the like); see .env.example.
     env_file:

@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import type { Account, ActivityPage, BankConnection, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
-import { bankAccounts, bankConnections } from '../../db/schema'
+import { bankAccounts, bankConnections, bankTransactions } from '../../db/schema'
 import { makeAccount, testStorage } from '../../test/helpers'
 import { aiConfig, getAppSetting, sealStoredSecrets, setAppSetting } from '../settings'
 import { plaidCategory } from './plaid'
@@ -136,7 +136,7 @@ describe('Plaid', () => {
     const settings = (await keys()).body as Settings
     expect(settings.bank.plaid).toEqual({ clientId: 'cid', hasSecret: true, secretHint: '••••3456', environment: 'sandbox', source: 'settings', configured: true })
     expect(JSON.stringify(settings)).not.toContain('sek-123456')
-    expect(getAppSetting<{ secret: string }>(storage.meta, 'plaid', { secret: '' }).secret).toMatch(/^v1:/)
+    expect(getAppSetting<{ secret: string }>(storage.app, 'plaid', { secret: '' }).secret).toMatch(/^v1:/)
     // Leaving the secret out keeps it.
     expect(((await api('PATCH', '/settings', { plaid: { clientId: 'cid2', environment: 'production' } })).body as Settings).bank.plaid).toMatchObject({
       clientId: 'cid2',
@@ -145,13 +145,13 @@ describe('Plaid', () => {
     })
 
     await api('PATCH', '/settings', { ai: { primary: { kind: 'anthropic', model: 'claude-opus-5-5', apiKey: 'sk-ant-1234' } } })
-    expect(getAppSetting<{ apiKey: string }>(storage.meta, 'ai.primary', { apiKey: '' }).apiKey).toMatch(/^v1:/)
-    expect(aiConfig(storage.meta, 'primary')?.apiKey).toBe('sk-ant-1234')
+    expect(getAppSetting<{ apiKey: string }>(storage.app, 'ai.primary', { apiKey: '' }).apiKey).toMatch(/^v1:/)
+    expect(aiConfig(storage.app, 'primary')?.apiKey).toBe('sk-ant-1234')
     // A key saved before keys were encrypted is encrypted at startup and still works.
-    setAppSetting(storage.meta, 'ai.fallback', { kind: 'openai', model: 'gpt-5-mini', baseUrl: null, apiKey: 'sk-old-5678' })
-    sealStoredSecrets(storage.meta)
-    expect(getAppSetting<{ apiKey: string }>(storage.meta, 'ai.fallback', { apiKey: '' }).apiKey).toMatch(/^v1:/)
-    expect(aiConfig(storage.meta, 'fallback')?.apiKey).toBe('sk-old-5678')
+    setAppSetting(storage.app, 'ai.fallback', { kind: 'openai', model: 'gpt-5-mini', baseUrl: null, apiKey: 'sk-old-5678' })
+    sealStoredSecrets(storage.app)
+    expect(getAppSetting<{ apiKey: string }>(storage.app, 'ai.fallback', { apiKey: '' }).apiKey).toMatch(/^v1:/)
+    expect(aiConfig(storage.app, 'fallback')?.apiKey).toBe('sk-old-5678')
 
     // Delete removes just the secret or key; the rest stays.
     const noSecret = await api('PATCH', '/settings', { plaid: { clientId: 'cid2', environment: 'production', secret: null } })
@@ -222,7 +222,12 @@ describe('Plaid', () => {
     // Only what changed is asked for next time.
     expect(plaid.state.requests.filter((r) => r.path === '/transactions/sync').at(-1)!.body.cursor).toBe('1')
     // Every account's transactions are kept, the unlinked Visa's too, and what Plaid removed is marked.
-    const kept = storage.meta.sqlite.prepare('SELECT remote_id, removed_at IS NOT NULL AS removed FROM bank_transactions ORDER BY remote_id').raw().all()
+    const kept = storage.app.db
+      .select({ remoteId: bankTransactions.remoteId, removedAt: bankTransactions.removedAt })
+      .from(bankTransactions)
+      .orderBy(bankTransactions.remoteId)
+      .all()
+      .map((r) => [r.remoteId, r.removedAt === null ? 0 : 1])
     expect(kept).toEqual([
       ['p-coffee', 1],
       ['t-coffee', 0],
@@ -344,11 +349,11 @@ describe('Plaid', () => {
     await keys()
     const conn = await connect()
     // A SimpleFIN connection, with an account at another bank.
-    storage.meta.db
+    storage.app.db
       .insert(bankConnections)
       .values({ id: 'sf', provider: 'simplefin', name: 'SimpleFIN Bridge', secret: storage.secrets.seal('https://u:p@bridge.test/simplefin') })
       .run()
-    storage.meta.db.insert(bankAccounts).values({ id: 'sf-chq', connectionId: 'sf', remoteId: 'ACT-1', name: 'Chequing', currency: 'CAD' }).run()
+    storage.app.db.insert(bankAccounts).values({ id: 'sf-chq', connectionId: 'sf', remoteId: 'ACT-1', name: 'Chequing', currency: 'CAD' }).run()
     const chequing = makeAccount(ctx, 'TD Chequing')
     expect((await link(chequing, 'sf-chq', '2026-09-01')).status).toBe(200)
 
@@ -359,7 +364,7 @@ describe('Plaid', () => {
     expect(listed.flatMap((c) => c.accounts).filter((a) => a.link?.accountId === chequing).map((a) => a.id)).toEqual([remote(conn, 'acc-chq').id])
     // The database holds it to one, too.
     expect(() =>
-      storage.meta.db.update(bankAccounts).set({ accountId: chequing }).where(eq(bankAccounts.id, 'sf-chq')).run(),
+      storage.app.db.update(bankAccounts).set({ accountId: chequing }).where(eq(bankAccounts.id, 'sf-chq')).run(),
     ).toThrow(/UNIQUE/)
   })
 })

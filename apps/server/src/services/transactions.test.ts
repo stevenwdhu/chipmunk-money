@@ -1,15 +1,44 @@
 import { describe, expect, it } from 'vitest'
-import { recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
+import { bulkUpdateSchema, recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { addTx, countRows, twinAccounts, twinLedgers } from '../test/transaction-twins'
 import { getAccount, setBalance } from './accounts'
+import { leaveSharedList } from './catalog'
 import { deleteGroup, getCategory, getGroup, listCategories, mergeCategory } from './categories'
 import { suggestCategory } from './categorize'
 import { createRecurring, getRecurring } from './recurring'
-import { acceptSuggestion, createTransaction, deleteTransaction, listTransactions, restoreTransaction, updateTransaction } from './transactions'
+import {
+  acceptAllSuggestions,
+  acceptSuggestion,
+  bulkUpdate,
+  createTransaction,
+  deleteTransaction,
+  findByExternalId,
+  getTransaction,
+  getTransactions,
+  insertTransaction,
+  linkCandidates,
+  linkedTransactions,
+  listTransactions,
+  purgeDeleted,
+  restoreTransaction,
+  transactionSpan,
+  updateTransaction,
+  withChanges,
+} from './transactions'
 
 const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
 
 describe('transactions', () => {
+  it('lists the changes a bulk edit makes in id order', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx)
+    const ids: number[] = []
+    for (const payee of ['Zed', 'Acme', 'Mid', 'Bee']) ids.push((await createTransaction(ctx, tx({ accountId: acc, date: '2026-09-01', amountMinor: -100, payee }), { useAi: false })).id)
+    const { changes } = withChanges(ctx, [...ids].reverse(), () => bulkUpdate(ctx, bulkUpdateSchema.parse({ ids, addTags: ['trip'] })))
+    expect(changes.map((c) => c.id)).toEqual(ids)
+  })
+
   it('suggests what you picked for a payee before, to review', async () => {
     const ctx = testContext()
     const acc = makeAccount(ctx)
@@ -191,6 +220,8 @@ describe('transactions', () => {
 
   it('merges a category into another, moving its transactions, recurring payments and learned payees', async () => {
     const ctx = testContext()
+    // A ledger merges categories of its own list (the shared list's are merged in App settings).
+    leaveSharedList(ctx)
     const acc = makeAccount(ctx)
     const [treats, dineOut] = [categoryId(ctx, 'Drinks & treats'), categoryId(ctx, 'Dine out')]
     const add = (payee: string, categoryId: number) =>
@@ -220,6 +251,8 @@ describe('transactions', () => {
 
   it('deletes a group with its categories, leaving their transactions uncategorized', async () => {
     const ctx = testContext()
+    // A ledger deletes groups of its own list (the shared list's are deleted in App settings).
+    leaveSharedList(ctx)
     const acc = makeAccount(ctx)
     const treats = categoryId(ctx, 'Drinks & treats')
     const group = getCategory(ctx, treats).groupId!
@@ -265,5 +298,131 @@ describe('transaction names', () => {
 
     // Taken off the item, it has no name (it never had one of its own).
     expect(updateTransaction(ctx, b.id, { recurringItemId: null }).name).toBeNull()
+  })
+})
+
+describe('transactions in two ledgers', () => {
+  it('lists, totals and pages only its own, though the other ledger’s look the same', () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const groceries = categoryId(a, 'Groceries')
+    for (const [ctx, acc] of [[a, accA], [b, accB]] as const) {
+      addTx(ctx, acc.chequing, '2026-09-01', -5_000, 'Loblaws', { categoryId: groceries })
+      addTx(ctx, acc.chequing, '2026-09-02', -2_000, 'Loblaws')
+    }
+    addTx(b, accB.chequing, '2026-08-15', -1_000, 'Loblaws')
+
+    for (const [ctx, acc, n] of [[a, accA, 2], [b, accB, 3]] as const) {
+      const all = listTransactions(ctx, { limit: 50 })
+      expect(all.items).toHaveLength(n)
+      expect(all.items.every((t) => t.accountId === acc.chequing)).toBe(true)
+      expect(listTransactions(ctx, { limit: 50, q: 'loblaws' }).items).toHaveLength(n)
+      expect(listTransactions(ctx, { limit: 50, categoryId: [groceries] }).items).toHaveLength(1)
+      // Paging walks only this ledger's.
+      const first = listTransactions(ctx, { limit: 1 })
+      const rest = listTransactions(ctx, { limit: 50, cursor: first.nextCursor! })
+      expect(rest.items).toHaveLength(n - 1)
+      // A running balance from this ledger's account only.
+      expect(listTransactions(ctx, { limit: 50, accountId: acc.chequing }).items[0]!.balanceAfterMinor).toBe(100_000 - 7_000 - (n - 2) * 1_000)
+    }
+    expect(transactionSpan(a)).toEqual({ first: '2026-09-01', last: '2026-09-02' })
+    expect(transactionSpan(b)).toEqual({ first: '2026-08-15', last: '2026-09-02' })
+    // The other ledger's account isn't one to list by.
+    expect(listTransactions(a, { limit: 50, accountId: accB.chequing }).items).toEqual([])
+  })
+
+  it('treats the other ledger’s ids as missing', async () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    addTx(a, accA.chequing, '2026-09-01', -5_000, 'Loblaws')
+    const theirs = addTx(b, accB.chequing, '2026-09-01', -5_000, 'Loblaws')
+    const theirsIn = addTx(b, accB.chequing, '2026-09-03', 5_000, 'Alex - e-Transfer')
+    const before = getTransaction(b, theirs)
+
+    const missing = 'Transaction not found'
+    expect(() => getTransaction(a, theirs)).toThrow(missing)
+    expect(() => updateTransaction(a, theirs, { notes: 'mine now' })).toThrow(missing)
+    expect(() => deleteTransaction(a, theirs)).toThrow(missing)
+    expect(() => restoreTransaction(a, theirs)).toThrow(missing)
+    expect(() => acceptSuggestion(a, theirs)).toThrow(missing)
+    expect(() => linkCandidates(a, theirsIn, { kind: 'payback' })).toThrow(missing)
+    expect(() => linkedTransactions(a, theirs)).toThrow(missing)
+    expect(getTransactions(a, [theirs, theirsIn])).toEqual([])
+    expect(bulkUpdate(a, bulkUpdateSchema.parse({ ids: [theirs], delete: true }))).toEqual({ updated: 0 })
+    expect(withChanges(a, [theirs], () => {}).changes).toEqual([])
+    expect(findByExternalId(a, accB.chequing, 'x')).toBeNull()
+
+    // Nor are its accounts, for a new transaction, a transfer or a move.
+    await expect(createTransaction(a, tx({ accountId: accB.chequing, date: '2026-09-04', amountMinor: -100, payee: 'X', categoryId: null }))).rejects.toThrow(
+      'That account does not exist',
+    )
+    await expect(
+      createTransaction(a, tx({ accountId: accA.chequing, date: '2026-09-04', amountMinor: -100, payee: 'X', transferAccountId: accB.card })),
+    ).rejects.toThrow('The transfer account does not exist')
+    const mine = addTx(a, accA.chequing, '2026-09-04', -100, 'X')
+    expect(() => updateTransaction(a, mine, { accountId: accB.chequing })).toThrow('That account does not exist')
+
+    expect(getTransaction(b, theirs)).toEqual(before)
+    expect(listTransactions(b, { limit: 50 }).items).toHaveLength(2)
+  })
+
+  it('keeps a transfer’s two sides in its ledger, and its links, tags and suggestions', async () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const t = await createTransaction(a, tx({ accountId: accA.chequing, date: '2026-09-20', amountMinor: -20_000, payee: 'Visa payment', transferAccountId: accA.card, tags: ['bills'] }))
+    const pair = getTransaction(a, t.transferPairId!)
+    expect(pair).toMatchObject({ accountId: accA.card, amountMinor: 20_000, tags: [expect.objectContaining({ name: 'bills' })] })
+    expect(() => getTransaction(b, pair.id)).toThrow('Transaction not found')
+    // B's tag of the same name is its own.
+    const theirs = await createTransaction(b, tx({ accountId: accB.chequing, date: '2026-09-20', amountMinor: -1_000, payee: 'Hydro', tags: ['bills'] }))
+    expect(theirs.tags[0]!.id).not.toBe(t.tags[0]!.id)
+    expect(getTransaction(a, t.id).tags).toEqual(t.tags)
+
+    // Accepting every suggestion accepts this ledger's.
+    const fuel = categoryId(a, 'Fuel')
+    for (const [ctx, acc] of [[a, accA], [b, accB]] as const) {
+      insertTransaction(ctx, tx({ accountId: acc.card, date: '2026-09-21', amountMinor: -4_000, payee: 'Shell' }), {
+        origin: 'sync',
+        skipRecurring: true,
+        suggestion: { categoryId: fuel, source: 'history', confidence: 0.7, reason: '', autoApply: false },
+      })
+    }
+    expect(acceptAllSuggestions(a)).toBe(1)
+    expect(listTransactions(b, { limit: 50, needsReview: true }).items).toHaveLength(1)
+  })
+
+  it('refuses the other ledger’s own categories and recurring items, changing nothing', async () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const mine = addTx(a, accA.chequing, '2026-09-01', -100, 'X')
+    const theirCategory = Number(b.q.run("INSERT INTO categories (ledger_id, name) VALUES (@ledger, 'Theirs')").lastInsertRowid)
+    const theirItem = Number(
+      b.q.run(
+        `INSERT INTO recurring_items (ledger_id, name, payee_key, account_id, expected_amount_minor, cadence, anchor_date, next_due_date, status, origin)
+         VALUES (@ledger, 'Gym', 'gym', ?, -5000, 'monthly', '2026-01-01', '2026-11-01', 'active', 'manual')`,
+        accB.chequing,
+      ).lastInsertRowid,
+    )
+    // The database's guard refuses them (the API answers as for an id that doesn't exist).
+    expect(() => updateTransaction(a, mine, { categoryId: theirCategory })).toThrow('cross-ledger reference')
+    expect(() => updateTransaction(a, mine, { recurringItemId: theirItem })).toThrow('cross-ledger reference')
+    await expect(createTransaction(a, tx({ accountId: accA.chequing, date: '2026-09-02', amountMinor: -100, payee: 'Y', categoryId: theirCategory }))).rejects.toThrow(
+      'cross-ledger reference',
+    )
+    expect(getTransaction(a, mine)).toMatchObject({ categoryId: null, recurringItemId: null })
+    expect(countRows(a, 'transactions')).toBe(1)
+  })
+
+  it('purges only its own deleted transactions', () => {
+    const { a, b } = twinLedgers({ now: '2026-12-01T12:00:00Z' })
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const ours = addTx(a, accA.chequing, '2026-09-01', -5_000, 'Loblaws')
+    const theirs = addTx(b, accB.chequing, '2026-09-01', -5_000, 'Loblaws')
+    for (const ctx of [a, b]) ctx.q.run("UPDATE transactions SET deleted_at = '2026-10-01T00:00:00Z' WHERE ledger_id = @ledger")
+    purgeDeleted(a)
+    expect(() => getTransaction(a, ours)).toThrow('Transaction not found')
+    expect(countRows(a, 'transactions')).toBe(0)
+    expect(countRows(b, 'transactions')).toBe(1)
+    expect(restoreTransaction(b, theirs).id).toBe(theirs)
   })
 })

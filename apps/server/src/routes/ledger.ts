@@ -113,10 +113,11 @@ import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import { actorName, requireLedger, type Actor } from '../api/auth'
 import { ApiRouter } from '../api/router'
+import { exportLedger } from '../db/ledger-backup'
 import { aiEnabled } from '../ai/runner'
 import * as accounts from '../services/accounts'
 import { activityActors, diff, listActivity, recordActivity, type ActivityEntry } from '../services/activity'
-import { joinPreview, setCategorySharing, usesSharedList, type JoinResolution } from '../services/catalog'
+import { joinPreview, requireOwnList, setCategorySharing, usesSharedList, type JoinResolution } from '../services/catalog'
 import * as cats from '../services/categories'
 import * as customReports from '../services/custom-reports'
 import * as labels from '../services/labels'
@@ -187,11 +188,7 @@ function requireOwnBankAccount(c: C, bank: BankService, bankAccountId: string) {
 
 /** A ledger that uses the shared category list changes it in App settings, not here. */
 function ownList(c: C) {
-  if (usesSharedList(c.var.ctx.sqlite)) {
-    throw new HTTPException(409, {
-      message: 'This ledger uses the shared category list. Change it in App settings → Categories, or give the ledger its own list (PUT /categories/sharing).',
-    })
-  }
+  requireOwnList(c.var.ctx)
 }
 
 /** A synced account's balance is the bank's: only a manual account's can be set by hand. */
@@ -215,7 +212,7 @@ const describe = (t: Transaction) => `${t.payee} ${money(t)} on ${t.date}`
 
 /** Routes for one ledger's data, mounted at /api/v1/ledgers/:ledger. */
 export function ledgerRoutes(storage: Storage, bank: BankService) {
-  const r = new ApiRouter<LedgerEnv>({ mount: '/ledgers/:ledger', tag: 'Ledgers', dryRunDb: (c) => c.var.ctx.sqlite })
+  const r = new ApiRouter<LedgerEnv>({ mount: '/ledgers/:ledger', tag: 'Ledgers', sqlite: storage.sqlite })
   r.hono.use('*', async (c, next) => {
     const ctx = storage.registry.context(c.req.param('ledger')!)
     requireLedger(c.var.actor, ctx.ledger.id)
@@ -565,7 +562,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       if (link) requireOwnBankAccount(c, bank, link.bankAccountId)
       const remote = link ? bank.available(ctx.ledger.id).find((b) => b.id === link.bankAccountId) : undefined
       if (link && !remote) throw new HTTPException(404, { message: 'That bank account isn’t available to this ledger.' })
-      const { a, placed } = ctx.sqlite.transaction(() => {
+      const { a, placed } = ctx.q.transaction(() => {
         // Where you put it, or (synced) the institution named after its bank, added if it's new.
         const placed = institutions.resolveInstitution(
           ctx,
@@ -574,7 +571,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
         const created = accounts.createAccount(ctx, { ...input, institutionId: placed.id, currency: remote?.currency ?? input.currency })
         if (link) bank.linkAccount(ctx, created.id, link)
         return { a: accounts.getAccount(ctx, created.id), placed }
-      })()
+      })
       const filled = link ? bank.fill(ctx, a.id) : null
       logNewInstitution(c, placed)
       log(c, {
@@ -794,7 +791,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
         'This ledger’s categories: every group, category and label, with whether each category is on here (`archived`: off) and how many of its transactions use it. `shared`: they follow the shared list (change it with /categories, app-wide); otherwise the ledger edits its own list here.',
       response: categoryListSchema,
     },
-    (c) => ({ ...cats.listCategories(c.var.ctx), shared: usesSharedList(c.var.ctx.sqlite) }),
+    (c) => ({ ...cats.listCategories(c.var.ctx), shared: usesSharedList(c.var.ctx) }),
   )
   r.patch(
     '/categories/:id',
@@ -810,7 +807,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     (c, { params, body }) => {
       const { enabled, moveTo, ...rest } = body
       const before = cats.getCategory(c.var.ctx, params.id)
-      if (!usesSharedList(c.var.ctx.sqlite)) {
+      if (!usesSharedList(c.var.ctx)) {
         const after = cats.updateCategory(c.var.ctx, params.id, { ...rest, ...(enabled === undefined ? {} : { archived: !enabled }) })
         logUpdate(c, 'category', after.id, `Edited the category ${before.name}`, before, after)
         return after
@@ -850,8 +847,8 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       response: z.object({ shared: z.boolean(), differing: z.array(categoryJoinItemSchema) }),
     },
     (c) => {
-      const shared = usesSharedList(c.var.ctx.sqlite)
-      return { shared, differing: shared ? [] : joinPreview(c.var.ctx.meta, c.var.ctx.sqlite) }
+      const shared = usesSharedList(c.var.ctx)
+      return { shared, differing: shared ? [] : joinPreview(storage, c.var.ctx) }
     },
   )
   r.put(
@@ -861,7 +858,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Use the shared category list, or the ledger’s own',
       description:
-        'Shared: the ledger follows App settings → Categories and turns categories on and off; its categories are matched to the shared list by name, and ones the list doesn’t have are added to it. Own: it keeps a copy of the shared list to edit here, and changes to the shared list no longer reach it.',
+        'Shared: the ledger follows App settings → Categories and turns categories on and off; its categories are matched to the shared list by name, and ones the list doesn’t have are added to it. Own: it keeps a copy of the shared list, with new ids, to edit here, and changes to the shared list no longer reach it.',
       body: categorySharingSchema,
       response: categoryListSchema,
     },
@@ -869,14 +866,14 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       if (body.shared && c.var.actor.kind === 'key' && c.var.actor.key.ledgers) {
         throw new HTTPException(403, { message: 'Joining the shared list can add categories to every ledger, so a key limited to some ledgers can’t do it.' })
       }
-      const was = usesSharedList(c.var.ctx.sqlite)
+      const was = usesSharedList(c.var.ctx)
       const resolve = new Map<number, JoinResolution>()
       for (const r of body.resolve ?? []) {
         if ((r.action === 'match' || r.action === 'move') && !r.to) badRequest(`Say which shared category ${cats.getCategory(c.var.ctx, r.category).name} goes to.`)
         resolve.set(r.category, r.action === 'add' ? 'add' : r.action === 'uncategorize' ? null : r.to!)
       }
       try {
-        setCategorySharing(c.var.ctx.meta, c.var.ctx.sqlite, body.shared, resolve)
+        setCategorySharing(storage, c.var.ctx, body.shared, resolve)
       } catch (err) {
         if (err instanceof Error && /shared list has no category/.test(err.message)) badRequest(err.message)
         throw err
@@ -1624,10 +1621,16 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
   )
   r.get(
     '/backup',
-    { ...data, scope: 'read', summary: 'Download a backup', description: 'The whole ledger as one SQLite file.', file: { contentType: 'application/vnd.sqlite3', description: 'The ledger’s database' } },
+    {
+      ...data,
+      scope: 'read',
+      summary: 'Download a backup',
+      description: 'This ledger alone, its rows and the category list it uses, as one SQLite file to restore here or into another ledger. Nothing app-wide is in it.',
+      file: { contentType: 'application/vnd.sqlite3', description: 'The ledger’s backup' },
+    },
     (c) => {
-      // serialize() gives a consistent copy of the whole database in one call.
-      const bytes = c.var.ctx.sqlite.serialize()
+      // This ledger's rows (and the category list it uses) in a file of their own: no other ledger's, and nothing app-wide.
+      const bytes = exportLedger(storage.sqlite, c.var.ctx.ledger.id)
       c.header('Content-Type', 'application/vnd.sqlite3')
       c.header('Content-Disposition', `attachment; filename="chipmunk-${c.var.ctx.ledger.slug}-${today(c.var.ctx)}.db"`)
       return c.body(new Uint8Array(bytes))
@@ -1646,7 +1649,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     async (c) => {
       const bytes = new Uint8Array(await c.req.arrayBuffer())
-      const result = setup.restoreBackup(c.var.ctx, bytes, { addCategories: !limitedKey(c) })
+      const result = setup.restoreBackup(storage, c.var.ctx, bytes, { addCategories: !limitedKey(c) })
       log(c, { action: 'restore', entity: 'ledger', summary: `Restored from a backup (${result.accounts} accounts, ${result.transactions} transactions)` })
       return result
     },
@@ -1662,7 +1665,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       response: backupResultSchema,
     },
     (c) => {
-      const result = setup.eraseAll(c.var.ctx)
+      const result = setup.eraseAll(storage, c.var.ctx)
       log(c, { action: 'erase', entity: 'ledger', summary: 'Erased all data', after: result })
       return result
     },
@@ -1693,18 +1696,14 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
 
 /** AI calls made while categorizing this ledger's transactions. */
 export function ledgerAiUsage(ctx: AppContext): AiUsage {
-  const totals = ctx.sqlite
-    .prepare(
-      `SELECT count(*) AS calls, coalesce(sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failures,
-         coalesce(sum(input_tokens), 0) AS inputTokens, coalesce(sum(output_tokens), 0) AS outputTokens
-       FROM ai_calls`,
-    )
-    .get() as Omit<AiUsage, 'recent'>
-  const recent = ctx.sqlite
-    .prepare(
-      `SELECT id, created_at AS createdAt, slot, model, ok, latency_ms AS latencyMs, error
-       FROM ai_calls ORDER BY id DESC LIMIT 20`,
-    )
-    .all() as AiUsage['recent']
+  const totals = ctx.q.get<Omit<AiUsage, 'recent'>>(
+    `SELECT count(*) AS calls, coalesce(sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failures,
+       coalesce(sum(input_tokens), 0) AS inputTokens, coalesce(sum(output_tokens), 0) AS outputTokens
+     FROM ai_calls WHERE ledger_id = @ledger`,
+  )!
+  const recent = ctx.q.all<AiUsage['recent'][number]>(
+    `SELECT id, created_at AS createdAt, slot, model, ok, latency_ms AS latencyMs, error
+     FROM ai_calls WHERE ledger_id = @ledger ORDER BY id DESC LIMIT 20`,
+  )
   return { ...totals, recent: recent.map((r) => ({ ...r, ok: !!r.ok })) }
 }

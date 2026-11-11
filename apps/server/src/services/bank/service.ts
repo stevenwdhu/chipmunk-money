@@ -1,4 +1,4 @@
-import { asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, sql } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
 import {
   accountTypeInfo,
@@ -23,7 +23,7 @@ import {
 import type { z } from 'zod'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../../ai/runner'
-import { bankAccounts, bankConnections } from '../../db/schema'
+import { bankAccounts, bankConnections, bankTransactions } from '../../db/schema'
 import { badRequest, notFound } from '../../lib/http'
 import { ulid } from '../../lib/ids'
 import type { Storage } from '../../storage'
@@ -60,6 +60,8 @@ type BankAccountRow = typeof bankAccounts.$inferSelect
 type AccountRow = BankAccountRow & {
   /** The ledger of the account it syncs into (the account's), or null when it isn't linked. */
   ledgerId: string | null
+  /** The name of the account it syncs into, or null when it isn't linked. */
+  accountName: string | null
 }
 /** What a provider sent: what each bank account's part of it is to keep, and how a linked one's is applied. */
 interface Fetched_ {
@@ -86,6 +88,9 @@ const MAX_HISTORY_DAYS = 90
  * far as it goes) Wealthsimple's whole history.
  */
 const HISTORY_DAYS: Record<BankProviderKind, number> = { simplefin: MAX_HISTORY_DAYS, plaid: 730, wealthsimple: 3650 }
+/** The date of an account's oldest transaction (not deleted ones), if any. */
+const firstDate = (ctx: AppContext, accountId: number) =>
+  ctx.q.pluck<string | null>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND deleted_at IS NULL', { accountId }) ?? null
 /** Who the activity log says made a change. */
 const actor = (provider: BankProviderKind) => ({ name: { simplefin: 'SimpleFIN sync', plaid: 'Plaid sync', wealthsimple: 'Wealthsimple sync' }[provider], apiKeyId: null })
 /** Plaid's error code for a bank that wants you to sign in again. */
@@ -95,8 +100,10 @@ const REVIEW_HOLD_MS = 15 * 60_000
 
 /**
  * Bank connections, the accounts they bring, and syncing those accounts into ledgers.
- * Connections are app-wide (meta.db), from any of the services side by side: SimpleFIN (one
- * connection for all the banks you add there) and Plaid (one per bank login). Each ledger account
+ * Connections, their bank accounts and what those last reported are app-wide, from any of the
+ * services side by side: SimpleFIN (one connection for all the banks you add there), Plaid (one per
+ * bank login) and Wealthsimple. A bank account links to one ledger account, and so to that
+ * account's ledger: applying what it brings works in that ledger's context. Each ledger account
  * syncs from at most one bank account, so from one service.
  */
 export class BankService {
@@ -112,19 +119,23 @@ export class BankService {
   private wealthsimple: WealthsimpleProvider
 
   constructor(private storage: Storage) {
-    this.simplefin = createSimpleFin({ fetch: storage.fetch, timeZone: () => effectiveTimezone(storage.meta), now: storage.now })
-    this.plaid = createPlaid({ fetch: storage.fetch, credentials: () => plaidCredentials(storage.meta), timeZone: () => effectiveTimezone(storage.meta), now: storage.now })
-    this.wealthsimple = createWealthsimple({ fetch: storage.fetch, timeZone: () => effectiveTimezone(storage.meta), now: storage.now })
+    this.simplefin = createSimpleFin({ fetch: storage.fetch, timeZone: () => effectiveTimezone(storage.app), now: storage.now })
+    this.plaid = createPlaid({ fetch: storage.fetch, credentials: () => plaidCredentials(storage.app), timeZone: () => effectiveTimezone(storage.app), now: storage.now })
+    this.wealthsimple = createWealthsimple({ fetch: storage.fetch, timeZone: () => effectiveTimezone(storage.app), now: storage.now })
   }
 
+  /** The app-wide tables: connections, bank accounts and what they reported. */
+  private get app() {
+    return this.storage.app
+  }
   private get db() {
-    return this.storage.meta.db
+    return this.storage.app.db
   }
   private now() {
     return this.storage.now()
   }
   private tz() {
-    return effectiveTimezone(this.storage.meta)
+    return effectiveTimezone(this.storage.app)
   }
   private localDate(at: Date | string) {
     return todayInTz(this.tz(), typeof at === 'string' ? new Date(at) : at)
@@ -140,16 +151,22 @@ export class BankService {
     // In the order the provider listed them.
     return this.withLedgers((connectionId ? q.where(eq(bankAccounts.connectionId, connectionId)) : q).orderBy(sql`rowid`).all())
   }
-  /** Bank accounts with the ledger each one's linked account is in. */
+  /** Bank accounts with the ledger and name of each one's linked account. */
   private withLedgers(rows: BankAccountRow[]): AccountRow[] {
     const ids = rows.flatMap((r) => (r.accountId === null ? [] : [r.accountId]))
-    const ledgerOf = ids.length
-      ? this.storage.allLedgers('bank links', (sqlite) => {
-          const found = sqlite.prepare(`SELECT id, ledger_id FROM ledger_accounts WHERE id IN (${ids.map(() => '?').join(', ')})`).all(...ids)
-          return new Map((found as Array<{ id: number; ledger_id: string }>).map((r) => [r.id, r.ledger_id]))
+    const linked = ids.length
+      ? this.storage.allLedgers('bank links', (db) => {
+          const found = db.all<{ id: number; ledgerId: string; name: string }>(
+            'SELECT id, ledger_id AS ledgerId, name FROM ledger_accounts WHERE id IN (SELECT value FROM json_each(?))',
+            JSON.stringify(ids),
+          )
+          return new Map(found.map((r) => [r.id, r]))
         })
-      : new Map<number, string>()
-    return rows.map((r) => ({ ...r, ledgerId: r.accountId === null ? null : (ledgerOf.get(r.accountId) ?? null) }))
+      : new Map<number, { ledgerId: string; name: string }>()
+    return rows.map((r) => {
+      const account = r.accountId === null ? undefined : linked.get(r.accountId)
+      return { ...r, ledgerId: account?.ledgerId ?? null, accountName: account?.name ?? null }
+    })
   }
   private bankAccount(id: string): AccountRow | undefined {
     const row = this.db.select().from(bankAccounts).where(eq(bankAccounts.id, id)).get()
@@ -180,22 +197,16 @@ export class BankService {
   private nextSyncAt(row: ConnectionRow, hasAccounts: boolean): string | null {
     if (!hasAccounts) return null
     if (!row.lastAttemptAt) return this.now().toISOString()
-    const every = bankSyncHours(this.storage.meta, row.provider) * HOUR
+    const every = bankSyncHours(this.app, row.provider) * HOUR
     const wait = row.status === 'error' ? Math.min(RETRY_AFTER_ERROR_MS, every) : every
     return new Date(Date.parse(row.lastAttemptAt) + wait).toISOString()
   }
 
   private accountDTO(a: AccountRow): BankAccount {
     let link: BankAccount['link'] = null
-    if (a.ledgerId && a.accountId) {
+    if (a.ledgerId && a.accountId && a.accountName !== null) {
       const ledger = this.storage.registry.find(a.ledgerId)
-      if (ledger) {
-        const name = this.storage.registry
-          .context(ledger.id)
-          .sqlite.prepare('SELECT name FROM accounts WHERE id = ?')
-          .get(a.accountId) as { name: string } | undefined
-        if (name) link = { ledgerId: ledger.id, ledgerSlug: ledger.slug, ledgerName: ledger.name, accountId: a.accountId, accountName: name.name }
-      }
+      if (ledger) link = { ledgerId: ledger.id, ledgerSlug: ledger.slug, ledgerName: ledger.name, accountId: a.accountId, accountName: a.accountName }
     }
     return {
       id: a.id,
@@ -280,10 +291,10 @@ export class BankService {
 
   /** This app's id at Plaid (Link wants one per user, and this app has one). */
   private plaidUserId(): string {
-    let id = getAppSetting<string | null>(this.storage.meta, 'plaid.userId', null)
+    let id = getAppSetting<string | null>(this.app, 'plaid.userId', null)
     if (!id) {
       id = ulid(this.now().getTime())
-      setAppSetting(this.storage.meta, 'plaid.userId', id)
+      setAppSetting(this.app, 'plaid.userId', id)
     }
     return id
   }
@@ -433,9 +444,11 @@ export class BankService {
       })
   }
 
-  /** The bank account syncing into this ledger account, if any. */
+  /** The bank account syncing into this ledger account, if any (none for another ledger's account). */
   linkedTo(ledgerId: string, accountId: number): AccountRow | undefined {
-    return this.accountRows().find((a) => a.ledgerId === ledgerId && a.accountId === accountId)
+    const row = this.db.select().from(bankAccounts).where(eq(bankAccounts.accountId, accountId)).get()
+    const acct = row ? this.withLedgers([row])[0] : undefined
+    return acct?.ledgerId === ledgerId ? acct : undefined
   }
 
   /**
@@ -485,9 +498,8 @@ export class BankService {
     const acct = this.linkedTo(ctx.ledger.id, accountId)
     if (!acct?.fetchedAt || acct.lastSyncedAt) return null
     const provider = this.row(acct.connectionId).provider
-    const meta = this.storage.meta.sqlite
-    const from = acct.syncFrom ?? oldestStored(meta, acct.id) ?? this.localDate(this.now())
-    const applied = applyRemoteTransactions(ctx, accountId, storedTransactions(meta, acct.id, acct.syncFrom), { from, to: this.localDate(this.now()), floor: acct.syncFrom }, provider)
+    const from = acct.syncFrom ?? oldestStored(this.app, acct.id) ?? this.localDate(this.now())
+    const applied = applyRemoteTransactions(ctx, accountId, storedTransactions(this.app, acct.id, acct.syncFrom), { from, to: this.localDate(this.now()), floor: acct.syncFrom }, provider)
     this.caughtUp(ctx, accountId, acct)
     this.settle(ctx, applied.newIds)
     return { added: applied.added, adopted: applied.adopted }
@@ -501,15 +513,17 @@ export class BankService {
   private caughtUp(ctx: AppContext, accountId: number, acct: AccountRow) {
     this.db.update(bankAccounts).set({ lastSyncedAt: acct.fetchedAt, error: null }).where(eq(bankAccounts.id, acct.id)).run()
     const target = accounts.getAccount(ctx, accountId)
-    const oldest = ctx.sqlite.prepare('SELECT min(date) FROM transactions WHERE account_id = ? AND deleted_at IS NULL').pluck().get(accountId) as string | null
-    if (target.openingDate && oldest && oldest < target.openingDate) ctx.sqlite.prepare('UPDATE accounts SET opening_date = ? WHERE id = ?').run(oldest, accountId)
+    const oldest = firstDate(ctx, accountId)
+    if (target.openingDate && oldest && oldest < target.openingDate) {
+      ctx.q.run('UPDATE accounts SET opening_date = @oldest WHERE id = @accountId AND ledger_id = @ledger', { oldest, accountId })
+    }
     if (acct.balanceMinor !== null && acct.balanceDate) this.alignWithBank(ctx, accountId, { balanceMinor: acct.balanceMinor, balanceDate: acct.balanceDate })
   }
 
   /** As after a sync: refunds and card payments first, then recurring payments, then AI for the new ones. */
   private settle(ctx: AppContext, newIds: number[]) {
     const earliest = newIds.length
-      ? (ctx.sqlite.prepare('SELECT min(date) FROM transactions WHERE id IN (SELECT value FROM json_each(?))').pluck().get(JSON.stringify(newIds)) as string)
+      ? (ctx.q.pluck<string>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(@ids))', { ids: JSON.stringify(newIds) }) ?? null)
       : null
     const { cleared } = matchTransactions(ctx, { earliest })
     if (!newIds.length && !cleared.length) return
@@ -529,7 +543,7 @@ export class BankService {
 
   /** What a switch's review was made from: the bank account's kept transactions, and the account's. */
   private switchVersion(ctx: AppContext, accountId: number, acct: AccountRow) {
-    return `${storedStamp(this.storage.meta.sqlite, acct.id)}.${localStamp(ctx, accountId)}`
+    return `${storedStamp(this.app, acct.id)}.${localStamp(ctx, accountId)}`
   }
 
   /** While a switch is reviewed, its connections (the account's and the bank account's) don't sync on their own. */
@@ -562,22 +576,20 @@ export class BankService {
   previewSwitch(ctx: AppContext, accountId: number, input: { bankAccountId: string; from?: string | null }): LinkPreview {
     const target = accounts.getAccount(ctx, accountId)
     const acct = this.switchTarget(ctx, target.id, input.bankAccountId)
-    const meta = this.storage.meta.sqlite
     const provider = this.row(acct.connectionId).provider
     const today = this.localDate(this.now())
-    const first = ctx.sqlite.prepare('SELECT min(date) FROM transactions WHERE account_id = ? AND deleted_at IS NULL').pluck().get(target.id) as string | null
-    const earliest = oldestStored(meta, acct.id) ?? today
+    const first = firstDate(ctx, target.id)
+    const earliest = oldestStored(this.app, acct.id) ?? today
     const from = input.from && input.from > earliest ? input.from : earliest
     const base = { from, to: today, earliest, first, provider, fetchedAt: acct.fetchedAt, version: this.switchVersion(ctx, target.id, acct) }
     // Nothing fetched for it yet: nothing to compare with.
     if (!acct.fetchedAt) return { ...base, rows: [] }
-    const remote = storedTransactions(meta, acct.id, from)
-    const rows = ctx.sqlite
-      .prepare(
-        `SELECT id, date, amount_minor AS amountMinor, name, payee, payee_key AS payeeKey, deleted_at IS NOT NULL AS deleted
-         FROM transactions WHERE account_id = ? AND date >= ?`,
-      )
-      .all(target.id, addDays(from, -1)) as Array<{ id: number; date: string; amountMinor: number; name: string | null; payee: string; payeeKey: string; deleted: number }>
+    const remote = storedTransactions(this.app, acct.id, from)
+    const rows = ctx.q.all<{ id: number; date: string; amountMinor: number; name: string | null; payee: string; payeeKey: string; deleted: number }>(
+      `SELECT id, date, amount_minor AS amountMinor, name, payee, payee_key AS payeeKey, deleted_at IS NOT NULL AS deleted
+       FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND date >= @from`,
+      { accountId: target.id, from: addDays(from, -1) },
+    )
     const local = rows.map((r) => ({ ...r, deleted: !!r.deleted }))
     const plan = planSwitch(local, remote, (payee) => payeeKeyOf(ctx, payee))
     const L = new Map(local.map((l) => [l.id, l]))
@@ -616,9 +628,9 @@ export class BankService {
       throw new HTTPException(409, { message: 'Transactions changed since this review was made (a sync, or an edit). It has been made again: check it, then switch.' })
     }
     const provider = this.row(acct.connectionId).provider
-    const remote = storedTransactions(this.storage.meta.sqlite, acct.id, input.from)
+    const remote = storedTransactions(this.app, acct.id, input.from)
     // Reviewed from the oldest one kept (as it starts): no limit. From later, only from there on.
-    const oldest = oldestStored(this.storage.meta.sqlite, acct.id)
+    const oldest = oldestStored(this.app, acct.id)
     const { bankAccount } = this.linkAccount(ctx, target.id, { bankAccountId: acct.id, syncFrom: oldest && input.from > oldest ? input.from : null })
     const { newIds, ...result } = applySwitch(ctx, target.id, provider, remote, input)
     this.caughtUp(ctx, target.id, acct)
@@ -637,21 +649,17 @@ export class BankService {
    * would. Returns how many changed.
    */
   applyKept(): number {
-    const linked = this.storage.meta.sqlite
-      .prepare(
-        `SELECT a.id, a.ledger_id AS ledgerId, a.account_id AS accountId, a.sync_from AS syncFrom, c.provider
-         FROM bank_accounts a JOIN bank_connections c ON c.id = a.connection_id
-         WHERE a.ledger_id IS NOT NULL AND a.account_id IS NOT NULL`,
-      )
-      .all() as Array<{ id: string; ledgerId: string; accountId: number; syncFrom: string | null; provider: BankProviderKind }>
+    const providers = new Map(this.db.select({ id: bankConnections.id, provider: bankConnections.provider }).from(bankConnections).all().map((c) => [c.id, c.provider]))
     let changed = 0
-    for (const a of linked) {
-      if (!this.storage.registry.find(a.ledgerId)) continue
+    for (const a of this.accountRows()) {
+      // Linked: to an account that's still there, so in a ledger.
+      if (!a.ledgerId || a.accountId === null || !this.storage.registry.find(a.ledgerId)) continue
       const ctx = this.storage.registry.context(a.ledgerId)
-      if (!ctx.sqlite.prepare('SELECT 1 FROM accounts WHERE id = ?').get(a.accountId)) continue
-      const ids = new Set(ctx.sqlite.prepare('SELECT external_id FROM transactions WHERE account_id = ? AND external_id IS NOT NULL').pluck().all(a.accountId) as string[])
-      const remote = storedTransactions(this.storage.meta.sqlite, a.id, a.syncFrom).filter((r) => ids.has(r.remoteId))
-      changed += applyRemoteTransactions(ctx, a.accountId, remote, { removed: [], floor: a.syncFrom }, a.provider).updated
+      const ids = new Set(
+        ctx.q.column<string>('SELECT external_id FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND external_id IS NOT NULL', { accountId: a.accountId }),
+      )
+      const remote = storedTransactions(this.app, a.id, a.syncFrom).filter((r) => ids.has(r.remoteId))
+      changed += applyRemoteTransactions(ctx, a.accountId, remote, { removed: [], floor: a.syncFrom }, providers.get(a.connectionId)!).updated
     }
     return changed
   }
@@ -666,23 +674,30 @@ export class BankService {
    * became theirs without it. Returns how many changed.
    */
   refreshPayees(from = 0): number {
-    const meta = this.storage.meta.sqlite
-    const accounts = meta
-      .prepare(`SELECT a.id, a.connection_id AS connectionId, a.remote_id AS remoteId, a.name FROM bank_accounts a JOIN bank_connections c ON c.id = a.connection_id WHERE c.provider = 'wealthsimple'`)
-      .all() as Array<{ id: string; connectionId: string; remoteId: string; name: string }>
-    const update = meta.prepare("UPDATE bank_transactions SET data = json_set(data, '$.payee', ?) WHERE bank_account_id = ? AND remote_id = ?")
-    meta.transaction(() => {
+    const t = bankTransactions
+    const accounts = this.db
+      .select({ id: bankAccounts.id, connectionId: bankAccounts.connectionId, remoteId: bankAccounts.remoteId, name: bankAccounts.name })
+      .from(bankAccounts)
+      .innerJoin(bankConnections, eq(bankConnections.id, bankAccounts.connectionId))
+      .where(eq(bankConnections.provider, 'wealthsimple'))
+      .all()
+    const update = this.db
+      .update(t)
+      .set({ data: sql`json_set(${t.data}, '$.payee', ${sql.placeholder('payee')})` })
+      .where(and(eq(t.bankAccountId, sql.placeholder('bankAccountId')), eq(t.remoteId, sql.placeholder('remoteId'))))
+      .prepare()
+    this.db.transaction(() => {
       for (const a of accounts) {
         const names = new Map(accounts.filter((o) => o.connectionId === a.connectionId).map((o) => [o.remoteId, o.name]))
-        const kept = meta.prepare('SELECT remote_id AS remoteId, data FROM bank_transactions WHERE bank_account_id = ?').all(a.id) as Array<{ remoteId: string; data: string }>
+        const kept = this.db.select({ remoteId: t.remoteId, data: t.data }).from(t).where(eq(t.bankAccountId, a.id)).all()
         for (const k of kept) {
           const r = JSON.parse(k.data) as RemoteTransaction
           if (!(r.raw as WsActivity | undefined)?.spendMerchant) continue
           const payee = wealthsimplePayee(r.raw as WsActivity, names)
-          if (payee !== r.payee) update.run(payee, a.id, k.remoteId)
+          if (payee !== r.payee) update.run({ payee, bankAccountId: a.id, remoteId: k.remoteId })
         }
       }
-    })()
+    })
     // Payees your rules named by what the built-in cleanup made of them stay named.
     if (from < 6) keepRuleNames(worldOf(this.storage))
     let changed = this.applyKept()
@@ -697,6 +712,8 @@ export class BankService {
 
   /** Switches a ledger account back to manual. Its transactions stay; they just stop updating. */
   unlinkAccount(ctx: AppContext, accountId: number) {
+    // Another ledger's account is not found here, as a missing one is.
+    accounts.getAccount(ctx, accountId)
     const linked = this.linkedTo(ctx.ledger.id, accountId)
     if (!linked) throw new HTTPException(409, { message: 'This account isn’t synced.' })
     this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, linked.id)).run()
@@ -738,7 +755,7 @@ export class BankService {
       const remote = fetched.data.accounts.find((r) => r.remoteId === acct.remoteId)
       // Not reported, or with a problem: what it sent may be partial.
       if (!remote || remote.error) continue
-      keepTransactions(this.storage.meta.sqlite, acct.id, fetched.received(acct, remote), now)
+      keepTransactions(this.app, acct.id, fetched.received(acct, remote), now)
       this.db.update(bankAccounts).set({ fetchedAt: now }).where(eq(bankAccounts.id, acct.id)).run()
     }
   }
@@ -935,11 +952,9 @@ export class BankService {
       const remote = remoteAccounts.find((r) => r.remoteId === acct.remoteId)
       const ledger = this.storage.registry.find(acct.ledgerId!)
       const ctx = ledger ? this.storage.registry.context(ledger.id) : null
-      const target = ctx
-        ? (ctx.sqlite.prepare('SELECT id, name, institution_id AS institutionId FROM accounts WHERE id = ?').get(acct.accountId) as
-            | { id: number; name: string; institutionId: number }
-            | undefined)
-        : undefined
+      const target = ctx?.q.get<{ id: number; name: string }>('SELECT id, name FROM ledger_accounts WHERE ledger_id = @ledger AND id = @accountId', {
+        accountId: acct.accountId,
+      })
       if (!ledger || !ctx || !target) {
         // The ledger or account is gone: stop syncing it.
         this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, acct.id)).run()

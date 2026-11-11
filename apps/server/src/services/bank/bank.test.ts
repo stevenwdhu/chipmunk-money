@@ -4,9 +4,11 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { Account, ActivityPage, ApiKeyCreated, BankConnection, Institution, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
+import { bankConnections } from '../../db/schema'
 import { SecretBox } from '../../lib/secrets'
-import { categoryId, makeAccount, testStorage } from '../../test/helpers'
+import { categoryId, makeAccount, testLedger, testStorage } from '../../test/helpers'
 import { createTransaction } from '../transactions'
+import { BankService } from './service'
 import { decimalToMinor, sanitize } from './simplefin'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -156,7 +158,7 @@ describe('bank connections', () => {
     ])
     // Discovering accounts only asks for balances.
     expect(bridge.state.requests[0]!.searchParams.get('balances-only')).toBe('1')
-    const stored = storage.meta.sqlite.prepare('SELECT secret FROM bank_connections').get() as { secret: string }
+    const stored = storage.app.db.select({ secret: bankConnections.secret }).from(bankConnections).get()!
     expect(stored.secret).not.toMatch(/s3cret|bridge/)
 
     const again = await api('POST', '/bank/connections', { setupToken: token() })
@@ -503,5 +505,120 @@ describe('institutions', () => {
     expect(await institutionsOf(api)).toEqual([['TD Bank', 1]])
     const other = (await api('POST', path, { name: 'Empty' })).body as Institution
     expect((await api('DELETE', `${path}/${other.id}`)).status).toBe(204)
+  })
+})
+
+describe('bank sync across ledgers', () => {
+  /**
+   * One connection feeding two ledgers: its Chequing syncs into Personal, its Visa into Family, and
+   * both bring look-alike transactions under the same bank ids.
+   */
+  async function twoLedgers() {
+    const t = await setup()
+    const { bridge, storage, ctx, connect, remote, api, sync } = t
+    const family = testLedger(storage, 'Family')
+    const same = () => [tx('t1', '2026-09-28', '-45.67', 'Loblaws'), tx('t2', '2026-09-29', '-12.00', 'Coffee', { pending: true })]
+    bridge.state.accounts[0]!.transactions = same()
+    bridge.state.accounts[1]!.transactions = same()
+    const mine = makeAccount(ctx, 'TD Chequing')
+    const theirs = makeAccount(family, 'TD Visa', 'credit')
+    const conn = await connect()
+    expect((await api('PUT', `/ledgers/personal/accounts/${mine}/bank`, { bankAccountId: remote(conn, 'chq').id, syncFrom: '2026-09-01' })).status).toBe(200)
+    expect((await api('PUT', `/ledgers/family/accounts/${theirs}/bank`, { bankAccountId: remote(conn, 'visa').id, syncFrom: '2026-09-01' })).status).toBe(200)
+    const first = await sync(conn.id)
+    const list = async (slug: string) => ((await api('GET', `/ledgers/${slug}/transactions?limit=500`)).body as TransactionPage).items
+    return { ...t, family, mine, theirs, conn, first, list }
+  }
+
+  it('applies each bank account in the ledger of the account it syncs into', async () => {
+    const { first, list, mine, theirs, api, remote } = await twoLedgers()
+    expect(first.accounts).toEqual([
+      expect.objectContaining({ ledger: 'personal', accountId: mine, accountName: 'TD Chequing', added: 2 }),
+      expect.objectContaining({ ledger: 'family', accountId: theirs, accountName: 'TD Visa', added: 2 }),
+    ])
+    const personal = await list('personal')
+    const family = await list('family')
+    expect(personal.map((t) => [t.accountId, t.externalId]).sort()).toEqual([[mine, 't1'], [mine, 't2']])
+    expect(family.map((t) => [t.accountId, t.externalId]).sort()).toEqual([[theirs, 't1'], [theirs, 't2']])
+    // The connection shows where each one goes.
+    const listed = (await api('GET', '/bank/connections')).body[0] as BankConnection
+    expect(remote(listed, 'chq').link).toMatchObject({ ledgerSlug: 'personal', accountId: mine, accountName: 'TD Chequing' })
+    expect(remote(listed, 'visa').link).toMatchObject({ ledgerSlug: 'family', accountId: theirs, accountName: 'TD Visa' })
+    expect(remote(listed, 'tfsa').link).toBeNull()
+    // Each ledger's activity has its own sync.
+    for (const [slug, name] of [['personal', 'TD Chequing'], ['family', 'TD Visa']]) {
+      const activity = ((await api('GET', `/ledgers/${slug}/activity?entity=account`)).body as ActivityPage).items.filter((a) => a.action === 'sync')
+      expect(activity.map((a) => a.summary)).toEqual([expect.stringContaining(`Synced ${name}`)])
+    }
+  })
+
+  it('keeps changes to one ledger’s synced transactions out of the other', async () => {
+    const { bridge, list, sync, conn, api } = await twoLedgers()
+    // Only the Visa's pending coffee posts under a new id, at another amount, and its grocery changes.
+    bridge.state.accounts[1]!.transactions = [tx('t1', '2026-09-28', '-46.67', 'Loblaws'), tx('t3', '2026-09-30', '-13.50', 'Coffee')]
+    const second = await sync(conn.id)
+    expect(second.accounts.find((a) => a.ledger === 'family')).toMatchObject({ updated: 2, added: 0, removed: 0 })
+    expect(second.accounts.find((a) => a.ledger === 'personal')).toMatchObject({ updated: 0, added: 0, removed: 0 })
+    const personal = await list('personal')
+    expect(personal.map((t) => [t.externalId, t.amountMinor, t.status]).sort()).toEqual([
+      ['t1', -4567, 'cleared'],
+      ['t2', -1200, 'pending'],
+    ])
+    const family = await list('family')
+    expect(family.map((t) => [t.externalId, t.amountMinor, t.status]).sort()).toEqual([
+      ['t1', -4667, 'cleared'],
+      ['t3', -1350, 'cleared'],
+    ])
+    // What the bank sent is found from each ledger for its own transactions only.
+    const ownGrocery = personal.find((t) => t.externalId === 't1')!
+    const theirGrocery = family.find((t) => t.externalId === 't1')!
+    const data = await api('GET', `/ledgers/personal/transactions/${ownGrocery.id}/bank-data`)
+    expect(data.status).toBe(200)
+    expect(data.body).toMatchObject({ provider: 'simplefin', remoteId: 't1', event: 'added' })
+    expect((await api('GET', `/ledgers/family/transactions/${theirGrocery.id}/bank-data`)).body).toMatchObject({ remoteId: 't1', event: 'changed' })
+    const probe = await api('GET', `/ledgers/personal/transactions/${theirGrocery.id}/bank-data`)
+    expect(probe.status).toBe(404)
+    expect(probe.body.error.message).toBe('Transaction not found')
+  })
+
+  it('refuses another ledger’s accounts and bank links', async () => {
+    const { api, remote, conn, mine, theirs } = await twoLedgers()
+    const chq = remote(conn, 'chq').id
+    // Personal's account isn't Family's to link, unlink or review.
+    for (const [method, path, body] of [
+      ['PUT', `/accounts/${mine}/bank`, { bankAccountId: remote(conn, 'tfsa').id }],
+      ['DELETE', `/accounts/${mine}/bank`, undefined],
+      ['POST', `/accounts/${mine}/bank/preview`, { bankAccountId: remote(conn, 'tfsa').id }],
+    ] as const) {
+      const res = await api(method, `/ledgers/family${path}`, body)
+      expect(res.status, `${method} ${path}`).toBe(404)
+      expect(res.body.error.message).toBe('Account not found')
+    }
+    // A bank account already syncing into Personal can't feed Family's account too.
+    const taken = await api('PUT', `/ledgers/family/accounts/${theirs}/bank`, { bankAccountId: chq })
+    expect(taken.status).toBe(409)
+    expect(taken.body.error.message).toMatch(/already syncs into an account in another ledger/)
+    // Family can sync from its own and from ones not syncing anywhere.
+    const available = (await api('GET', '/ledgers/family/bank-accounts')).body as Array<{ remoteId: string }>
+    expect(available.map((a) => a.remoteId)).toEqual(['visa', 'tfsa'])
+    // Nothing changed for Personal.
+    const listed = (await api('GET', '/bank/connections')).body[0] as BankConnection
+    expect(remote(listed, 'chq').link).toMatchObject({ ledgerSlug: 'personal', accountId: mine })
+  })
+
+  it('applies what was kept to each ledger’s own transactions', async () => {
+    const { storage, ctx, family, list } = await twoLedgers()
+    // Both ledgers' groceries were renamed apart from what the bank sent.
+    for (const c of [ctx, family]) c.q.run("UPDATE transactions SET payee = 'Old name' WHERE ledger_id = @ledger AND external_id = 't1'")
+    expect(new BankService(storage).applyKept()).toBe(2)
+    for (const slug of ['personal', 'family']) expect((await list(slug)).find((t) => t.externalId === 't1')!.payee).toBe('Loblaws')
+  })
+
+  it('a missing account is not found when switching to manual', async () => {
+    // Before, a missing account was "not synced" (409); like another ledger's account, it's a 404 now.
+    const { api } = await setup()
+    const res = await api('DELETE', '/ledgers/personal/accounts/999/bank')
+    expect(res.status).toBe(404)
+    expect(res.body.error.message).toBe('Account not found')
   })
 })

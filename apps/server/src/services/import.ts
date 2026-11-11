@@ -10,8 +10,7 @@ import {
 import type { z } from 'zod'
 import type { importCommitSchema, importPreviewSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../ai/runner'
-import { importBatches } from '../db/schema'
-import { badRequest, notFound } from '../lib/http'
+import { badRequest } from '../lib/http'
 import { saveImportMapping } from './accounts'
 import { aiSuggestion, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
 import type { AppContext } from './context'
@@ -49,23 +48,24 @@ function findDuplicates(
   const byExternalId = new Map(
     externalIds.length
       ? (
-          ctx.sqlite
-            .prepare(
-              `SELECT id, external_id AS externalId FROM transactions
-               WHERE account_id = ? AND external_id IN (SELECT value FROM json_each(?))`,
-            )
-            .all(accountId, JSON.stringify(externalIds)) as Array<{ id: number; externalId: string }>
+          ctx.q.all<{ id: number; externalId: string }>(
+            `SELECT id, external_id AS externalId FROM transactions
+             WHERE ledger_id = @ledger AND account_id = ? AND external_id IN (SELECT value FROM json_each(?))`,
+            accountId,
+            JSON.stringify(externalIds),
+          )
         ).map((r) => [r.externalId, r.id])
       : [],
   )
 
   const dates = rows.map((r) => r.date).sort()
-  const existing = ctx.sqlite
-    .prepare(
-      `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, external_id AS externalId FROM transactions
-       WHERE account_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?`,
-    )
-    .all(accountId, addDays(dates[0]!, -3), addDays(dates[dates.length - 1]!, 3)) as ExistingTx[]
+  const existing = ctx.q.all<ExistingTx>(
+    `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, external_id AS externalId FROM transactions
+     WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?`,
+    accountId,
+    addDays(dates[0]!, -3),
+    addDays(dates[dates.length - 1]!, 3),
+  )
   const used = new Set<number>()
 
   return rows.map((row) => {
@@ -95,9 +95,10 @@ function findDuplicates(
   })
 }
 
+const hasAccount = (ctx: AppContext, id: number) => ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', id) !== undefined
+
 export function previewImport(ctx: AppContext, input: PreviewInput): ImportPreviewRow[] {
-  const account = ctx.sqlite.prepare('SELECT id FROM accounts WHERE id = ?').get(input.accountId)
-  if (!account) badRequest('That account does not exist')
+  if (!hasAccount(ctx, input.accountId)) badRequest('That account does not exist')
   const dupes = findDuplicates(ctx, input.accountId, input.rows)
   const cache = new Map<string, SuggestionResult | null>()
   return input.rows.map((row, i) => {
@@ -121,25 +122,28 @@ export function previewImport(ctx: AppContext, input: PreviewInput): ImportPrevi
  * `background: false` (dry runs), AI categorization isn't started afterwards.
  */
 export function commitImport(ctx: AppContext, input: CommitInput, opts: { background?: boolean } = {}): ImportResult {
-  const account = ctx.sqlite.prepare('SELECT id FROM accounts WHERE id = ?').get(input.accountId)
-  if (!account) badRequest('That account does not exist')
+  if (!hasAccount(ctx, input.accountId)) badRequest('That account does not exist')
 
   // Re-check duplicates server-side so a double submit can't import twice.
   const dupes = findDuplicates(ctx, input.accountId, input.rows)
   const fresh = input.rows.filter((_, i) => dupes[i] === null)
   const cache = new Map<string, SuggestionResult | null>()
 
-  const result = ctx.sqlite.transaction(() => {
-    const batch = ctx.db
-      .insert(importBatches)
-      .values({ ledgerId: ctx.ledger.id, accountId: input.accountId, fileName: input.fileName ?? null, rowCount: fresh.length })
-      .returning()
-      .get()
+  const result = ctx.q.transaction(() => {
+    const batchId = Number(
+      ctx.q.run(
+        'INSERT INTO import_batches (ledger_id, account_id, file_name, row_count) VALUES (@ledger, ?, ?, ?)',
+        input.accountId,
+        input.fileName ?? null,
+        fresh.length,
+      ).lastInsertRowid,
+    )
     let categorized = 0
     let needsReview = 0
     // The category the bank or another app gave it: its bank category, for AI to go by (like Plaid's).
     // Yours, not a guess, so AI agreeing with it applies its pick without review.
-    const setBankCategory = ctx.sqlite.prepare('UPDATE transactions SET bank_category = ?, bank_category_confident = 1 WHERE id = ?')
+    const setBankCategory = (category: string, id: number) =>
+      ctx.q.run('UPDATE transactions SET bank_category = ?, bank_category_confident = 1 WHERE id = ? AND ledger_id = @ledger', category, id)
     for (const row of fresh) {
       let suggestion: SuggestionResult | null = null
       if (!row.categoryId) {
@@ -161,21 +165,21 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
           transferAccountId: null,
           externalId: row.externalId ?? null,
         },
-        { origin: 'import', importBatchId: batch.id, suggestion },
+        { origin: 'import', importBatchId: batchId, suggestion },
       )
-      if (row.category) setBankCategory.run(row.category, id)
+      if (row.category) setBankCategory(row.category, id)
       if (row.categoryId || suggestion?.categoryId) categorized++
       if (!row.categoryId && suggestion?.categoryId && !suggestion.autoApply) needsReview++
     }
     return {
-      batchId: batch.id,
+      batchId,
       imported: fresh.length,
       skippedDuplicates: input.rows.length - fresh.length,
       categorized,
       needsReview,
       dryRun: false,
     }
-  })()
+  })
 
   if (input.mapping) saveImportMapping(ctx, input.accountId, input.mapping)
   const earliest = fresh.reduce<string | null>((d, r) => (!d || r.date < d ? r.date : d), null)
@@ -192,26 +196,24 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
 }
 
 export function listBatches(ctx: AppContext): ImportBatch[] {
-  return ctx.sqlite
-    .prepare(
-      `SELECT b.id, b.account_id AS accountId, a.name AS accountName, b.file_name AS fileName, b.row_count AS rowCount,
-         b.created_at AS createdAt,
-         (SELECT count(*) FROM transactions t WHERE t.import_batch_id = b.id AND t.deleted_at IS NULL) AS remaining
-       FROM import_batches b JOIN accounts a ON a.id = b.account_id
-       ORDER BY b.id DESC LIMIT 50`,
-    )
-    .all() as ImportBatch[]
+  return ctx.q.all<ImportBatch>(
+    `SELECT b.id, b.account_id AS accountId, a.name AS accountName, b.file_name AS fileName, b.row_count AS rowCount,
+       b.created_at AS createdAt,
+       (SELECT count(*) FROM transactions t WHERE t.import_batch_id = b.id AND t.ledger_id = b.ledger_id AND t.deleted_at IS NULL) AS remaining
+     FROM import_batches b JOIN ledger_accounts a ON a.id = b.account_id AND a.ledger_id = b.ledger_id
+     WHERE b.ledger_id = @ledger
+     ORDER BY b.id DESC LIMIT 50`,
+  )
 }
 
 export function undoBatch(ctx: AppContext, batchId: number) {
-  const batch = ctx.sqlite.prepare('SELECT id FROM import_batches WHERE id = ?').get(batchId)
-  if (!batch) notFound('Import not found')
-  ctx.sqlite.transaction(() => {
+  ctx.q.mustGet('SELECT id FROM import_batches WHERE id = ? AND ledger_id = @ledger', 'Import not found', batchId)
+  ctx.q.transaction(() => {
     releaseLinks(ctx, 'import_batch_id = ?', batchId)
-    const removed = ctx.sqlite.prepare('DELETE FROM transactions WHERE import_batch_id = ?').run(batchId)
-    ctx.sqlite.prepare('DELETE FROM import_batches WHERE id = ?').run(batchId)
+    const removed = ctx.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND import_batch_id = ?', batchId)
+    ctx.q.run('DELETE FROM import_batches WHERE id = ? AND ledger_id = @ledger', batchId)
     return removed.changes
-  })()
+  })
 }
 
 // Background AI categorization ---------------------------------------------
@@ -235,17 +237,7 @@ export function aiJobStatus(ctx: AppContext): AiJobStatus {
 export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[]; limit?: number } = {}) {
   const aiJob = aiJobStatus(ctx)
   if (aiJob.running) return aiJob
-  const candidates = ctx.sqlite
-    .prepare(
-      `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
-         bank_category AS bankCategory, bank_category_confident AS bankConfident
-       FROM transactions
-       WHERE category_id IS NULL AND deleted_at IS NULL AND transfer_pair_id IS NULL AND category_source IS NOT 'linked'
-         ${opts.batchId ? 'AND import_batch_id = ?' : ''}
-         ${opts.ids ? 'AND id IN (SELECT value FROM json_each(?))' : ''}
-       ORDER BY date DESC`,
-    )
-    .all(...(opts.batchId ? [opts.batchId] : []), ...(opts.ids ? [JSON.stringify(opts.ids)] : [])) as Array<{
+  const candidates = ctx.q.all<{
     id: number
     accountId: number
     date: string
@@ -255,9 +247,19 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
     notes: string | null
     bankCategory: string | null
     bankConfident: number
-  }>
+  }>(
+    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
+       bank_category AS bankCategory, bank_category_confident AS bankConfident
+     FROM transactions
+     WHERE ledger_id = @ledger AND category_id IS NULL AND deleted_at IS NULL AND transfer_pair_id IS NULL AND category_source IS NOT 'linked'
+       ${opts.batchId ? 'AND import_batch_id = ?' : ''}
+       ${opts.ids ? 'AND id IN (SELECT value FROM json_each(?))' : ''}
+     ORDER BY date DESC`,
+    ...(opts.batchId ? [opts.batchId] : []),
+    ...(opts.ids ? [JSON.stringify(opts.ids)] : []),
+  )
   // Money onto a credit card is a payment (or a refund), never a guess for AI; cash back and rewards are.
-  const cards = new Set(ctx.sqlite.prepare("SELECT id FROM accounts WHERE type = 'credit'").pluck().all() as number[])
+  const cards = new Set(ctx.q.column<number>("SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND type = 'credit'"))
   const rows = candidates.filter((r) => !(r.amount > 0 && cards.has(r.accountId) && !isCardReward(r.payee)))
   const groups = new Map<string, typeof rows>()
   for (const r of rows) {
@@ -269,10 +271,12 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
   const work = [...groups.values()].slice(0, opts.limit ?? 150)
   Object.assign(aiJob, { running: true, total: work.length, done: 0, categorized: 0, startedAt: new Date().toISOString() })
 
-  const update = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ?
-     WHERE id = ? AND category_id IS NULL`,
-  )
+  const update = (...params: unknown[]) =>
+    ctx.q.run(
+      `UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ?
+       WHERE id = ? AND ledger_id = @ledger AND category_id IS NULL`,
+      ...params,
+    )
   try {
     const queue = [...work]
     const worker = async () => {
@@ -292,9 +296,9 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
               bankConfident: !!first.bankConfident,
             }))
           if (s?.categoryId) {
-            ctx.sqlite.transaction(() => {
-              for (const r of list) update.run(s.categoryId, s.source === 'ai' ? 'ai' : 'history', s.confidence, s.autoApply ? 0 : 1, r.id)
-            })()
+            ctx.q.transaction(() => {
+              for (const r of list) update(s.categoryId, s.source === 'ai' ? 'ai' : 'history', s.confidence, s.autoApply ? 0 : 1, r.id)
+            })
             aiJob.categorized += list.length
           }
         } catch {
@@ -329,17 +333,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
   if (!aiEnabled(ctx)) badRequest('Set up an AI provider first, in App settings → AI.')
   const aiJob = aiJobStatus(ctx)
   if (aiJob.running) badRequest('AI is already categorizing in this ledger. Try again when it’s done.')
-  const selected = (
-    ctx.sqlite
-      .prepare(
-        `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
-           bank_category AS bankCategory, bank_category_confident AS bankConfident, category_id AS categoryId, category_source AS source
-         FROM transactions
-         WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND transfer_pair_id IS NULL
-           AND COALESCE(category_source, '') NOT IN ('linked', 'recurring')
-         ORDER BY date DESC`,
-      )
-      .all(JSON.stringify(ids)) as Array<{
+  const selected = ctx.q.all<{
       id: number
       accountId: number
       date: string
@@ -351,7 +345,14 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
       bankConfident: number
       categoryId: number | null
       source: string | null
-    }>
+    }>(
+    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
+       bank_category AS bankCategory, bank_category_confident AS bankConfident, category_id AS categoryId, category_source AS source
+     FROM transactions
+     WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND transfer_pair_id IS NULL
+       AND COALESCE(category_source, '') NOT IN ('linked', 'recurring')
+     ORDER BY date DESC`,
+    JSON.stringify(ids),
   )
   const always = new Set(selected.filter((r) => payeeRule(ctx, r.payeeKey)?.mode === 'always').map((r) => r.payeeKey))
   const rows = selected.filter((r) => !always.has(r.payeeKey))
@@ -361,7 +362,8 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
     groups.set(key, [...(groups.get(key) ?? []), r])
   }
   const work = [...groups.values()]
-  const set = ctx.sqlite.prepare('UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ?')
+  const set = (...params: unknown[]) =>
+    ctx.q.run('UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger', ...params)
   const changed: Recategorized[] = always.size ? applyPayeeChoices(ctx, [...always]) : []
   Object.assign(aiJob, { running: true, total: work.length, done: 0, categorized: changed.length, startedAt: new Date().toISOString() })
   void (async () => {
@@ -382,16 +384,16 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
             })
             const pick = s?.categoryId
             if (s && pick) {
-              ctx.sqlite.transaction(() => {
+              ctx.q.transaction(() => {
                 for (const r of list) {
                   if (r.categoryId === pick) continue
                   // What you picked before isn't learned any more: it's AI's pick, to review.
                   if (r.source === 'user' && r.categoryId) learn(ctx, r.payeeKey, r.amount, r.categoryId, -1)
-                  set.run(pick, 'ai', s.confidence, s.autoApply ? 0 : 1, r.id)
+                  set(pick, 'ai', s.confidence, s.autoApply ? 0 : 1, r.id)
                   changed.push({ id: r.id, before: r.categoryId, after: pick })
                   aiJob.categorized++
                 }
-              })()
+              })
             }
           } catch {
             // Provider errors are logged in ai_calls; keep going with the next one.

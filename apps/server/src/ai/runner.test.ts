@@ -31,7 +31,7 @@ describe('AI runner', () => {
     const res = await configuredCategorizer(ctx)(req)
     expect(res).toMatchObject({ category: 'Coffee', slot: 'fallback', model: 'llama' })
     expect(calls).toEqual(['broken', 'llama'])
-    const logged = ctx.sqlite.prepare('SELECT slot, ok FROM ai_calls ORDER BY id').all()
+    const logged = ctx.q.all('SELECT slot, ok FROM ai_calls WHERE ledger_id = @ledger ORDER BY id')
     expect(logged).toEqual([
       { slot: 'primary', ok: 0 },
       { slot: 'fallback', ok: 1 },

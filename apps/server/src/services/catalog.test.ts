@@ -100,13 +100,18 @@ describe('the shared category list', () => {
     const phones = byName(await list('family'), 'Phones')
     const t = await spend(family, phones.id, 'Fido')
 
-    // Its own list: a copy it edits, which the shared list no longer reaches.
+    // Its own list: a copy it edits, which the shared list no longer reaches. The copy has its own
+    // ids, and its transactions move to them.
     const own = (await api('PUT', '/ledgers/family/categories/sharing', { shared: false })).body as CategoryList
     expect(own.shared).toBe(false)
-    expect((await api('PATCH', `/ledgers/family/categories/${phones.id}`, { name: 'Mobile phones' })).body.name).toBe('Mobile phones')
-    const hobby = (await api('POST', '/ledgers/family/categories', { name: 'Hobbies', groupId: phones.groupId })).body as Category
+    const ownPhones = byName(own, 'Phones')
+    expect(ownPhones.id).not.toBe(phones.id)
+    expect(getTransaction(family, t.id).categoryId).toBe(ownPhones.id)
+    expect((await api('PATCH', `/ledgers/family/categories/${phones.id}`, { name: 'Mobile phones' })).status).toBe(404)
+    expect((await api('PATCH', `/ledgers/family/categories/${ownPhones.id}`, { name: 'Mobile phones' })).body.name).toBe('Mobile phones')
+    const hobby = (await api('POST', '/ledgers/family/categories', { name: 'Hobbies', groupId: ownPhones.groupId })).body as Category
     await api('PATCH', `/categories/${phones.id}`, { name: 'Cellphones' })
-    expect(byName(await list('family'), 'Mobile phones').id).toBe(phones.id)
+    expect(byName(await list('family'), 'Mobile phones').id).toBe(ownPhones.id)
     expect(byName(await list('personal'), 'Cellphones').id).toBe(phones.id)
 
     // Joining again: matched by name (a former default name counts), and what's new joins the shared list.
@@ -164,6 +169,7 @@ describe('the shared category list', () => {
     const { api, list, byName } = setup()
     const shared = (await api('GET', '/categories')).body as CategoryList
     const sports = shared.categories.find((c) => c.name === 'Sports & fitness')!.id
+    const sharedPhones = shared.categories.find((c) => c.name === 'Phones')!.id
     await api('PUT', '/ledgers/family/categories/sharing', { shared: false })
     const phones = byName(await list('family'), 'Phones')
     const make = async (name: string) => ((await api('POST', '/ledgers/family/categories', { name, groupId: phones.groupId })).body as Category).id
@@ -174,7 +180,7 @@ describe('the shared category list', () => {
       filterOut: [{ when: [{ field: 'category', ids: [junk] }] }, { when: [{ field: 'category', ids: [junk, kayak] }, { field: 'amount', min: 5_000 }] }],
     }
     const report = (await api('POST', '/ledgers/family/custom-reports', { name: 'Outdoors', spec: { filter: { spending } } })).body
-    const untouched = (await api('POST', '/ledgers/family/custom-reports', { name: 'Phones', spec: { filter: { spending: { only: [{ field: 'category', ids: [phones.id] }] } } } })).body
+    const phonesReport = (await api('POST', '/ledgers/family/custom-reports', { name: 'Phones', spec: { filter: { spending: { only: [{ field: 'category', ids: [phones.id] }] } } } })).body
 
     await api('PUT', '/ledgers/family/categories/sharing', {
       shared: true,
@@ -183,20 +189,24 @@ describe('the shared category list', () => {
         { category: junk, action: 'uncategorize' },
       ],
     })
-    // Phones is the same shared category and Kayak moved. Junk and the deleted one are gone: their transactions are
+    // Its Phones is the shared Phones (by name) and Kayak moved. Junk and the deleted one are gone: their transactions are
     // uncategorized, so Only count takes Uncategorized in their place (not everything), and the rule left with nothing goes.
     expect((await api('GET', `/ledgers/family/custom-reports/${report.id}`)).body).toMatchObject({
       spec: {
         filter: {
           spending: {
-            only: [{ field: 'category', ids: [...[phones.id, sports].sort((a, b) => a - b), 'none'] }],
+            only: [{ field: 'category', ids: [...[sharedPhones, sports].sort((a, b) => a - b), 'none'] }],
             filterOut: [{ when: [{ field: 'category', ids: [sports] }, { field: 'amount', min: 5_000 }] }],
           },
         },
       },
       missing: [],
     })
-    expect((await api('GET', `/ledgers/family/custom-reports/${untouched.id}`)).body).toEqual(untouched)
+    // One on a category that kept its name follows it to the shared one, with nothing to tell.
+    expect((await api('GET', `/ledgers/family/custom-reports/${phonesReport.id}`)).body).toMatchObject({
+      spec: { filter: { spending: { only: [{ field: 'category', ids: [sharedPhones] }] } } },
+      missing: [],
+    })
     const logged = (await api('GET', '/ledgers/family/activity?entity=custom_report')).body.items
     expect(logged.map((a: Json) => [a.actor, a.summary])).toEqual([
       ['Chipmunk', 'Outdoors filters by Sports & fitness in place of Kayak, Uncategorized in place of Junk and a deleted category, and no longer by Junk'],
@@ -206,12 +216,12 @@ describe('the shared category list', () => {
   })
 
   it('moves a joining ledger’s custom reports to the shared groups and labels by name, dropping the ones the list doesn’t have', async () => {
-    const { api } = setup()
-    const before = (await api('GET', '/categories')).body as CategoryList
+    const { api, list } = setup()
     await api('PUT', '/ledgers/family/categories/sharing', { shared: false })
+    const before = await list('family')
     // Food and Wants again under new ids, Boats with a category the shared list gets, and Junk and Splurge it won't.
-    await api('DELETE', `/ledgers/family/category-groups/${before.groups.find((g) => g.name === 'Food')!.id}`)
-    await api('DELETE', `/ledgers/family/labels/${before.labels.find((l) => l.name === 'Wants')!.id}`)
+    expect((await api('DELETE', `/ledgers/family/category-groups/${before.groups.find((g) => g.name === 'Food')!.id}`)).status).toBe(204)
+    expect((await api('DELETE', `/ledgers/family/labels/${before.labels.find((l) => l.name === 'Wants')!.id}`)).status).toBe(204)
     const make = async (path: string, name: string) => (await api('POST', `/ledgers/family/${path}`, { name })).body.id as number
     const [food, boats, junk, wants, splurge] = [
       await make('category-groups', 'food'),
@@ -240,8 +250,8 @@ describe('the shared category list', () => {
     const sharedGroup = (name: string) => shared.groups.find((g) => g.name === name)!.id
     const [sharedFood, sharedBoats] = [sharedGroup('Food'), sharedGroup('Boats')]
     const sharedWants = shared.labels.find((l) => l.name === 'Wants')!.id
-    // The shared list's new Boats has the id the ledger's food had: each id follows its name.
-    expect(sharedBoats).toBe(food)
+    // Each id follows its name: the ledger's food is the shared Food, not whatever has its id.
+    expect([sharedFood, sharedBoats]).not.toContain(food)
     expect((await api('GET', `/ledgers/family/custom-reports/${report.id}`)).body).toMatchObject({
       spec: {
         filter: {
@@ -268,6 +278,39 @@ describe('the shared category list', () => {
       'Splurging no longer filters by the Splurge label',
       'Treats no longer filters by the Junk group or the Splurge label',
     ])
+  })
+
+  it('moves a leaving ledger’s custom reports to its copies, keeping ids of deleted categories, and leaves the other ledger’s alone', async () => {
+    const { api, list, byName } = setup()
+    const shared = (await api('GET', '/categories')).body as CategoryList
+    const sharedId = (name: string) => shared.categories.find((c) => c.name === name)!.id
+    const group = (name: string) => shared.groups.find((g) => g.name === name)!.id
+    const label = (name: string) => shared.labels.find((l) => l.name === name)!.id
+    const gone = ((await api('POST', '/categories', { name: 'Gone' })).body as Category).id
+    const spending = {
+      only: [
+        { field: 'category', ids: [sharedId('Phones'), gone] },
+        { field: 'group', ids: [group('Food')] },
+        { field: 'label', ids: [label('Wants'), 'none'] },
+      ],
+    }
+    const post = async (ledger: string) => (await api('POST', `/ledgers/${ledger}/custom-reports`, { name: 'Mine', spec: { filter: { spending } } })).body
+    const [mine, theirs] = [await post('family'), await post('personal')]
+    expect([mine.id, theirs.id]).toEqual([expect.any(Number), expect.any(Number)])
+    await api('DELETE', `/categories/${gone}`)
+
+    const own = (await api('PUT', '/ledgers/family/categories/sharing', { shared: false })).body as CategoryList
+    const ownGroup = own.groups.find((g) => g.name === 'Food')!.id
+    const ownLabel = own.labels.find((l) => l.name === 'Wants')!.id
+    expect((await api('GET', `/ledgers/family/custom-reports/${mine.id}`)).body.spec.filter.spending.only).toEqual([
+      { field: 'category', ids: [byName(own, 'Phones').id, gone].sort((a, b) => a - b) },
+      { field: 'group', ids: [ownGroup] },
+      { field: 'label', ids: [ownLabel, 'none'] },
+    ])
+    expect((await api('GET', `/ledgers/personal/custom-reports/${theirs.id}`)).body.spec).toEqual(theirs.spec)
+    expect(byName(await list('personal'), 'Phones').id).toBe(sharedId('Phones'))
+    // Nothing to tell: every category, group and label is still there, by its name.
+    expect((await api('GET', '/ledgers/family/activity?entity=custom_report')).body.items.map((a: Json) => a.actor)).toEqual(['web'])
   })
 
   it('needs a key for every ledger to change it', async () => {

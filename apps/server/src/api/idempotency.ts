@@ -3,15 +3,21 @@ import { and, eq, lt } from 'drizzle-orm'
 import type { MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { idempotencyKeys } from '../db/schema'
-import type { MetaStore } from '../services/context'
+import type { AppStore, MetaStore } from '../services/context'
 import { actorId, type Actor } from './auth'
 
 const KEEP_MS = 24 * 60 * 60 * 1000
 
+/** Forgets the keys older than 24 hours. */
+export function purgeIdempotencyKeys(app: AppStore, now: Date) {
+  app.db.delete(idempotencyKeys).where(lt(idempotencyKeys.createdAt, new Date(now.getTime() - KEEP_MS).toISOString())).run()
+}
+
 /**
  * `Idempotency-Key` on a POST: the first successful JSON response is stored for 24 hours, and a
  * retry with the same key gets that response back (with `Idempotent-Replayed: true`) instead of
- * doing the work again. Reusing a key for a different request is a conflict.
+ * doing the work again. Reusing a key for a different request is a conflict. Keys are per caller,
+ * not per ledger: the same key sent to another ledger's path is a different request.
  */
 export function idempotency(opts: { meta: MetaStore; now: () => Date }): MiddlewareHandler<{ Variables: { actor: Actor } }> {
   const { db } = opts.meta
@@ -25,7 +31,7 @@ export function idempotency(opts: { meta: MetaStore; now: () => Date }): Middlew
     const url = new URL(c.req.url)
     const fingerprint = createHash('sha256').update(`POST ${url.pathname}${url.search}\n`).update(bytes).digest('hex')
     const now = opts.now()
-    db.delete(idempotencyKeys).where(lt(idempotencyKeys.createdAt, new Date(now.getTime() - KEEP_MS).toISOString())).run()
+    purgeIdempotencyKeys(opts.meta, now)
 
     const where = and(eq(idempotencyKeys.key, key), eq(idempotencyKeys.actor, actor))
     const seen = db.select().from(idempotencyKeys).where(where).get()

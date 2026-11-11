@@ -7,6 +7,13 @@ import { env } from '../env'
 import * as schema from './schema'
 import { installWriteGuards } from './scope'
 
+/**
+ * The one database, chipmunk.db in the data directory: every ledger's data (each row with its
+ * ledger_id, or in a child table under such a row) and the app-wide tables, in one SQLite file with
+ * one schema (schema.ts) and one migrations folder (drizzle/). The app keeps one connection to it.
+ * What may run on that connection, and for which ledger, is scope.ts's to say.
+ */
+
 /** The database's file name in the data directory. */
 export const DB_FILE = 'chipmunk.db'
 
@@ -103,6 +110,19 @@ function hasPendingMigrations(sqlite: Database.Database): boolean {
   } catch {
     return false
   }
+}
+
+/** How many free pages the daily upkeep gives back to the disk at most (8 MB of 4 KB pages). */
+const DAILY_VACUUM_PAGES = 2000
+
+/**
+ * Once a day, outside any transaction: lets SQLite refresh what its query planner knows of the
+ * tables (PRAGMA optimize), and gives some of the pages deleted rows freed back to the disk.
+ */
+export function dailyUpkeep(sqlite: Database.Database) {
+  if (sqlite.inTransaction) throw new Error('The daily upkeep runs outside a transaction')
+  sqlite.pragma('optimize')
+  sqlite.pragma(`incremental_vacuum(${DAILY_VACUUM_PAGES})`)
 }
 
 /** data/backups, beside the database file. */

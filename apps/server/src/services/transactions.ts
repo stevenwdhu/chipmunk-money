@@ -75,7 +75,7 @@ interface TxRow {
  * in, so a balance doesn't dip below zero because the pay came in after the bills. (A credit card keeps
  * the order they were added.)
  */
-const OUT = `(t.amount_minor < 0 AND t.account_id NOT IN (SELECT id FROM accounts WHERE type = 'credit'))`
+const OUT = `(t.amount_minor < 0 AND t.account_id NOT IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND type = 'credit'))`
 
 /**
  * A transaction's place in the list, oldest first, as one string (and the paging cursor): its date; then,
@@ -88,8 +88,8 @@ const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN
  * A transaction row with its transfer's other side's origin, which says whether the two are kept in step,
  * its recurring item's name, and its place in the list (SORT_KEY).
  */
-const ROW = `t.*, (SELECT p.origin FROM transactions p WHERE p.id = t.transfer_pair_id) AS pair_origin,
-  (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id) AS item_name, ${SORT_KEY} AS sort_key`
+const ROW = `t.*, (SELECT p.origin FROM transactions p WHERE p.id = t.transfer_pair_id AND p.ledger_id = t.ledger_id) AS pair_origin,
+  (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id) AS item_name, ${SORT_KEY} AS sort_key`
 
 /**
  * A transfer you entered as one (both sides made here) keeps its sides in step. A matched one (a card
@@ -98,19 +98,21 @@ const ROW = `t.*, (SELECT p.origin FROM transactions p WHERE p.id = t.transfer_p
 const isMirroredTransfer = (row: TxRow) => !!row.transfer_pair_id && row.origin === 'manual' && row.pair_origin === 'manual'
 /** Money in that's the refund of one purchase (and linked to nothing else): it has that one's name. */
 const isRefundOfOne = (ctx: AppContext, id: number) =>
-  !!ctx.sqlite.prepare("SELECT count(*) = 1 AND min(kind) = 'refund' FROM transaction_links WHERE money_in_id = ?").pluck().get(id)
+  !!ctx.q.pluck(
+    "SELECT count(*) = 1 AND min(l.kind) = 'refund' FROM transaction_links l JOIN transactions t ON t.id = l.money_in_id WHERE t.ledger_id = @ledger AND t.id = ?",
+    id,
+  )
 
 function tagsFor(ctx: AppContext, ids: number[]): Map<number, Tag[]> {
   const map = new Map<number, Tag[]>()
   if (!ids.length) return map
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT tt.transaction_id AS txId, t.id, t.name, t.color FROM transaction_tags tt
-       JOIN tags t ON t.id = tt.tag_id
-       WHERE tt.transaction_id IN (${ids.map(() => '?').join(',')})
-       ORDER BY t.name`,
-    )
-    .all(...ids) as Array<Tag & { txId: number }>
+  const rows = ctx.q.all<Tag & { txId: number }>(
+    `SELECT tt.transaction_id AS txId, g.id, g.name, g.color FROM transaction_tags tt
+     JOIN tags g ON g.id = tt.tag_id
+     WHERE g.ledger_id = @ledger AND tt.transaction_id IN (SELECT value FROM json_each(?))
+     ORDER BY g.name`,
+    JSON.stringify(ids),
+  )
   for (const { txId, ...tag } of rows) {
     const list = map.get(txId) ?? []
     list.push(tag)
@@ -164,22 +166,24 @@ function dtos(ctx: AppContext, rows: TxRow[]): Transaction[] {
 }
 
 function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
-  const row = ctx.sqlite.prepare(`SELECT ${ROW} FROM transactions t WHERE t.id = ?`).get(id) as TxRow | undefined
+  const row = ctx.q.get<TxRow>(`SELECT ${ROW} FROM transactions t WHERE t.id = ? AND t.ledger_id = @ledger`, id)
   if (!row || (!includeDeleted && row.deleted_at)) notFound('Transaction not found')
   return row
 }
 
 /** The transaction in `accountId` that has this external id, if any (deleted ones included). */
 export function findByExternalId(ctx: AppContext, accountId: number, externalId: string) {
-  const row = ctx.sqlite
-    .prepare('SELECT id, deleted_at AS deletedAt FROM transactions WHERE account_id = ? AND external_id = ?')
-    .get(accountId, externalId) as { id: number; deletedAt: string | null } | undefined
+  const row = ctx.q.get<{ id: number; deletedAt: string | null }>(
+    'SELECT id, deleted_at AS deletedAt FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND external_id = ?',
+    accountId,
+    externalId,
+  )
   return row ? { id: row.id, deleted: !!row.deletedAt } : null
 }
 
 /** The dates of the earliest and latest transactions (deleted ones aside). */
 export function transactionSpan(ctx: AppContext): TransactionSpan {
-  return ctx.sqlite.prepare('SELECT min(date) AS first, max(date) AS last FROM transactions WHERE deleted_at IS NULL').get() as TransactionSpan
+  return ctx.q.get<TransactionSpan>('SELECT min(date) AS first, max(date) AS last FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NULL')!
 }
 
 /** A refund looks back this far for purchases, unless you search. */
@@ -222,9 +226,10 @@ export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKi
   const isIn = self.amount_minor > 0
   const refund = isIn && opts.kind === 'refund'
   const where = [
+    't.ledger_id = @ledger',
     't.deleted_at IS NULL',
     't.transfer_pair_id IS NULL',
-    '(t.category_id IS NULL OR t.category_id NOT IN (SELECT id FROM categories WHERE exclude_from_totals = 1))',
+    '(t.category_id IS NULL OR t.category_id NOT IN (SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1))',
     't.currency = ?',
     't.id != ?',
     isIn ? 't.amount_minor < 0' : 't.amount_minor > 0 AND t.recurring_item_id IS NULL',
@@ -246,26 +251,24 @@ export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKi
   }
   // What's left of each to link: its amount, less its links to others (not this one).
   const [mine, theirs] = isIn ? ['money_in_id', 'money_out_id'] : ['money_out_id', 'money_in_id']
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT * FROM (
-         SELECT ${ROW}, abs(t.amount_minor) - coalesce((SELECT sum(l.amount_minor) FROM transaction_links l
-           JOIN transactions o ON o.id = l.${mine} WHERE l.${theirs} = t.id AND l.${mine} != ? AND o.deleted_at IS NULL), 0) AS left_minor,
-           coalesce((SELECT c.is_income FROM categories c WHERE c.id = t.category_id), 0) AS income
-         FROM transactions t WHERE ${where.join(' AND ')})
-       WHERE left_minor > 0 ORDER BY sort_key DESC LIMIT ${looking ? LOOKING_ROWS : AROUND_ROWS}`,
-    )
-    .all(self.id, ...params) as Array<TxRow & { left_minor: number; income: number }>
+  const rows = ctx.q.all<TxRow & { left_minor: number; income: number }>(
+    `SELECT * FROM (
+       SELECT ${ROW}, abs(t.amount_minor) - coalesce((SELECT sum(l.amount_minor) FROM transaction_links l
+         JOIN transactions o ON o.id = l.${mine} WHERE l.${theirs} = t.id AND l.${mine} != ? AND o.ledger_id = t.ledger_id AND o.deleted_at IS NULL), 0) AS left_minor,
+         coalesce((SELECT c.is_income FROM ledger_categories c WHERE c.id = t.category_id AND c.ledger_id = t.ledger_id), 0) AS income
+       FROM transactions t WHERE ${where.join(' AND ')})
+     WHERE left_minor > 0 ORDER BY sort_key DESC LIMIT ${looking ? LOOKING_ROWS : AROUND_ROWS}`,
+    self.id,
+    ...params,
+  )
   // What's left of this one to link.
   const myLeft =
     Math.abs(self.amount_minor) -
-    (ctx.sqlite
-      .prepare(
-        `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions o ON o.id = l.${theirs}
-         WHERE l.${mine} = ? AND o.deleted_at IS NULL`,
-      )
-      .pluck()
-      .get(self.id) as number)
+    ctx.q.pluck<number>(
+      `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions o ON o.id = l.${theirs}
+       WHERE o.ledger_id = @ledger AND l.${mine} = ? AND o.deleted_at IS NULL`,
+      self.id,
+    )!
   const days = (r: TxRow) => Math.abs(Date.parse(r.date) - Date.parse(self.date))
   const ranked = rows
     .map((r) => {
@@ -299,7 +302,13 @@ export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKi
  */
 export function recurringPaymentCandidates(ctx: AppContext, itemId: number, opts: { q?: string }): RecurringPaymentCandidate[] {
   const item = getRecurring(ctx, itemId)
-  const where = ['t.deleted_at IS NULL', 't.transfer_pair_id IS NULL', 't.recurring_item_id IS NULL', item.expectedAmountMinor < 0 ? 't.amount_minor < 0' : 't.amount_minor > 0']
+  const where = [
+    't.ledger_id = @ledger',
+    't.deleted_at IS NULL',
+    't.transfer_pair_id IS NULL',
+    't.recurring_item_id IS NULL',
+    item.expectedAmountMinor < 0 ? 't.amount_minor < 0' : 't.amount_minor > 0',
+  ]
   const params: unknown[] = []
   if (item.accountId !== null) {
     where.push('t.account_id = ?')
@@ -310,20 +319,23 @@ export function recurringPaymentCandidates(ctx: AppContext, itemId: number, opts
     where.push(sql)
     params.push(...search)
   } else {
-    const first = ctx.sqlite.prepare('SELECT min(date) FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL').pluck().get(itemId) as string | null
+    const first = ctx.q.pluck<string | null>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = ? AND deleted_at IS NULL', itemId) ?? null
     const period = cadenceInfo(item.cadence).days
     const from = first && first < item.nextDueDate ? first : item.nextDueDate
     where.push('t.date BETWEEN ? AND ?')
     params.push(addDays(from, -3 * period), addDays(item.nextDueDate, period))
   }
-  const keys = [item.payeeKey, ...(ctx.sqlite.prepare('SELECT payee_key FROM recurring_payees WHERE item_id = ?').pluck().all(itemId) as string[])]
+  const keys = [
+    item.payeeKey,
+    ...ctx.q.column<string>('SELECT payee_key FROM recurring_payees WHERE item_id IN (SELECT id FROM recurring_items WHERE ledger_id = @ledger AND id = ?)', itemId),
+  ]
   // Its payees' first, so a busy card's other payments don't crowd them out of the rows read.
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')}
-       ORDER BY t.payee_key IN (SELECT value FROM json_each(?)) DESC, sort_key DESC LIMIT ${opts.q ? LOOKING_ROWS : AROUND_ROWS}`,
-    )
-    .all(...params, JSON.stringify(keys)) as TxRow[]
+  const rows = ctx.q.all<TxRow>(
+    `SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')}
+     ORDER BY t.payee_key IN (SELECT value FROM json_each(?)) DESC, sort_key DESC LIMIT ${opts.q ? LOOKING_ROWS : AROUND_ROWS}`,
+    ...params,
+    JSON.stringify(keys),
+  )
   const ranked = rows
     .map((r) => ({ r, likely: keys.some((k) => k === r.payee_key || payeeSimilarity(k, r.payee_key) >= LIKELY_MERCHANT) }))
     .sort((a, b) => Number(b.likely) - Number(a.likely))
@@ -340,9 +352,10 @@ export function linkedTransactions(ctx: AppContext, id: number): LinkedTransacti
   getRow(ctx, id, true)
   const links = linksFor(ctx, [id]).get(id) ?? []
   if (!links.length) return []
-  const rows = ctx.sqlite
-    .prepare(`SELECT ${ROW} FROM transactions t WHERE t.id IN (SELECT value FROM json_each(?))`)
-    .all(JSON.stringify(links.map((l) => l.transactionId))) as TxRow[]
+  const rows = ctx.q.all<TxRow>(
+    `SELECT ${ROW} FROM transactions t WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(?))`,
+    JSON.stringify(links.map((l) => l.transactionId)),
+  )
   const byId = new Map(dtos(ctx, rows).map((t) => [t.id, t]))
   return links.flatMap((link) => {
     const transaction = byId.get(link.transactionId)
@@ -357,14 +370,15 @@ export function getTransaction(ctx: AppContext, id: number): Transaction {
 /** These transactions, in this order (ones that aren't there left out). */
 export function getTransactions(ctx: AppContext, ids: number[]): Transaction[] {
   if (!ids.length) return []
-  const rows = ctx.sqlite.prepare(`SELECT ${ROW} FROM transactions t WHERE t.id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(ids)) as TxRow[]
+  const rows = ctx.q.all<TxRow>(`SELECT ${ROW} FROM transactions t WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids))
   const byId = new Map(dtos(ctx, rows).map((t) => [t.id, t]))
   return ids.flatMap((id) => byId.get(id) ?? [])
 }
 
 /** Money in linked to a bill (not a deleted one) that matches `bill` (on `b`). */
 const linkedTo = (bill: string) =>
-  `EXISTS (SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id WHERE l.money_in_id = t.id AND b.deleted_at IS NULL AND ${bill})`
+  `EXISTS (SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
+    WHERE l.money_in_id = t.id AND b.ledger_id = t.ledger_id AND b.deleted_at IS NULL AND ${bill})`
 
 /**
  * Adds a condition (to `where`, and its values to `params`): in any of these categories, `none` for
@@ -378,7 +392,8 @@ function inCategories(categories: Array<number | 'none'>, where: string[], param
       any.push(`(t.category_id IS NULL AND t.transfer_pair_id IS NULL AND (t.category_source IS NOT 'linked' OR ${linkedTo('b.category_id IS NULL')}))`)
     } else {
       any.push(`(t.category_id = ? OR (t.category_source = 'linked' AND t.category_id IS NULL AND EXISTS (
-        SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id WHERE l.money_in_id = t.id AND b.category_id = ?)))`)
+        SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
+        WHERE l.money_in_id = t.id AND b.ledger_id = t.ledger_id AND b.category_id = ?)))`)
       params.push(c, c)
     }
   }
@@ -386,7 +401,7 @@ function inCategories(categories: Array<number | 'none'>, where: string[], param
 }
 
 export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPage {
-  const where = ['t.deleted_at IS NULL']
+  const where = ['t.ledger_id = @ledger', 't.deleted_at IS NULL']
   const params: unknown[] = []
   if (q.from) {
     where.push('t.date >= ?')
@@ -412,13 +427,16 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
   if (q.needsReview) where.push('t.needs_review = 1')
   if (q.labelId === 'none') {
     // Spending in categories without a label, as the summary counts it: with refunds and paybacks of it.
-    const unlabelled = `SELECT id FROM categories WHERE is_income = 0 AND exclude_from_totals = 0 AND id NOT IN (SELECT category_id FROM category_labels)`
+    const unlabelled = `SELECT c.id FROM ledger_categories c WHERE c.ledger_id = @ledger AND c.is_income = 0 AND c.exclude_from_totals = 0
+      AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = c.id)`
     where.push(
       `t.transfer_pair_id IS NULL AND ((t.category_id IS NULL AND t.amount_minor < 0) OR t.category_id IN (${unlabelled})
          OR (t.category_id IS NULL AND t.category_source = 'linked' AND ${linkedTo(`(b.category_id IS NULL OR b.category_id IN (${unlabelled}))`)}))`,
     )
   } else if (q.labelId) {
-    where.push('t.transfer_pair_id IS NULL AND t.category_id IN (SELECT category_id FROM category_labels WHERE label_id = ?)')
+    where.push(
+      't.transfer_pair_id IS NULL AND t.category_id IN (SELECT cl.category_id FROM category_labels cl JOIN ledger_labels b ON b.id = cl.label_id WHERE b.ledger_id = @ledger AND cl.label_id = ?)',
+    )
     params.push(q.labelId)
   }
   if (q.q) {
@@ -434,12 +452,13 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
     where.push(`${SORT_KEY} < ?`)
     params.push(q.cursor)
   }
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')}
-       ORDER BY ${SORT_KEY} DESC LIMIT ?`,
-    )
-    .all(...params, q.limit + 1, scope?.params ?? {}) as TxRow[]
+  const rows = ctx.q.all<TxRow>(
+    `SELECT ${ROW} FROM transactions t WHERE ${where.join(' AND ')}
+     ORDER BY ${SORT_KEY} DESC LIMIT ?`,
+    ...params,
+    q.limit + 1,
+    scope?.params ?? {},
+  )
   const page = rows.slice(0, q.limit)
   const items = dtos(ctx, page)
   const last = page[page.length - 1]
@@ -471,10 +490,12 @@ function runningBalances(ctx: AppContext, q: QueryInput, page: TxRow[]): number[
   const account = getAccount(ctx, q.accountId)
   if (accountTypeInfo(account.type).revalued) return null
   // Everything listed above the first row: newer, or later the same day (see SORT_KEY).
-  const later = ctx.sqlite
-    .prepare(`SELECT coalesce(sum(amount_minor), 0) AS total FROM transactions t WHERE account_id = ? AND deleted_at IS NULL AND ${SORT_KEY} > ?`)
-    .get(q.accountId, first.sort_key) as { total: number }
-  let after = account.balanceMinor - later.total
+  const later = ctx.q.pluck<number>(
+    `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.ledger_id = @ledger AND t.account_id = ? AND t.deleted_at IS NULL AND ${SORT_KEY} > ?`,
+    q.accountId,
+    first.sort_key,
+  )!
+  let after = account.balanceMinor - later
   return page.map((r) => {
     const balance = after
     after -= r.amount_minor
@@ -483,21 +504,18 @@ function runningBalances(ctx: AppContext, q: QueryInput, page: TxRow[]): number[
 }
 
 function setTags(ctx: AppContext, txId: number, names: string[]) {
-  ctx.sqlite.prepare('DELETE FROM transaction_tags WHERE transaction_id = ?').run(txId)
+  ctx.q.run('DELETE FROM transaction_tags WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?)', txId)
   const ids = upsertTags(ctx, names)
-  const insert = ctx.sqlite.prepare('INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)')
-  for (const tagId of ids) insert.run(txId, tagId)
+  for (const tagId of ids) ctx.q.run('INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)', txId, tagId)
 }
 
 function transferCategoryId(ctx: AppContext, targetType?: string): number | null {
   const name = targetType === 'credit' ? 'Credit card payment' : 'Transfer'
-  const row = (ctx.sqlite
-    .prepare('SELECT id FROM categories WHERE exclude_from_totals = 1 AND archived_at IS NULL AND name = ?')
-    .get(name) ??
-    ctx.sqlite
-      .prepare('SELECT id FROM categories WHERE exclude_from_totals = 1 AND archived_at IS NULL ORDER BY id LIMIT 1')
-      .get()) as { id: number } | undefined
-  return row?.id ?? null
+  return (
+    ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1 AND archived_at IS NULL AND name = ?', name) ??
+    ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1 AND archived_at IS NULL ORDER BY id LIMIT 1') ??
+    null
+  )
 }
 
 export interface CreateOptions {
@@ -534,14 +552,16 @@ export async function createTransaction(ctx: AppContext, input: CreateInput, opt
 
 /** Synchronous insert used directly by imports (inside one SQLite transaction) and by createTransaction. */
 export function insertTransaction(ctx: AppContext, input: CreateInput, opts: CreateOptions & { suggestion: SuggestionResult | null }): number {
-  const account = ctx.sqlite.prepare('SELECT id, name, currency FROM accounts WHERE id = ?').get(input.accountId) as
-    | { id: number; name: string; currency: string }
-    | undefined
+  const account = ctx.q.get<{ id: number; name: string; currency: string }>(
+    'SELECT id, name, currency FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?',
+    input.accountId,
+  )
   if (!account) badRequest('That account does not exist')
   const target = input.transferAccountId
-    ? (ctx.sqlite.prepare('SELECT id, name, type, currency FROM accounts WHERE id = ?').get(input.transferAccountId) as
-        | { id: number; name: string; type: string; currency: string }
-        | undefined)
+    ? ctx.q.get<{ id: number; name: string; type: string; currency: string }>(
+        'SELECT id, name, type, currency FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?',
+        input.transferAccountId,
+      )
     : undefined
   if (input.transferAccountId && !target) badRequest('The transfer account does not exist')
   if (target && target.id === account.id) badRequest('Pick a different account to transfer to')
@@ -564,14 +584,18 @@ export function insertTransaction(ctx: AppContext, input: CreateInput, opts: Cre
     resolved.needsReview = !s.autoApply
   }
 
-  const insert = ctx.sqlite.prepare(
-    `INSERT INTO transactions (account_id, date, datetime, amount_minor, currency, payee, payee_key, name, category_id, category_source,
-       category_confidence, needs_review, notes, status, origin, import_batch_id, external_id)
-     VALUES (@accountId, @date, @datetime, @amount, @currency, @payee, @payeeKey, @name, @categoryId, @source, @confidence, @needsReview,
-       @notes, @status, @origin, @batch, @externalId)`,
-  )
+  const insert = (values: Record<string, unknown>) =>
+    Number(
+      ctx.q.run(
+        `INSERT INTO transactions (ledger_id, account_id, date, datetime, amount_minor, currency, payee, payee_key, name, category_id, category_source,
+           category_confidence, needs_review, notes, status, origin, import_batch_id, external_id)
+         VALUES (@ledger, @accountId, @date, @datetime, @amount, @currency, @payee, @payeeKey, @name, @categoryId, @source, @confidence, @needsReview,
+           @notes, @status, @origin, @batch, @externalId)`,
+        values,
+      ).lastInsertRowid,
+    )
 
-  const id = ctx.sqlite.transaction(() => {
+  const id = ctx.q.transaction(() => {
     const base = {
       date: input.date,
       datetime: input.datetime ?? null,
@@ -587,27 +611,22 @@ export function insertTransaction(ctx: AppContext, input: CreateInput, opts: Cre
       origin: opts.origin ?? 'manual',
       batch: opts.importBatchId ?? null,
     }
-    const txId = Number(
-      insert.run({
-        ...base,
-        accountId: account.id,
-        amount: input.amountMinor,
-        currency: account.currency,
-        externalId: input.externalId ?? null,
-      }).lastInsertRowid,
-    )
+    const txId = insert({
+      ...base,
+      accountId: account.id,
+      amount: input.amountMinor,
+      currency: account.currency,
+      externalId: input.externalId ?? null,
+    })
     if (target) {
-      const pairId = Number(
-        insert.run({ ...base, accountId: target.id, amount: -input.amountMinor, currency: target.currency, externalId: null })
-          .lastInsertRowid,
-      )
-      ctx.sqlite.prepare('UPDATE transactions SET transfer_pair_id = ? WHERE id = ?').run(pairId, txId)
-      ctx.sqlite.prepare('UPDATE transactions SET transfer_pair_id = ? WHERE id = ?').run(txId, pairId)
+      const pairId = insert({ ...base, accountId: target.id, amount: -input.amountMinor, currency: target.currency, externalId: null })
+      ctx.q.run('UPDATE transactions SET transfer_pair_id = ? WHERE id = ? AND ledger_id = @ledger', pairId, txId)
+      ctx.q.run('UPDATE transactions SET transfer_pair_id = ? WHERE id = ? AND ledger_id = @ledger', txId, pairId)
       if (input.tags.length) setTags(ctx, pairId, input.tags)
     }
     if (input.tags.length) setTags(ctx, txId, input.tags)
     return txId
-  })()
+  })
 
   if (resolved.source === 'user' && !target) learn(ctx, payeeKey, input.amountMinor, resolved.categoryId)
   if (!opts.skipRecurring && !target) matchRecurring(ctx, id)
@@ -625,9 +644,7 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   }
 
   if (input.accountId !== undefined && input.accountId !== row.account_id) {
-    const acc = ctx.sqlite.prepare('SELECT id, currency FROM accounts WHERE id = ?').get(input.accountId) as
-      | { id: number; currency: string }
-      | undefined
+    const acc = ctx.q.get<{ id: number; currency: string }>('SELECT id, currency FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', input.accountId)
     if (!acc) badRequest('That account does not exist')
     if (row.transfer_pair_id && acc.id === getRow(ctx, row.transfer_pair_id, true).account_id) {
       badRequest('A transfer needs two different accounts')
@@ -686,21 +703,21 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   const unlinksTransfer = input.transferPairId === null && row.transfer_pair_id !== null
   const mirrored = isMirroredTransfer(row)
 
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     if (sets.length) {
       sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
-      ctx.sqlite.prepare(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id`).run(params)
+      ctx.q.run(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id AND ledger_id = @ledger`, params)
     }
     if (input.tags !== undefined) setTags(ctx, id, input.tags)
     if (unlinksTransfer) {
-      ctx.sqlite
-        .prepare(
-          `UPDATE transactions SET transfer_pair_id = NULL, needs_review = 0,
-             category_source = CASE WHEN category_id IS NULL THEN NULL ELSE 'user' END WHERE id IN (?, ?)`,
-        )
-        .run(id, row.transfer_pair_id)
+      ctx.q.run(
+        `UPDATE transactions SET transfer_pair_id = NULL, needs_review = 0,
+           category_source = CASE WHEN category_id IS NULL THEN NULL ELSE 'user' END WHERE ledger_id = @ledger AND id IN (?, ?)`,
+        id,
+        row.transfer_pair_id,
+      )
       const [inId, outId] = row.amount_minor > 0 ? [id, row.transfer_pair_id] : [row.transfer_pair_id, id]
-      ctx.sqlite.prepare('INSERT OR IGNORE INTO transfer_rejections (in_id, out_id) VALUES (?, ?)').run(inId, outId)
+      ctx.q.run('INSERT OR IGNORE INTO transfer_rejections (in_id, out_id) VALUES (?, ?)', inId, outId)
     }
     // Keep both sides of a transfer you entered in step.
     else if (mirrored) {
@@ -724,10 +741,10 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
         pairParams.payeeKey = payeeKey
       }
       if (pairSets.length) {
-        ctx.sqlite.prepare(`UPDATE transactions SET ${pairSets.join(', ')} WHERE id = @id`).run(pairParams)
+        ctx.q.run(`UPDATE transactions SET ${pairSets.join(', ')} WHERE id = @id AND ledger_id = @ledger`, pairParams)
       }
     }
-  })()
+  })
 
   // A recurring item's payments share one category: this one's goes to the item and its other payments.
   const itemId = input.recurringItemId !== undefined ? input.recurringItemId : row.recurring_item_id
@@ -752,12 +769,20 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   // Moved to another item, or taken off one: the old one doesn't take it back, and both recalculate.
   if (input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id) {
     if (row.recurring_item_id) {
-      ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)').run(row.recurring_item_id, id)
-      ctx.sqlite.prepare('DELETE FROM recurring_payment_dues WHERE item_id = ? AND transaction_id = ?').run(row.recurring_item_id, id)
+      ctx.q.run('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', row.recurring_item_id, id)
+      ctx.q.run(
+        'DELETE FROM recurring_payment_dues WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
+        id,
+        row.recurring_item_id,
+      )
       recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
     }
     if (input.recurringItemId) {
-      ctx.sqlite.prepare('DELETE FROM recurring_not_payments WHERE item_id = ? AND transaction_id = ?').run(input.recurringItemId, id)
+      ctx.q.run(
+        'DELETE FROM recurring_not_payments WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
+        id,
+        input.recurringItemId,
+      )
       recalculateRecurring(ctx, input.recurringItemId, { followAmount: true })
     }
   }
@@ -767,24 +792,23 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
 export function acceptSuggestion(ctx: AppContext, id: number): Transaction {
   const row = getRow(ctx, id)
   if (row.needs_review) {
-    ctx.sqlite.prepare('UPDATE transactions SET needs_review = 0 WHERE id = ?').run(id)
+    ctx.q.run('UPDATE transactions SET needs_review = 0 WHERE id = ? AND ledger_id = @ledger', id)
     learn(ctx, row.payee_key, row.amount_minor, row.category_id)
   }
   return getTransaction(ctx, id)
 }
 
 export function acceptAllSuggestions(ctx: AppContext): number {
-  const rows = ctx.sqlite
-    .prepare(
-      'SELECT id, payee_key AS payeeKey, amount_minor AS amountMinor, category_id AS categoryId FROM transactions WHERE needs_review = 1 AND deleted_at IS NULL',
-    )
-    .all() as Array<{ id: number; payeeKey: string; amountMinor: number; categoryId: number | null }>
-  ctx.sqlite.transaction(() => {
+  const rows = ctx.q.all<{ id: number; payeeKey: string; amountMinor: number; categoryId: number | null }>(
+    `SELECT id, payee_key AS payeeKey, amount_minor AS amountMinor, category_id AS categoryId FROM transactions
+     WHERE ledger_id = @ledger AND needs_review = 1 AND deleted_at IS NULL`,
+  )
+  ctx.q.transaction(() => {
     for (const r of rows) {
-      ctx.sqlite.prepare('UPDATE transactions SET needs_review = 0 WHERE id = ?').run(r.id)
+      ctx.q.run('UPDATE transactions SET needs_review = 0 WHERE id = ? AND ledger_id = @ledger', r.id)
       learn(ctx, r.payeeKey, r.amountMinor, r.categoryId)
     }
-  })()
+  })
   return rows.length
 }
 
@@ -795,19 +819,19 @@ export function deleteTransaction(ctx: AppContext, id: number) {
   const stamp = new Date().toISOString()
   if (row.transfer_pair_id && !isMirroredTransfer(row)) {
     // One side of a matched transfer: the other is its own bank record, which stays (no longer a transfer).
-    ctx.sqlite.transaction(() => {
-      ctx.sqlite.prepare('UPDATE transactions SET deleted_at = ?, transfer_pair_id = NULL WHERE id = ?').run(stamp, id)
-      ctx.sqlite.prepare('UPDATE transactions SET transfer_pair_id = NULL WHERE id = ?').run(row.transfer_pair_id)
-    })()
+    ctx.q.transaction(() => {
+      ctx.q.run('UPDATE transactions SET deleted_at = ?, transfer_pair_id = NULL WHERE id = ? AND ledger_id = @ledger', stamp, id)
+      ctx.q.run('UPDATE transactions SET transfer_pair_id = NULL WHERE id = ? AND ledger_id = @ledger', row.transfer_pair_id)
+    })
     return
   }
-  ctx.sqlite.prepare('UPDATE transactions SET deleted_at = ? WHERE id IN (?, ?)').run(stamp, id, row.transfer_pair_id ?? -1)
+  ctx.q.run('UPDATE transactions SET deleted_at = ? WHERE ledger_id = @ledger AND id IN (?, ?)', stamp, id, row.transfer_pair_id ?? -1)
   if (row.recurring_item_id) recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
 }
 
 export function restoreTransaction(ctx: AppContext, id: number): Transaction {
   const row = getRow(ctx, id, true)
-  ctx.sqlite.prepare('UPDATE transactions SET deleted_at = NULL WHERE id IN (?, ?)').run(id, row.transfer_pair_id ?? -1)
+  ctx.q.run('UPDATE transactions SET deleted_at = NULL WHERE ledger_id = @ledger AND id IN (?, ?)', id, row.transfer_pair_id ?? -1)
   if (row.recurring_item_id) recalculateRecurring(ctx, row.recurring_item_id, { followAmount: true })
   return getTransaction(ctx, id)
 }
@@ -815,9 +839,10 @@ export function restoreTransaction(ctx: AppContext, id: number): Transaction {
 export function bulkUpdate(ctx: AppContext, input: BulkInput): { updated: number } {
   let updated = 0
   for (const id of input.ids) {
-    const row = ctx.sqlite.prepare('SELECT id, deleted_at, category_source FROM transactions WHERE id = ?').get(id) as
-      | { id: number; deleted_at: string | null; category_source: string | null }
-      | undefined
+    const row = ctx.q.get<{ id: number; deleted_at: string | null; category_source: string | null }>(
+      'SELECT id, deleted_at, category_source FROM transactions WHERE id = ? AND ledger_id = @ledger',
+      id,
+    )
     if (!row || row.deleted_at) continue
     if (input.delete) {
       deleteTransaction(ctx, id)
@@ -838,13 +863,14 @@ export function bulkUpdate(ctx: AppContext, input: BulkInput): { updated: number
   return { updated }
 }
 
-/** Every transaction (deleted ones included) by id, for before/after comparisons. */
+/** Every transaction (deleted ones included) by id, in id order, for before/after comparisons. */
 function snapshot(ctx: AppContext, ids: number[]): Map<number, Transaction & { deleted: boolean }> {
   const out = new Map<number, Transaction & { deleted: boolean }>()
   if (!ids.length) return out
-  const rows = ctx.sqlite
-    .prepare(`SELECT ${ROW} FROM transactions t WHERE t.id IN (SELECT value FROM json_each(?))`)
-    .all(JSON.stringify(ids)) as TxRow[]
+  const rows = ctx.q.all<TxRow>(
+    `SELECT ${ROW} FROM transactions t WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(?)) ORDER BY t.id`,
+    JSON.stringify(ids),
+  )
   const list = dtos(ctx, rows)
   rows.forEach((r, i) => out.set(r.id, { ...list[i]!, deleted: !!r.deleted_at }))
   return out
@@ -869,8 +895,8 @@ export function withChanges(ctx: AppContext, ids: number[], fn: () => void): Omi
 /** Purges soft-deleted transactions older than `days` (called by the nightly job). */
 export function purgeDeleted(ctx: AppContext, days = 30) {
   const cutoff = new Date(ctx.now().getTime() - days * 86_400_000).toISOString()
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     releaseLinks(ctx, 'deleted_at IS NOT NULL AND deleted_at < ?', cutoff)
-    ctx.sqlite.prepare('DELETE FROM transactions WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
-  })()
+    ctx.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NOT NULL AND deleted_at < ?', cutoff)
+  })
 }

@@ -20,23 +20,20 @@ export interface ActivityActor {
   apiKeyId: string | null
 }
 
-export function recordActivity(ctx: Pick<AppContext, 'sqlite' | 'now'>, actor: ActivityActor, entry: ActivityEntry) {
-  ctx.sqlite
-    .prepare(
-      `INSERT INTO activity (created_at, actor, api_key_id, action, entity, entity_id, summary, before, after)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      ctx.now().toISOString(),
-      actor.name,
-      actor.apiKeyId,
-      entry.action,
-      entry.entity,
-      entry.entityId === undefined || entry.entityId === null ? null : String(entry.entityId),
-      entry.summary,
-      entry.before === undefined ? null : JSON.stringify(entry.before),
-      entry.after === undefined ? null : JSON.stringify(entry.after),
-    )
+export function recordActivity(ctx: Pick<AppContext, 'q' | 'now'>, actor: ActivityActor, entry: ActivityEntry) {
+  ctx.q.run(
+    `INSERT INTO activity (ledger_id, created_at, actor, api_key_id, action, entity, entity_id, summary, before, after)
+     VALUES (@ledger, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ctx.now().toISOString(),
+    actor.name,
+    actor.apiKeyId,
+    entry.action,
+    entry.entity,
+    entry.entityId === undefined || entry.entityId === null ? null : String(entry.entityId),
+    entry.summary,
+    entry.before === undefined ? null : JSON.stringify(entry.before),
+    entry.after === undefined ? null : JSON.stringify(entry.after),
+  )
 }
 
 /**
@@ -71,7 +68,7 @@ interface Row {
 const parse = (s: string | null) => (s === null ? null : (JSON.parse(s) as unknown))
 
 export function listActivity(ctx: AppContext, q: z.output<typeof activityQuerySchema>): ActivityPage {
-  const where: string[] = []
+  const where = ['ledger_id = @ledger']
   const params: unknown[] = []
   if (q.actor) {
     where.push('actor = ?')
@@ -87,9 +84,7 @@ export function listActivity(ctx: AppContext, q: z.output<typeof activityQuerySc
     where.push('id < ?')
     params.push(id)
   }
-  const rows = ctx.sqlite
-    .prepare(`SELECT * FROM activity ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ?`)
-    .all(...params, q.limit + 1) as Row[]
+  const rows = ctx.q.all<Row>(`SELECT * FROM activity WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`, ...params, q.limit + 1)
   const page = rows.slice(0, q.limit)
   return {
     items: page.map(
@@ -111,7 +106,5 @@ export function listActivity(ctx: AppContext, q: z.output<typeof activityQuerySc
 
 /** Everyone who has changed something in this ledger, most active first (for the filter). */
 export function activityActors(ctx: AppContext): string[] {
-  return (ctx.sqlite.prepare('SELECT actor FROM activity GROUP BY actor ORDER BY count(*) DESC').all() as Array<{ actor: string }>).map(
-    (r) => r.actor,
-  )
+  return ctx.q.column<string>('SELECT actor FROM activity WHERE ledger_id = @ledger GROUP BY actor ORDER BY count(*) DESC')
 }

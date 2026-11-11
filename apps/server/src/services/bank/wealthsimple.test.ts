@@ -1,8 +1,8 @@
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { transactionCreateSchema, type Account, type BankConnection, type LinkPreview, type SyncResult, type TransactionPage, type WealthsimpleConnectResult } from '@chipmunk/shared'
 import { createApp } from '../../app'
-import { bankConnections } from '../../db/schema'
+import { bankConnections, bankTransactions } from '../../db/schema'
 import { categoryId, makeAccount, testStorage } from '../../test/helpers'
 import { listNameRules, renamePayee, worldOfLedger } from '../payee-names'
 import { listPayeeRules, setPayeeChoice } from '../payees'
@@ -152,7 +152,7 @@ async function setup() {
   const ws = fakeWealthsimple()
   const storage = testStorage({ fetch: ws.fetch })
   // Vancouver, three hours behind Wealthsimple's Toronto.
-  setAppSetting(storage.meta, 'timezone', 'America/Vancouver')
+  setAppSetting(storage.app, 'timezone', 'America/Vancouver')
   const bank = new BankService(storage)
   const app = createApp(storage, { trustedHeader: null, bank })
   const api = async (method: string, url: string, body?: unknown) => {
@@ -196,7 +196,7 @@ describe('Wealthsimple', () => {
       ['Savings', 'Wealthsimple', 200_000],
       ['TFSA', 'Wealthsimple', 500_000],
     ])
-    const row = storage.meta.db.select().from(bankConnections).get()!
+    const row = storage.app.db.select().from(bankConnections).get()!
     expect(JSON.parse(storage.secrets.open(row.secret))).toMatchObject({ email: 'me@example.com', identityId: 'identity-1', deviceId: 'dec0-1234', refreshToken: ws.state.refresh })
     expect(JSON.stringify(JSON.parse(storage.secrets.open(row.secret)))).not.toContain('"pw"')
     // The same login again is the same connection.
@@ -247,7 +247,7 @@ describe('Wealthsimple', () => {
       'Transfer from Chequing': { date: '2026-09-15', time: '2026-09-15T09:00:07', amount: 100_000, status: 'cleared', id: 't-in' },
       'VFV - Dividend': { date: '2026-09-30', time: null, amount: 412, status: 'cleared', id: 't-div' },
     })
-    const buy = storage.meta.sqlite.prepare("SELECT data FROM bank_transactions WHERE remote_id = 't-buy'").pluck().get() as string
+    const buy = storage.app.db.select({ data: bankTransactions.data }).from(bankTransactions).where(eq(bankTransactions.remoteId, 't-buy')).get()!.data
     expect(JSON.parse(buy)).toMatchObject({ payee: 'Buy VFV', amountMinor: -99_840, trade: true, description: 'Diy buy · Market order · 6.0000 VFV' })
     // The balances are Wealthsimple's.
     expect((await api('GET', `/ledgers/personal/accounts/${tfsa}`)).body.balanceMinor).toBe(500_000)
@@ -263,7 +263,7 @@ describe('Wealthsimple', () => {
     await link(card, remote(connection!, 'ca-credit-card-1').id)
     await sync(connection!.id)
     await sync(connection!.id)
-    const secret = () => JSON.parse(storage.secrets.open(storage.meta.db.select().from(bankConnections).where(eq(bankConnections.id, connection!.id)).get()!.secret))
+    const secret = () => JSON.parse(storage.secrets.open(storage.app.db.select().from(bankConnections).where(eq(bankConnections.id, connection!.id)).get()!.secret))
     expect(secret().refreshToken).toBe(ws.state.refresh)
 
     ws.state.revoked = true
@@ -314,7 +314,7 @@ describe('Wealthsimple', () => {
 
     // One switched before payees followed their connection, still with Plaid's: what the connection
     // sent, as kept, catches it up. Nothing is fetched, and nothing else changes.
-    ctx.sqlite.prepare("UPDATE transactions SET payee = 'Golden Noodle' WHERE external_id = 'c-noodle'").run()
+    ctx.q.run("UPDATE transactions SET payee = 'Golden Noodle' WHERE ledger_id = @ledger AND external_id = 'c-noodle'")
     const fetches = ws.state.conditions.length
     expect(bank.applyKept()).toBe(1)
     expect((await transactions(card)).find((t) => t.externalId === 'c-noodle')).toMatchObject({ payee: 'Tst-Golden Noodle House -', payeeName: 'Noodle night' })
@@ -323,8 +323,12 @@ describe('Wealthsimple', () => {
 
     // Tidied by older payee rules, as kept and in the ledger: made again from what Wealthsimple sent,
     // still without fetching, and the transaction moves back with its alias.
-    storage.meta.sqlite.prepare("UPDATE bank_transactions SET data = json_set(data, '$.payee', 'Noodle Old') WHERE remote_id = 'c-noodle'").run()
-    ctx.sqlite.prepare("UPDATE transactions SET payee = 'Noodle Old', payee_key = 'noodle old' WHERE external_id = 'c-noodle'").run()
+    storage.app.db
+      .update(bankTransactions)
+      .set({ data: sql`json_set(${bankTransactions.data}, '$.payee', 'Noodle Old')` })
+      .where(eq(bankTransactions.remoteId, 'c-noodle'))
+      .run()
+    ctx.q.run("UPDATE transactions SET payee = 'Noodle Old', payee_key = 'noodle old' WHERE ledger_id = @ledger AND external_id = 'c-noodle'")
     expect(bank.refreshPayees()).toBe(1)
     expect((await transactions(card)).find((t) => t.externalId === 'c-noodle')).toMatchObject({ payee: 'Tst-Golden Noodle House -', payeeName: 'Noodle night' })
     expect(ws.state.conditions.length).toBe(fetches)
@@ -334,7 +338,7 @@ describe('Wealthsimple', () => {
   it('switches an account over as reviewed, from what its syncs kept: pairs, a changed amount, older history, and what only one side has', async () => {
     const { ws, ctx, bank, api, signIn, remote, sync, transactions } = await setup()
     const card = makeAccount(ctx, 'Wealthsimple Visa', 'credit', 0, 'Wealthsimple')
-    ctx.sqlite.prepare("UPDATE accounts SET opening_date = '2026-09-20' WHERE id = ?").run(card)
+    ctx.q.run("UPDATE accounts SET opening_date = '2026-09-20' WHERE ledger_id = @ledger AND id = ?", card)
     // What Plaid brought, with its own ids and wording, dated by UTC.
     const add = (externalId: string, date: string, amountMinor: number, payee: string) =>
       insertTransaction(ctx, transactionCreateSchema.parse({ accountId: card, date, amountMinor, payee, externalId }), { origin: 'sync', skipRecurring: true, suggestion: null })

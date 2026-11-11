@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { importCommitSchema, transactionCreateSchema } from '@chipmunk/shared'
 import type { LlmCategoryRequest } from '../ai/types'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { addTx, twinAccounts, twinLedgers } from '../test/transaction-twins'
 import type { AppContext } from './context'
 import { categorizeUncategorized, commitImport } from './import'
 import { setLinks } from './links'
@@ -30,6 +31,11 @@ function synced(ctx: AppContext, accountId: number, date: string, amountMinor: n
         : null,
     },
   )
+}
+
+/** Turns a shared category off in this ledger, as archiving it does. */
+function turnOff(ctx: AppContext, name: string) {
+  ctx.q.run("INSERT INTO ledger_category_off (ledger_id, category_id, archived_at) VALUES (@ledger, ?, '2026-01-01')", categoryId(ctx, name))
 }
 
 describe('matching refunds and card payments', () => {
@@ -110,7 +116,7 @@ describe('matching refunds and card payments', () => {
     // It always has the purchase's category, however that changes, and can't have its own.
     updateTransaction(ctx, jacket, { categoryId: shopping })
     expect(getTransaction(ctx, back).categoryId).toBe(shopping)
-    ctx.sqlite.prepare('UPDATE transactions SET category_id = NULL WHERE id = ?').run(jacket)
+    ctx.q.run('UPDATE transactions SET category_id = NULL WHERE id = ? AND ledger_id = @ledger', jacket)
     expect(getTransaction(ctx, back)).toMatchObject({ categoryId: null, categorySource: 'linked' })
     updateTransaction(ctx, jacket, { categoryId: clothing })
     expect(() => updateTransaction(ctx, back, { categoryId: shopping })).toThrow('It has the category of what it pays back.')
@@ -196,7 +202,7 @@ describe('matching refunds and card payments', () => {
       }),
       { background: false },
     )
-    const [yours, rule] = ctx.sqlite.prepare('SELECT id FROM transactions WHERE import_batch_id = ? ORDER BY date DESC').pluck().all(batchId) as [number, number]
+    const [yours, rule] = ctx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND import_batch_id = ? ORDER BY date DESC', batchId) as [number, number]
 
     expect(getTransaction(ctx, rule)).toMatchObject({ transferPairId: paid[0], categoryId: payment, categorySource: 'rule' })
     // Your category and your history's sure one stay, paired.
@@ -248,7 +254,7 @@ describe('matching refunds and card payments', () => {
     // An earlier pass that called cash back a payment is undone.
     const payment = categoryId(ctx, 'Credit card payment')
     const before = synced(ctx, card, '2026-10-02', 5_120, 'CASH BACK REDEEMED')
-    ctx.sqlite.prepare("UPDATE transactions SET category_id = ?, category_source = 'rule' WHERE id = ?").run(payment, before)
+    ctx.q.run("UPDATE transactions SET category_id = ?, category_source = 'rule' WHERE id = ? AND ledger_id = @ledger", payment, before)
     expect(matchTransactions(ctx).cleared).toEqual([before])
     expect(getTransaction(ctx, before)).toMatchObject({ categoryId: null, categorySource: null })
   })
@@ -274,12 +280,12 @@ describe('matching refunds and card payments', () => {
     })
     const card = makeAccount(ctx, 'Visa', 'credit')
     const transfer = categoryId(ctx, 'Transfer')
-    ctx.sqlite.prepare("UPDATE categories SET archived_at = '2026-01-01' WHERE name = 'Credit card payment'").run()
+    turnOff(ctx, 'Credit card payment')
     const a = synced(ctx, card, '2026-10-01', 1_000, 'Payment A')
     matchTransactions(ctx)
     expect(getTransaction(ctx, a).categoryId).toBe(transfer)
 
-    ctx.sqlite.prepare("UPDATE categories SET archived_at = '2026-01-01' WHERE name = 'Transfer'").run()
+    turnOff(ctx, 'Transfer')
     const b = synced(ctx, card, '2026-10-02', 2_000, 'Payment B')
     matchTransactions(ctx)
     expect(getTransaction(ctx, b)).toMatchObject({ categoryId: null, needsReview: false })
@@ -313,11 +319,11 @@ describe('the bank’s category as a second opinion', () => {
       },
     })
     const card = makeAccount(ctx, 'Visa', 'credit')
-    const setBank = ctx.sqlite.prepare('UPDATE transactions SET bank_category = ?, bank_category_confident = ? WHERE id = ?')
+    const setBank = (category: string, sure: number, id: number) => ctx.q.run('UPDATE transactions SET bank_category = ?, bank_category_confident = ? WHERE id = ? AND ledger_id = @ledger', category, sure, id)
     const fuel = categoryId(ctx, 'Fuel')
 
     const sure = synced(ctx, card, '2026-10-01', -6_000, 'Shell')
-    setBank.run('Transportation › Gas', 1, sure)
+    setBank('Transportation › Gas', 1, sure)
     await categorizeUncategorized(ctx, { ids: [sure] })
     expect(asked[0]).toMatchObject({ bankCategory: 'Transportation › Gas' })
     expect(asked[0]!.categories.find((c) => c.name === 'Credit card payment')).toMatchObject({ excluded: true })
@@ -325,13 +331,51 @@ describe('the bank’s category as a second opinion', () => {
 
     // The bank unsure, or the AI disagreeing: it's a suggestion to review.
     const unsure = synced(ctx, card, '2026-10-01', -4_000, 'Esso')
-    setBank.run('Transportation › Gas', 0, unsure)
+    setBank('Transportation › Gas', 0, unsure)
     await categorizeUncategorized(ctx, { ids: [unsure] })
     expect(getTransaction(ctx, unsure).needsReview).toBe(true)
     agrees = false
     const other = synced(ctx, card, '2026-10-01', -3_000, 'Petro-Canada')
-    setBank.run('Transportation › Gas', 1, other)
+    setBank('Transportation › Gas', 1, other)
     await categorizeUncategorized(ctx, { ids: [other] })
     expect(getTransaction(ctx, other).needsReview).toBe(true)
+  })
+})
+
+describe('matching in two ledgers', () => {
+  it('pairs and refunds only within the ledger it runs in', () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const fuel = categoryId(a, 'Fuel')
+    // B has the purchase a refund in A would match, and the withdrawal a card payment in A would.
+    addTx(b, accB.card, '2026-09-20', -4_000, 'Westside Gas Bar', { categoryId: fuel, origin: 'sync' })
+    const withdrawalB = addTx(b, accB.chequing, '2026-09-29', -50_000, 'Visa payment', { origin: 'sync' })
+    const refundA = synced(a, accA.card, '2026-09-25', 4_000, 'Westside Gas Bar')
+    const paymentA = synced(a, accA.card, '2026-09-30', 50_000, 'Payment - thank you')
+
+    // With no purchase from the merchant in A, the credit is a card payment too.
+    expect(matchTransactions(a)).toMatchObject({ refunds: 0, transfers: 0, payments: 2 })
+    expect(getTransaction(a, refundA)).toMatchObject({ links: [], categorySource: 'rule' })
+    expect(getTransaction(a, paymentA)).toMatchObject({ transferPairId: null, categoryId: categoryId(a, 'Credit card payment'), categorySource: 'rule' })
+    expect(getTransaction(b, withdrawalB)).toMatchObject({ transferPairId: null, categoryId: null })
+
+    // Its own withdrawal, once it arrives, pairs.
+    const withdrawalA = addTx(a, accA.chequing, '2026-09-29', -50_000, 'Visa payment', { origin: 'sync' })
+    expect(matchTransactions(a)).toMatchObject({ transfers: 1 })
+    expect(getTransaction(a, paymentA).transferPairId).toBe(withdrawalA)
+    expect(getTransaction(b, withdrawalB).transferPairId).toBeNull()
+  })
+
+  it('takes the card payment category from the ledger’s own list', () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    // Turned off in B only: B falls back to Transfer, A still has it.
+    turnOff(b, 'Credit card payment')
+    const pa = synced(a, accA.card, '2026-09-30', 10_000, 'Payment')
+    const pb = synced(b, accB.card, '2026-09-30', 10_000, 'Payment')
+    matchTransactions(a)
+    matchTransactions(b)
+    expect(getTransaction(a, pa).categoryId).toBe(categoryId(a, 'Credit card payment'))
+    expect(getTransaction(b, pb).categoryId).toBe(categoryId(b, 'Transfer'))
   })
 })

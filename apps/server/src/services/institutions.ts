@@ -1,6 +1,6 @@
 import { HTTPException } from 'hono/http-exception'
 import type { Institution } from '@chipmunk/shared'
-import { badRequest, notFound } from '../lib/http'
+import { badRequest } from '../lib/http'
 import type { AppContext } from './context'
 
 interface Row {
@@ -10,7 +10,10 @@ interface Row {
   account_count: number
 }
 
-const LIST_SQL = `SELECT i.*, (SELECT count(*) FROM accounts a WHERE a.institution_id = i.id) AS account_count FROM institutions i`
+/** This ledger's institutions, each with how many of its accounts are there (archived ones count). */
+const LIST_SQL = `SELECT i.*,
+    (SELECT count(*) FROM ledger_accounts a WHERE a.ledger_id = @ledger AND a.institution_id = i.id) AS account_count
+  FROM institutions i WHERE i.ledger_id = @ledger`
 
 function toDTO(r: Row): Institution {
   return {
@@ -22,19 +25,16 @@ function toDTO(r: Row): Institution {
 }
 
 export function listInstitutions(ctx: AppContext): Institution[] {
-  return (ctx.sqlite.prepare(`${LIST_SQL} ORDER BY i.sort, i.id`).all() as Row[]).map(toDTO)
+  return ctx.q.all<Row>(`${LIST_SQL} ORDER BY i.sort, i.id`).map(toDTO)
 }
 
 export function getInstitution(ctx: AppContext, id: number): Institution {
-  const row = ctx.sqlite.prepare(`${LIST_SQL} WHERE i.id = ?`).get(id) as Row | undefined
-  if (!row) notFound('Institution not found')
-  return toDTO(row)
+  return toDTO(ctx.q.mustGet<Row>(`${LIST_SQL} AND i.id = ?`, 'Institution not found', id))
 }
 
-/** Names are unique, ignoring case and surrounding spaces. */
+/** Names are unique in a ledger, ignoring case and surrounding spaces. */
 function idByName(ctx: AppContext, name: string): number | undefined {
-  const row = ctx.sqlite.prepare('SELECT id FROM institutions WHERE lower(trim(name)) = lower(trim(?))').get(name) as { id: number } | undefined
-  return row?.id
+  return ctx.q.pluck<number>('SELECT id FROM institutions WHERE ledger_id = @ledger AND lower(trim(name)) = lower(trim(?)) ORDER BY id LIMIT 1', name)
 }
 
 function assertNameFree(ctx: AppContext, name: string, except?: number) {
@@ -44,8 +44,8 @@ function assertNameFree(ctx: AppContext, name: string, except?: number) {
 
 export function createInstitution(ctx: AppContext, input: { name: string }): Institution {
   assertNameFree(ctx, input.name)
-  const { m } = ctx.sqlite.prepare('SELECT coalesce(max(sort), -1) AS m FROM institutions').get() as { m: number }
-  const { lastInsertRowid } = ctx.sqlite.prepare('INSERT INTO institutions (name, sort) VALUES (?, ?)').run(input.name.trim(), m + 1)
+  const m = ctx.q.pluck<number>('SELECT coalesce(max(sort), -1) FROM institutions WHERE ledger_id = @ledger')!
+  const { lastInsertRowid } = ctx.q.run('INSERT INTO institutions (ledger_id, name, sort) VALUES (@ledger, ?, ?)', input.name.trim(), m + 1)
   return getInstitution(ctx, Number(lastInsertRowid))
 }
 
@@ -53,10 +53,10 @@ export function updateInstitution(ctx: AppContext, id: number, input: { name?: s
   getInstitution(ctx, id)
   if (input.name !== undefined) {
     assertNameFree(ctx, input.name, id)
-    ctx.sqlite.prepare('UPDATE institutions SET name = ? WHERE id = ?').run(input.name.trim(), id)
+    ctx.q.run('UPDATE institutions SET name = ? WHERE id = ? AND ledger_id = @ledger', input.name.trim(), id)
   }
-  if (input.sort !== undefined) ctx.sqlite.prepare('UPDATE institutions SET sort = ? WHERE id = ?').run(input.sort, id)
-  ctx.sqlite.prepare(`UPDATE institutions SET updated_at = ? WHERE id = ?`).run(new Date().toISOString(), id)
+  if (input.sort !== undefined) ctx.q.run('UPDATE institutions SET sort = ? WHERE id = ? AND ledger_id = @ledger', input.sort, id)
+  ctx.q.run('UPDATE institutions SET updated_at = ? WHERE id = ? AND ledger_id = @ledger', new Date().toISOString(), id)
   return getInstitution(ctx, id)
 }
 
@@ -70,18 +70,18 @@ export function deleteInstitution(ctx: AppContext, id: number, moveTo?: number):
       message: `${before.name} still has ${before.accountCount} account${before.accountCount === 1 ? '' : 's'}. Move them to another institution first.`,
     })
   }
-  ctx.sqlite.transaction(() => {
-    if (target) ctx.sqlite.prepare('UPDATE accounts SET institution_id = ? WHERE institution_id = ?').run(target.id, id)
-    ctx.sqlite.prepare('DELETE FROM institutions WHERE id = ?').run(id)
-  })()
+  ctx.q.transaction(() => {
+    if (target) ctx.q.run('UPDATE accounts SET institution_id = ? WHERE institution_id = ? AND ledger_id = @ledger', target.id, id)
+    ctx.q.run('DELETE FROM institutions WHERE id = ? AND ledger_id = @ledger', id)
+  })
   return { before, movedTo: target ? getInstitution(ctx, target.id) : null }
 }
 
 /** Removes an institution once no account is under it (archived ones count). Returns it if it was removed. */
 export function removeIfEmpty(ctx: AppContext, id: number): Institution | null {
-  const row = ctx.sqlite.prepare(`${LIST_SQL} WHERE i.id = ?`).get(id) as Row | undefined
+  const row = ctx.q.get<Row>(`${LIST_SQL} AND i.id = ?`, id)
   if (!row || row.account_count) return null
-  ctx.sqlite.prepare('DELETE FROM institutions WHERE id = ?').run(id)
+  ctx.q.run('DELETE FROM institutions WHERE id = ? AND ledger_id = @ledger', id)
   return toDTO(row)
 }
 

@@ -98,36 +98,34 @@ export function applyRemoteTransactions(
 
   // Rows the bank's data can touch: anything with a bank id, and recent ones that could be adopted.
   const since = window ? addDays(window.from, -10) : incoming.length ? addDays(incoming[0]!.date, -10) : '9999-12-31'
-  const local = ctx.sqlite
-    .prepare(
-      `SELECT id, date, amount_minor AS amount, payee, payee_key AS payeeKey, status, origin, external_id AS externalId,
-         corrected_at AS correctedAt, deleted_at AS deletedAt, transfer_pair_id AS transferPairId
-       FROM transactions WHERE account_id = ? AND (date >= ? OR external_id IS NOT NULL)`,
-    )
-    .all(accountId, since) as LocalRow[]
+  const local = ctx.q.all<LocalRow>(
+    `SELECT id, date, amount_minor AS amount, payee, payee_key AS payeeKey, status, origin, external_id AS externalId,
+       corrected_at AS correctedAt, deleted_at AS deletedAt, transfer_pair_id AS transferPairId
+     FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND (date >= @since OR external_id IS NOT NULL)`,
+    { accountId, since },
+  )
   const byExternalId = new Map(local.filter((t) => t.externalId).map((t) => [t.externalId!, t]))
   const used = new Set<number>()
 
   // The bank's category comes along when it has one (Plaid); otherwise what's there stays. An amount
   // and date you corrected stay too.
-  const update = ctx.sqlite.prepare(
-    `UPDATE transactions SET date = CASE WHEN corrected_at IS NULL THEN @date ELSE date END,
+  const updateFromBank = `UPDATE transactions SET date = CASE WHEN corrected_at IS NULL THEN @date ELSE date END,
        datetime = CASE WHEN corrected_at IS NOT NULL THEN datetime WHEN @datetime IS NOT NULL THEN @datetime
          WHEN datetime IS NOT NULL THEN @date || substr(datetime, 11) END,
        amount_minor = CASE WHEN corrected_at IS NULL THEN @amount ELSE amount_minor END,
        status = @status, external_id = @externalId,
        bank_category = coalesce(@bankCategory, bank_category),
        bank_category_confident = CASE WHEN @bankCategory IS NULL THEN bank_category_confident ELSE @bankConfident END,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id`,
-  )
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id AND ledger_id = @ledger`
   const bank = (r: RemoteTransaction) => ({ bankCategory: r.category?.name ?? null, bankConfident: r.category?.confident ? 1 : 0 })
   const write = (row: LocalRow, r: RemoteTransaction) => {
-    update.run({ id: row.id, date: r.date, datetime: r.datetime ?? null, amount: r.amountMinor, status: r.pending ? 'pending' : 'cleared', externalId: r.remoteId, ...bank(r) })
+    ctx.q.run(updateFromBank, { id: row.id, date: r.date, datetime: r.datetime ?? null, amount: r.amountMinor, status: r.pending ? 'pending' : 'cleared', externalId: r.remoteId, ...bank(r) })
     followBankPayee(ctx, row, r.payee)
   }
-  const setBankCategory = ctx.sqlite.prepare('UPDATE transactions SET bank_category = @bankCategory, bank_category_confident = @bankConfident WHERE id = @id')
+  const setBankCategory = (id: number, r: RemoteTransaction) =>
+    ctx.q.run('UPDATE transactions SET bank_category = @bankCategory, bank_category_confident = @bankConfident WHERE id = @id AND ledger_id = @ledger', { id, ...bank(r) })
 
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     const fresh: RemoteTransaction[] = []
     // 1. Known ones.
     for (const r of incoming) {
@@ -208,7 +206,7 @@ export function applyRemoteTransactions(
         },
         { origin: 'sync', suggestion: historySuggestion(ctx, r.payee, r.amountMinor) },
       )
-      if (r.category) setBankCategory.run({ id, ...bank(r) })
+      if (r.category) setBankCategory(id, r)
       result.added++
       result.newIds.push(id)
     }
@@ -216,18 +214,17 @@ export function applyRemoteTransactions(
     // 5. Vanished pending ones inside the window we fetched. (Posted ones are kept: banks drop old
     // transactions from their listings, and a posted transaction doesn't un-happen.) Plaid says
     // outright what was removed, posted or not.
-    const remove = ctx.sqlite.prepare(`UPDATE transactions SET deleted_at = ? WHERE id = ?`)
     for (const p of orphaned) {
       if (used.has(p.id) || p.correctedAt) continue
       if (window && (p.status !== 'pending' || p.date < window.from)) continue
-      const itemId = ctx.sqlite.prepare('SELECT recurring_item_id FROM transactions WHERE id = ?').pluck().get(p.id) as number | null
+      const itemId = ctx.q.pluck<number | null>('SELECT recurring_item_id FROM transactions WHERE id = @id AND ledger_id = @ledger', { id: p.id })
       if (itemId && !losing.has(itemId)) losing.set(itemId, paidOff(ctx, itemId))
-      remove.run(ctx.now().toISOString(), p.id)
+      ctx.q.run('UPDATE transactions SET deleted_at = @now WHERE id = @id AND ledger_id = @ledger', { now: ctx.now().toISOString(), id: p.id })
       result.removed++
     }
 
     logPayloads(ctx, accountId, provider, incoming, 'removed' in scope ? scope.removed : [])
-  })()
+  })
   // A removed payment of a recurring item: the item works its payments out again.
   for (const [itemId, wasPaidOff] of losing) recalculateRecurring(ctx, itemId, { removed: true, followAmount: true, wasPaidOff })
   return result
@@ -239,15 +236,16 @@ export function applyRemoteTransactions(
  * id it has now (a service it was synced with before had other ids). Null when there's none.
  */
 export function latestBankPayload(ctx: AppContext, transactionId: number): BankPayload | null {
-  if (!ctx.sqlite.prepare('SELECT 1 FROM transactions WHERE id = ?').get(transactionId)) notFound('Transaction not found')
-  const row = ctx.sqlite
-    .prepare(
-      `SELECT p.id, p.provider, p.remote_id AS remoteId, p.event, p.received_at AS receivedAt, p.payload
-       FROM bank_payloads p JOIN transactions t ON t.id = ?
-       WHERE p.account_id = t.account_id AND p.remote_id = t.external_id
-       ORDER BY p.id DESC LIMIT 1`,
-    )
-    .get(transactionId) as (Omit<BankPayload, 'payload'> & { payload: string }) | undefined
+  ctx.q.mustGet('SELECT 1 FROM transactions WHERE id = @id AND ledger_id = @ledger', 'Transaction not found', { id: transactionId })
+  const row = ctx.q.get<Omit<BankPayload, 'payload'> & { payload: string }>(
+    `SELECT p.id, p.provider, p.remote_id AS remoteId, p.event, p.received_at AS receivedAt, p.payload
+     FROM transactions t
+     JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
+     JOIN bank_payloads p ON p.account_id = a.id AND p.remote_id = t.external_id
+     WHERE t.id = @id AND t.ledger_id = @ledger
+     ORDER BY p.id DESC LIMIT 1`,
+    { id: transactionId },
+  )
   return row ? { ...row, payload: JSON.parse(row.payload) as unknown } : null
 }
 
@@ -263,24 +261,33 @@ export function logPayloads(
   incoming: RemoteTransaction[],
   removed: Array<{ remoteId: string; raw?: unknown }>,
 ) {
-  const last = ctx.sqlite.prepare(
-    'SELECT event, payload, transaction_id AS transactionId FROM bank_payloads WHERE account_id = ? AND remote_id = ? ORDER BY id DESC LIMIT 1',
-  )
-  const landed = ctx.sqlite.prepare('SELECT id FROM transactions WHERE account_id = ? AND external_id = ? ORDER BY id DESC LIMIT 1').pluck()
-  const insert = ctx.sqlite.prepare(
-    `INSERT INTO bank_payloads (account_id, provider, remote_id, transaction_id, event, payload, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
+  const last = (remoteId: string) =>
+    ctx.q.get<{ event: string; payload: string; transactionId: number | null }>(
+      `SELECT p.event, p.payload, p.transaction_id AS transactionId
+       FROM ledger_accounts a JOIN bank_payloads p ON p.account_id = a.id
+       WHERE a.ledger_id = @ledger AND a.id = @accountId AND p.remote_id = @remoteId
+       ORDER BY p.id DESC LIMIT 1`,
+      { accountId, remoteId },
+    )
+  const landed = (remoteId: string) =>
+    ctx.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND external_id = @remoteId ORDER BY id DESC LIMIT 1', {
+      accountId,
+      remoteId,
+    })
   const receivedAt = ctx.now().toISOString()
   const keep = (remoteId: string, raw: unknown, removal: boolean) => {
     if (raw === undefined) return
     const payload = JSON.stringify(raw)
-    const before = last.get(accountId, remoteId) as { event: string; payload: string; transactionId: number | null } | undefined
+    const before = last(remoteId)
     if (before?.payload === payload && (before.event === 'removed') === removal) return
     const event = removal ? 'removed' : before ? 'changed' : 'added'
     // A pending one that posted under a new id isn't found by its old id any more: it's where it was.
-    const transactionId = (landed.get(accountId, remoteId) as number | undefined) ?? before?.transactionId ?? null
-    insert.run(accountId, provider, remoteId, transactionId, event, payload, receivedAt)
+    const transactionId = landed(remoteId) ?? before?.transactionId ?? null
+    ctx.q.run(
+      `INSERT INTO bank_payloads (account_id, provider, remote_id, transaction_id, event, payload, received_at)
+       VALUES (@accountId, @provider, @remoteId, @transactionId, @event, @payload, @receivedAt)`,
+      { accountId, provider, remoteId, transactionId, event, payload, receivedAt },
+    )
   }
   for (const r of incoming) keep(r.remoteId, r.raw, false)
   for (const r of removed) keep(r.remoteId, r.raw, true)

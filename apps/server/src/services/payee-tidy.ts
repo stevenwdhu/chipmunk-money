@@ -1,6 +1,8 @@
+import { eq, gte, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { payeeKey, payeeNamer, type PayeeTidyPreview, type PayeeTidyStatus } from '@chipmunk/shared'
 import { askStructured } from '../ai/runner'
+import { payeeTidy } from '../db/schema'
 import { badRequest } from '../lib/http'
 import type { MetaStore } from './context'
 import { forgetPayeeNamer, loadNameRules, payeeNamerFor } from './payee-namer'
@@ -113,8 +115,8 @@ interface Job {
 }
 const jobs = new WeakMap<object, Job>()
 const jobOf = (meta: MetaStore): Job => {
-  let job = jobs.get(meta.sqlite)
-  if (!job) jobs.set(meta.sqlite, (job = { running: false, done: 0, total: 0, error: null }))
+  let job = jobs.get(meta.db)
+  if (!job) jobs.set(meta.db, (job = { running: false, done: 0, total: 0, error: null }))
   return job
 }
 
@@ -129,10 +131,12 @@ function tidierFor(world: PayeeWorld, tidier?: PayeeTidier): PayeeTidier {
 /** What AI tidying called each payee as sent, by its current instructions (older names are asked again). */
 const currentNames = (meta: MetaStore) =>
   new Map(
-    (meta.sqlite.prepare('SELECT original, tidied FROM payee_tidy WHERE prompt >= ?').all(PAYEE_TIDY_PROMPT) as Array<{ original: string; tidied: string }>).map((r) => [
-      r.original,
-      r.tidied,
-    ]),
+    meta.db
+      .select({ original: payeeTidy.original, tidied: payeeTidy.tidied })
+      .from(payeeTidy)
+      .where(gte(payeeTidy.prompt, PAYEE_TIDY_PROMPT))
+      .all()
+      .map((r) => [r.original, r.tidied]),
   )
 
 /** A payee's words that can tell it apart: no numbers, nothing shorter than 3 letters. */
@@ -187,26 +191,33 @@ function knownNames(world: PayeeWorld, payees: string[]): KnownNames {
 async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidier) {
   const { names, model } = await tidier(payees, knownNames(world, payees))
   const asked = new Set(payees)
-  const keep = world.meta.sqlite.prepare(
-    `INSERT INTO payee_tidy (original, tidied, model, prompt) VALUES (?, ?, ?, ?)
-     ON CONFLICT (original) DO UPDATE SET tidied = excluded.tidied, model = excluded.model, prompt = excluded.prompt,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-  )
+  const keep = (original: string, tidied: string) =>
+    world.meta.db
+      .insert(payeeTidy)
+      .values({ original, tidied, model, prompt: PAYEE_TIDY_PROMPT })
+      .onConflictDoUpdate({
+        target: payeeTidy.original,
+        set: {
+          tidied: sql`excluded.tidied`,
+          model: sql`excluded.model`,
+          prompt: sql`excluded.prompt`,
+          updatedAt: sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+        },
+      })
+      .run()
   const kept = names.filter((n) => asked.has(n.payee) && n.name.trim())
-  world.meta.sqlite.transaction(() => kept.forEach((n) => keep.run(n.payee, n.name.trim().slice(0, 120), model, PAYEE_TIDY_PROMPT)))()
+  world.meta.db.transaction(() => kept.forEach((n) => keep(n.payee, n.name.trim().slice(0, 120))))
   return kept
 }
 
 export function tidyStatus(world: PayeeWorld): PayeeTidyStatus {
   const sent = payeesSent(world)
   // Names by older instructions are left out: they're asked again.
-  const rows = world.meta.sqlite
-    .prepare('SELECT original, tidied, updated_at AS updatedAt FROM payee_tidy WHERE prompt >= ?')
-    .all(PAYEE_TIDY_PROMPT) as Array<{
-    original: string
-    tidied: string
-    updatedAt: string
-  }>
+  const rows = world.meta.db
+    .select({ original: payeeTidy.original, tidied: payeeTidy.tidied, updatedAt: payeeTidy.updatedAt })
+    .from(payeeTidy)
+    .where(gte(payeeTidy.prompt, PAYEE_TIDY_PROMPT))
+    .all()
   const job = jobOf(world.meta)
   const named = payeeNamerFor(world)
   return {
@@ -289,8 +300,7 @@ export function setAiTidy(world: PayeeWorld, enabled: boolean, given?: PayeeTidi
 
 /** Payees AI tidying named wrong, to name again: forgotten, then asked again together (while it's on). */
 export function tidyAgain(world: PayeeWorld, originals: string[], tidier?: PayeeTidier): PayeeTidyStatus {
-  const forget = world.meta.sqlite.prepare('DELETE FROM payee_tidy WHERE original = ?')
-  world.meta.sqlite.transaction(() => originals.forEach((o) => forget.run(o)))()
+  world.meta.db.transaction(() => originals.forEach((o) => world.meta.db.delete(payeeTidy).where(eq(payeeTidy.original, o)).run()))
   renamed(world)
   void tidyNewPayees(world, tidier)
   return tidyStatus(world)

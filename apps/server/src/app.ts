@@ -5,6 +5,7 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { logger } from 'hono/logger'
+import { sql } from 'drizzle-orm'
 import { createMcpHttpHandler } from '@chipmunk/mcp'
 import { authenticate, verifyApiKey } from './api/auth'
 import { errorResponse, onError } from './api/errors'
@@ -141,7 +142,7 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
 
   app.get('/healthz', (c) => {
     try {
-      storage.meta.sqlite.prepare('SELECT 1').get()
+      storage.app.db.get(sql`SELECT 1`)
       return c.json({ ok: true })
     } catch (err) {
       console.error(err)
@@ -163,7 +164,7 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
       )
     }
     try {
-      await finishChatgptSignIn(storage.meta, c.req.query())
+      await finishChatgptSignIn(storage.app, c.req.query())
       return page('Signed in with ChatGPT', 'You can close this tab and go back to Chipmunk.')
     } catch (err) {
       const message = (err instanceof Error ? err.message : String(err)).replace(/[<>&]/g, '')
@@ -187,8 +188,8 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
   app.use('/api/v1/*', (c, next) => (UPLOAD_ROUTES.test(c.req.path) ? uploadLimit : jsonLimit)(c, next))
   const trustedHeader = opts.trustedHeader === undefined ? env.trustedAuthHeader : opts.trustedHeader
   const allowedHosts = opts.allowedHosts ?? env.allowedHosts
-  app.use('/api/v1/*', authenticate({ meta: storage.meta, now: storage.now, trustedHeader, allowedHosts }))
-  app.use('/api/v1/*', idempotency({ meta: storage.meta, now: storage.now }))
+  app.use('/api/v1/*', authenticate({ meta: storage.app, now: storage.now, trustedHeader, allowedHosts }))
+  app.use('/api/v1/*', idempotency({ meta: storage.app, now: storage.now }))
   app.route('/api/v1', api.root.hono)
   app.route('/api/v1/ledgers/:ledger', api.ledger.hono)
   app.all('/api/*', (c) => errorResponse(c, 404, `There's no ${c.req.method} ${c.req.path} in the API. See /api/docs.`))
@@ -198,7 +199,7 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
   const mcp = createMcpHttpHandler({ fetch: (url, init) => app.request(url, init) })
   app.all('/mcp', uploadLimit, (c) => {
     const token = /^Bearer\s+(\S+)$/i.exec(c.req.header('authorization') ?? '')?.[1]
-    if (!token || !verifyApiKey(storage.meta, token, storage.now())) {
+    if (!token || !verifyApiKey(storage.app, token, storage.now())) {
       c.header('WWW-Authenticate', 'Bearer realm="chipmunk"')
       return errorResponse(c, 401, 'Send an API key as "Authorization: Bearer cm_…". Create one in App settings → API keys.')
     }

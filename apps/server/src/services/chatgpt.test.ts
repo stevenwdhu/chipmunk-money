@@ -1,7 +1,9 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import type { ChatgptStatus } from '@chipmunk/shared'
 import { createApp } from '../app'
+import { appSettings } from '../db/schema'
 import { testStorage } from '../test/helpers'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -142,7 +144,7 @@ describe('signing in with ChatGPT', () => {
     // A sign-in is used once.
     expect((await api('GET', `/auth/callback?code=code-1&state=${p.get('state')}&client_id=oaiapp_test`)).body).toContain('expired or was already used')
     // Kept encrypted.
-    const stored = storage.meta.sqlite.prepare("SELECT value FROM settings WHERE key = 'chatgpt.session'").pluck().get() as string
+    const stored = storage.app.db.select().from(appSettings).where(eq(appSettings.key, 'chatgpt.session')).get()!.value
     expect(stored).not.toMatch(/access-1|refresh-1|me@example/)
 
     // The models the plan offers, and categorizing with one of them.

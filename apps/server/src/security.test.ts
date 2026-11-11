@@ -8,11 +8,13 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { transactionCreateSchema, type ApiKeyCreated } from '@chipmunk/shared'
 import Anthropic from '@anthropic-ai/sdk'
 import { describeError } from './ai/runner'
-import { createApp, UPLOAD_LIMIT, type AppOptions } from './app'
+import { createApi, createApp, UPLOAD_LIMIT, type AppOptions } from './app'
 import { isAllowedHost } from './api/auth'
 import { SCALAR } from './api/openapi'
 import { toCsv } from './routes/ledger'
 import { envSettingsWarnings } from './services/settings'
+import { eq } from 'drizzle-orm'
+import { bankAccounts, bankConnections } from './db/schema'
 import { createTransaction } from './services/transactions'
 import { categoryId, makeAccount, testStorage } from './test/helpers'
 
@@ -80,7 +82,7 @@ describe('who may call the API without a key', () => {
     })
     expect(erase.status).toBe(401)
     expect((await send('/api/v1/api-keys', { method: 'POST', body: { name: 'x', scopes: ['admin'] }, headers: { origin: 'https://evil.example' } })).status).toBe(401)
-    expect(storage.registry.defaultContext().sqlite.prepare('SELECT count(*) AS n FROM accounts').get()).toEqual({ n: 1 })
+    expect(storage.registry.defaultContext().q.get('SELECT count(*) AS n FROM ledger_accounts WHERE ledger_id = @ledger')).toEqual({ n: 1 })
   })
 
   it('answers only at its own host names (DNS rebinding)', async () => {
@@ -196,6 +198,35 @@ describe('keys limited to some ledgers', () => {
     }
   })
 
+  it('get 403 on every route of another ledger, by slug or id, and change nothing there', async () => {
+    const { storage, web, send, key } = setup()
+    await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
+    const personal = storage.registry.defaultContext()
+    makeAccount(personal)
+    const limited = await key({ scopes: ['admin'], ledgers: ['family'] })
+    const snapshot = () => personal.q.all('SELECT id, name FROM ledger_accounts WHERE ledger_id = @ledger ORDER BY id')
+    const before = snapshot()
+
+    const refused = "This API key isn't allowed to use that ledger."
+    const routes = createApi(storage).specs.filter((s) => s.path.startsWith('/ledgers/:ledger/'))
+    expect(routes.length).toBeGreaterThan(100)
+    for (const ledger of ['personal', personal.ledger.id]) {
+      // Refused before the request is read.
+      for (const s of routes) {
+        const url = `/api/v1${s.path.replace(':ledger', ledger).replace(/:\w+/g, '1')}`
+        const res = await send(url, { method: s.method.toUpperCase(), body: s.method === 'get' ? undefined : {}, headers: limited })
+        expect([s.method, url, res.status, res.body?.error.message]).toEqual([s.method, url, 403, refused])
+      }
+      // The ledger itself, with requests that would work.
+      for (const [method, body] of [['GET'], ['PATCH', { color: '#16a34a' }], ['DELETE', { confirm: 'Personal' }]] as const) {
+        const res = await send(`/api/v1/ledgers/${ledger}`, { method, body, headers: limited })
+        expect([method, res.status, res.body?.error.message]).toEqual([method, 403, refused])
+      }
+    }
+    expect(snapshot()).toEqual(before)
+    expect((await send('/api/v1/ledgers/family/accounts', { headers: limited })).status).toBe(200)
+  })
+
   it('can’t make their ledger the one the app opens', async () => {
     const { web, send, key } = setup()
     await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
@@ -227,16 +258,17 @@ describe('keys limited to some ledgers', () => {
     const limited = await key({ scopes: ['write'], ledgers: ['family'] })
     const personal = storage.registry.defaultContext()
     const coffee = categoryId(personal, 'Groceries')
-    await createTransaction(personal, transactionCreateSchema.parse({ accountId: makeAccount(personal), date: '2026-09-01', amountMinor: -500, payee: 'Cafe', categoryId: coffee }), { useAi: false })
+    const chequing = makeAccount(personal)
+    await createTransaction(personal, transactionCreateSchema.parse({ accountId: chequing, date: '2026-09-01', amountMinor: -500, payee: 'Cafe', categoryId: coffee }), { useAi: false })
     const used = async (auth: Record<string, string>) =>
       (await send('/api/v1/categories', { headers: auth })).body.categories.find((x: Json) => x.id === coffee).transactionCount
     expect(await used(SAME_ORIGIN)).toBe(1)
     expect(await used(limited)).toBe(0)
 
     // A connection feeding another ledger is left out, not half-synced and then refused.
-    const meta = storage.meta.sqlite
-    meta.prepare(`INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c1', 'simplefin', 'Bank', 'x')`).run()
-    meta.prepare(`INSERT INTO bank_accounts (id, connection_id, remote_id, name, currency, ledger_id, account_id) VALUES ('b1', 'c1', 'r1', 'Chequing', 'CAD', ?, 1)`).run(personal.ledger.id)
+    const app = storage.app.db
+    app.insert(bankConnections).values({ id: 'c1', provider: 'simplefin', name: 'Bank', secret: 'x' }).run()
+    app.insert(bankAccounts).values({ id: 'b1', connectionId: 'c1', remoteId: 'r1', name: 'Chequing', currency: 'CAD', accountId: chequing }).run()
     const res = await send('/api/v1/bank/sync', { method: 'POST', headers: limited })
     expect([res.status, res.body]).toEqual([200, []])
   })
@@ -245,13 +277,13 @@ describe('keys limited to some ledgers', () => {
     const { storage, web, send, key } = setup()
     await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
     const limited = await key({ scopes: ['admin'], ledgers: ['family'] })
-    const family = storage.registry.get('family')
     const mine = (await send('/api/v1/ledgers/family/accounts', { method: 'POST', body: { name: 'Joint', type: 'chequing', institution: 'Bank' }, headers: limited })).body.id
-    const meta = storage.meta.sqlite
-    meta.prepare(`INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c1', 'simplefin', 'Bank', 'x')`).run()
-    const insert = meta.prepare(`INSERT INTO bank_accounts (id, connection_id, remote_id, name, currency, ledger_id, account_id) VALUES (?, 'c1', ?, ?, 'CAD', ?, ?)`)
-    insert.run('someone-elses', 'r1', 'Private chequing', null, null)
-    insert.run('joint', 'r2', 'Joint chequing', family.id, mine)
+    const app = storage.app.db
+    app.insert(bankConnections).values({ id: 'c1', provider: 'simplefin', name: 'Bank', secret: 'x' }).run()
+    const insert = (id: string, remoteId: string, name: string, accountId: number | null) =>
+      app.insert(bankAccounts).values({ id, connectionId: 'c1', remoteId, name, currency: 'CAD', accountId }).run()
+    insert('someone-elses', 'r1', 'Private chequing', null)
+    insert('joint', 'r2', 'Joint chequing', mine)
 
     const listed = (auth: Record<string, string>) => send('/api/v1/ledgers/family/bank-accounts', { headers: auth }).then((r) => r.body.map((b: Json) => b.id))
     expect(await listed(limited)).toEqual(['joint'])
@@ -267,7 +299,7 @@ describe('keys limited to some ledgers', () => {
       const res = await send(`/api/v1/ledgers/family${url}`, { method, body, headers: limited })
       expect([url, res.status, res.body?.error.message]).toEqual([url, 403, message])
     }
-    expect(meta.prepare(`SELECT ledger_id FROM bank_accounts WHERE id = 'someone-elses'`).get()).toEqual({ ledger_id: null })
+    expect(app.select({ accountId: bankAccounts.accountId }).from(bankAccounts).where(eq(bankAccounts.id, 'someone-elses')).get()).toEqual({ accountId: null })
   })
 
   it('can’t add to the shared category list or change app settings by restoring a backup', async () => {
@@ -281,9 +313,9 @@ describe('keys limited to some ledgers', () => {
     const file = path.join(dir, 'family.db')
     writeFileSync(file, new Uint8Array(await backup.arrayBuffer()))
     const db = new Database(file)
-    db.prepare(`DELETE FROM settings WHERE key = 'categories.catalog'`).run()
+    db.prepare(`DELETE FROM app_settings WHERE key = 'categories.catalog'`).run()
     db.prepare(`INSERT INTO categories (name) VALUES ('Added by a backup')`).run()
-    db.prepare(`INSERT INTO settings (key, value) VALUES ('ai.primary', ?), ('timezone', '"Pacific/Kiritimati"')`).run(
+    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('ai.primary', ?), ('timezone', '"Pacific/Kiritimati"')`).run(
       JSON.stringify({ kind: 'openai-compatible', model: 'm', baseUrl: 'http://attacker.example/v1', apiKey: null }),
     )
     db.close()
@@ -292,7 +324,9 @@ describe('keys limited to some ledgers', () => {
     const before = (await web('/api/v1/settings')).body
     const restore = (auth: Record<string, string>) =>
       app.request('http://localhost:8787/api/v1/ledgers/family/restore', { method: 'POST', headers: { ...auth, 'content-type': 'application/octet-stream' }, body: bytes })
-    const shared = () => storage.meta.sqlite.prepare(`SELECT count(*) AS n FROM categories WHERE name = 'Added by a backup'`).get()
+    // On the shared list, Personal has it too.
+    const shared = () =>
+      storage.registry.defaultContext().q.get(`SELECT count(*) AS n FROM ledger_categories WHERE ledger_id = @ledger AND name = 'Added by a backup'`)
 
     const refused = await restore(limited)
     expect(refused.status).toBe(403)
@@ -305,6 +339,51 @@ describe('keys limited to some ledgers', () => {
     const after = (await web('/api/v1/settings')).body
     expect([after.timezone, after.ai.primary]).toEqual([before.timezone, null])
     expect(before.timezone).not.toBe('Pacific/Kiritimati')
+  })
+
+  it('can’t move where other ledgers’ ids continue by restoring a backup', async () => {
+    const { storage, app, web, key } = setup()
+    const personal = storage.registry.defaultContext()
+    const mine = makeAccount(personal)
+    await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
+    const family = storage.registry.context('family')
+    const theirs = makeAccount(family)
+    await createTransaction(family, transactionCreateSchema.parse({ accountId: theirs, date: '2026-10-01', amountMinor: -500, payee: 'Shop' }), { useAi: false })
+    const limited = await key({ scopes: ['admin'], ledgers: ['family'] })
+    const backup = await app.request('http://localhost:8787/api/v1/ledgers/family/backup', { headers: limited })
+    expect(backup.status).toBe(200)
+    const good = new Uint8Array(await backup.arrayBuffer())
+    /** The backup edited by hand. */
+    const edited = (sql: string) => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'st-sec-'))
+      const file = path.join(dir, 'family.db')
+      writeFileSync(file, good)
+      const db = new Database(file)
+      db.exec(sql)
+      db.close()
+      const bytes = readFileSync(file)
+      rmSync(dir, { recursive: true, force: true })
+      return bytes
+    }
+    const copy = (id: string) =>
+      `INSERT INTO transactions (id, ledger_id, account_id, date, amount_minor, payee, payee_key) SELECT ${id}, ledger_id, account_id, date, amount_minor, payee, payee_key FROM transactions LIMIT 1`
+    const restore = (bytes: Uint8Array) =>
+      app.request('http://localhost:8787/api/v1/ledgers/family/restore', { method: 'POST', headers: { ...limited, 'content-type': 'application/octet-stream' }, body: bytes })
+    const addToPersonal = async () => {
+      const res = await web('/api/v1/ledgers/personal/transactions', 'POST', { accountId: mine, date: '2026-10-02', amountMinor: -700, payee: 'Cafe' })
+      expect(res.status).toBe(201)
+      expect(res.body.id).toBeLessThan(1000)
+      expect((await web(`/api/v1/ledgers/personal/transactions/${res.body.id}`)).body.payee).toBe('Cafe')
+    }
+
+    const huge = 'UPDATE sqlite_sequence SET seq = 9223372036854775807;'
+    for (const sql of [huge, huge + copy(String(2 ** 50))]) {
+      expect((await restore(edited(sql))).status).toBe(200)
+      await addToPersonal()
+    }
+    const refused = await restore(edited(copy(String(2n ** 62n))))
+    expect([refused.status, ((await refused.json()) as Json).error.message]).toEqual([400, 'That backup has inconsistent data, so nothing was changed.'])
+    await addToPersonal()
   })
 })
 
@@ -428,7 +507,7 @@ describe('health check', () => {
   it('fails when the app database can’t be read', async () => {
     const { storage, send } = setup()
     expect((await send('/healthz')).status).toBe(200)
-    storage.meta.sqlite.close()
+    storage.close()
     const res = await send('/healthz')
     expect(res.status).toBe(503)
     expect(res.body.ok).toBe(false)

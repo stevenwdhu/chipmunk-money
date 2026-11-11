@@ -1,7 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { aiProviderInfo } from '@chipmunk/shared'
-import { aiCalls } from '../db/schema'
 import type { AppContext } from '../services/context'
 import { aiConfig, type AiSlot, type StoredAiConfig } from '../services/settings'
 import { callProvider, callStructured, type StructuredCall } from './providers'
@@ -11,18 +10,19 @@ function logCall(
   ctx: AppContext,
   entry: { slot: AiSlot; model: string; latencyMs: number; ok: boolean; error?: string; inputTokens?: number | null; outputTokens?: number | null },
 ) {
-  ctx.db
-    .insert(aiCalls)
-    .values({
+  ctx.q.run(
+    `INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, error, input_tokens, output_tokens)
+     VALUES (@ledger, @slot, @model, @latencyMs, @ok, @error, @inputTokens, @outputTokens)`,
+    {
       slot: entry.slot,
       model: entry.model,
       latencyMs: entry.latencyMs,
-      ok: entry.ok,
+      ok: entry.ok ? 1 : 0,
       error: entry.error?.slice(0, 500) ?? null,
       inputTokens: entry.inputTokens ?? null,
       outputTokens: entry.outputTokens ?? null,
-    })
-    .run()
+    },
+  )
 }
 
 /**

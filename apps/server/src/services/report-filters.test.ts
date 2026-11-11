@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { filterSchema, recurringCreateSchema, transactionCreateSchema, type ReportFilterInput } from '@chipmunk/shared'
-import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { categoryId, makeAccount, testStorage } from '../test/helpers'
+import { updateCatalogCategory } from './catalog-edit'
 import type { AppContext } from './context'
 import { setLinks } from './links'
 import { createRecurring } from './recurring'
@@ -17,7 +18,8 @@ const add = (ctx: AppContext, accountId: number, date: string, amountMinor: numb
  * dismissed recurring item's payment.
  */
 function ledger() {
-  const ctx = testContext()
+  const storage = testStorage()
+  const ctx = storage.registry.defaultContext()
   const card = makeAccount(ctx, 'Visa', 'credit')
   const chq = makeAccount(ctx, 'Chequing')
   const cat = (name: string) => categoryId(ctx, name)
@@ -45,12 +47,12 @@ function ledger() {
   ])
   const item = (payee: string, amount: number, status: string, tx: number) => {
     const { id } = createRecurring(ctx, recurringCreateSchema.parse({ payee, expectedAmountMinor: amount, cadence: 'monthly', anchorDate: '2026-09-01' }))
-    ctx.sqlite.prepare('UPDATE recurring_items SET status = ? WHERE id = ?').run(status, id)
-    ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?').run(id, tx)
+    ctx.q.run('UPDATE recurring_items SET status = @status WHERE ledger_id = @ledger AND id = @id', { status, id })
+    ctx.q.run('UPDATE transactions SET recurring_item_id = @id WHERE ledger_id = @ledger AND id = @tx', { id, tx })
     return id
   }
   const items = { rent: item('Landlord', -185_000, 'active', t.rent), spotify: item('Spotify', -1_500, 'dismissed', t.spotify) }
-  return { ctx, card, chq, t, items, cat }
+  return { storage, ctx, card, chq, t, items, cat }
 }
 
 const f = (v: ReportFilterInput) => filterSchema.parse(v)
@@ -145,7 +147,7 @@ describe('report filters', () => {
     expect(spent({ only: [{ field: 'payee', keys: [getTransaction(ctx, t.groceries).payeeKey] }] })).toBe(10_000)
     expect(spent({ only: [{ field: 'text', words: ['LOBLAW', 'mystery'] }] })).toBe(11_000)
     // Only in the notes: the payees don't count.
-    ctx.sqlite.prepare("UPDATE transactions SET notes = 'loblaw run' WHERE id = ?").run(t.dinner)
+    ctx.q.run("UPDATE transactions SET notes = 'loblaw run' WHERE ledger_id = @ledger AND id = @id", { id: t.dinner })
     expect(spent({ only: [{ field: 'text', words: ['loblaw'], in: ['notes'] }] })).toBe(9_000)
     expect(spent({ only: [{ field: 'text', words: ['loblaw'], in: ['payee', 'notes'] }] })).toBe(19_000)
     expect(spent({ only: [{ field: 'account', ids: [card] }] })).toBe(all - 185_000)
@@ -165,11 +167,11 @@ describe('report filters', () => {
   })
 
   it('filters by the group and labels of the line’s category, a payback in its purchase’s', () => {
-    const { ctx, cat } = ledger()
+    const { storage, ctx, cat } = ledger()
     const spent = (spending: ReportFilterInput['spending']) => periodSummary(ctx, ...SEP, f({ spending })).spentMinor
     const all = spent(undefined)
-    const group = (name: string) => ctx.sqlite.prepare('SELECT id FROM category_groups WHERE name = ?').pluck().get(name) as number
-    const label = (name: string) => ctx.sqlite.prepare('SELECT id FROM labels WHERE name = ?').pluck().get(name) as number
+    const group = (name: string) => ctx.q.pluck<number>('SELECT id FROM ledger_category_groups WHERE ledger_id = @ledger AND name = @name', { name })!
+    const label = (name: string) => ctx.q.pluck<number>('SELECT id FROM ledger_labels WHERE ledger_id = @ledger AND name = @name', { name })!
     // Groceries and the dinner less Alex's $30. The flight less Sam's and Alex's paybacks.
     expect(spent({ only: [{ field: 'group', ids: [group('Food')] }] })).toBe(10_000 + 9_000)
     expect(spent({ only: [{ field: 'group', ids: [group('Shopping')] }] })).toBe(FLIGHT + 30_000)
@@ -178,7 +180,7 @@ describe('report filters', () => {
     // No group: uncategorized, or a category without one. NULL-safe, so filtering it out keeps the rest.
     expect(spent({ only: [{ field: 'group', ids: ['none'] }] })).toBe(1_000)
     expect(spent({ filterOut: [{ when: [{ field: 'group', ids: ['none'] }] }] })).toBe(all - 1_000)
-    ctx.sqlite.prepare('UPDATE categories SET group_id = NULL WHERE id = ?').run(cat('Entertainment'))
+    updateCatalogCategory(storage, cat('Entertainment'), { groupId: null })
     expect(spent({ only: [{ field: 'group', ids: [group('Food'), 'none'] }] })).toBe(19_000 + 1_500 + 1_000)
     // No label, as the period summary counts it: uncategorized too, and on the income side Salary.
     expect(spent({ only: [{ field: 'label', ids: ['none'] }] })).toBe(periodSummary(ctx, ...SEP).labels.unlabelledSpentMinor)
@@ -271,5 +273,5 @@ describe('report filters', () => {
 })
 
 function tagId(ctx: AppContext, name: string): number {
-  return (ctx.sqlite.prepare('SELECT id FROM tags WHERE name = ?').get(name) as { id: number }).id
+  return ctx.q.pluck<number>('SELECT id FROM tags WHERE ledger_id = @ledger AND name = @name', { name })!
 }

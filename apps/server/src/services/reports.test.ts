@@ -1,15 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { transactionCreateSchema } from '@chipmunk/shared'
-import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { filterSchema, transactionCreateSchema } from '@chipmunk/shared'
+import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
 import { accountHistory, listAccounts, setBalance } from './accounts'
+import { leaveSharedList } from './catalog'
 import { getCategory, listCategories, updateCategory } from './categories'
 import { applyLabel, createLabel, deleteLabel, updateLabel } from './labels'
-import { monthSummary, netWorth, periodSummary, trend } from './reports'
+import { exportRows, monthSummary, netWorth, periodSummary, purchases, tagTotals, topPayees, trend } from './reports'
+import type { AppContext } from './context'
 import { createTransaction, listTransactions, transactionSpan } from './transactions'
 
 const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
 
 describe('reports', () => {
+  it('exports a transaction’s tags in the order they were made', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx)
+    await createTransaction(ctx, tx({ accountId: acc, date: '2026-09-01', amountMinor: -100, payee: 'Shop', tags: ['zeta', 'alpha'] }), { useAi: false })
+    expect(exportRows(ctx).map((r) => r.tags)).toEqual(['zeta alpha'])
+  })
+
   it('computes spending and income with refunds, transfers and uncategorized rows', async () => {
     const ctx = testContext()
     const chequing = makeAccount(ctx, 'Chequing', 'chequing', 500_000)
@@ -92,6 +101,8 @@ describe('reports', () => {
 
   it('sorts spending by your own category labels', async () => {
     const ctx = testContext()
+    // Labels are edited in a ledger with its own list (the shared list's in App settings).
+    leaveSharedList(ctx)
     const chequing = makeAccount(ctx, 'Chequing', 'chequing', 500_000)
     const savings = makeAccount(ctx, 'Savings', 'savings', 0)
     const [groceries, dining, shopping, paycheque] = ['Groceries', 'Dine out', 'General shopping', 'Salary'].map((n) => categoryId(ctx, n)) as [number, number, number, number]
@@ -149,5 +160,62 @@ describe('reports', () => {
     deleteLabel(ctx, want.id)
     expect(getCategory(ctx, dining).labelIds).toEqual([work.id])
     expect(periodSummary(ctx, '2026-09-01', '2026-09-30').labels.items.map((l) => l.name)).toEqual(['Need', 'Work'])
+  })
+})
+
+describe('reports in two ledgers', () => {
+  /** The same accounts, payees, categories and tag in a ledger, with amounts scaled by `x`. */
+  async function fill(ctx: AppContext, x: number) {
+    const chequing = makeAccount(ctx, 'Chequing', 'chequing', 100_000 * x)
+    const card = makeAccount(ctx, 'Card', 'credit')
+    const add = (input: Record<string, unknown>) => createTransaction(ctx, tx({ accountId: chequing, useAi: false, ...input }), { useAi: false })
+    await add({ date: '2026-09-01', amountMinor: 300_000 * x, payee: 'Acme payroll', categoryId: categoryId(ctx, 'Salary') })
+    await add({ date: '2026-09-05', amountMinor: -12_000 * x, payee: 'Shop', categoryId: categoryId(ctx, 'Groceries'), tags: ['trip'] })
+    await add({ date: '2026-09-06', amountMinor: -3_000 * x, payee: 'Cafe', categoryId: categoryId(ctx, 'Dine out') })
+    await add({ date: '2026-09-07', amountMinor: -40_000 * x, payee: 'Card payment', transferAccountId: card })
+    await add({ date: '2026-08-20', amountMinor: -5_000 * x, payee: 'Shop', categoryId: categoryId(ctx, 'Groceries') })
+    return { chequing, card }
+  }
+
+  /** Every report of a ledger, filtered and not. */
+  const everything = (ctx: AppContext) => {
+    const groceries = filterSchema.parse({ spending: { only: [{ field: 'category', ids: [categoryId(ctx, 'Groceries')] }] } })
+    return {
+      month: monthSummary(ctx, '2026-09'),
+      period: periodSummary(ctx, '2026-08-01', '2026-09-30'),
+      filtered: periodSummary(ctx, '2026-08-01', '2026-09-30', groceries),
+      allTime: periodSummary(ctx),
+      trend: trend(ctx, '2026-09', 3, 'category'),
+      payees: topPayees(ctx, '2026-08-01', '2026-09-30'),
+      tags: tagTotals(ctx, '2026-08-01', '2026-09-30'),
+      purchases: purchases(ctx, { from: '2026-08-01', to: '2026-09-30' }),
+      netWorth: netWorth(ctx, 3),
+      exported: exportRows(ctx),
+    }
+  }
+
+  it('each counts only its own money, payees, tags and accounts', async () => {
+    const storage = testStorage()
+    const a = storage.registry.defaultContext()
+    const b = testLedger(storage, 'Family')
+    await fill(a, 1)
+    const alone = everything(a)
+    expect(alone.month).toMatchObject({ spentMinor: 15_000, incomeMinor: 300_000, transactionCount: 3 })
+
+    // A second ledger with the same names (and the same shared categories), its amounts doubled.
+    await fill(b, 2)
+    expect(everything(a)).toEqual(alone)
+    const twin = everything(b)
+    expect(twin.month).toMatchObject({ spentMinor: 30_000, incomeMinor: 600_000, transactionCount: 3 })
+    expect(twin.payees.map((p) => [p.payee, p.amountMinor])).toEqual([
+      ['Shop', 34_000],
+      ['Cafe', 6_000],
+    ])
+    expect(twin.tags).toEqual([expect.objectContaining({ name: 'trip', spentMinor: 24_000, count: 1 })])
+    expect(twin.netWorth.byAccount.map((x) => x.accountId)).toEqual(listAccounts(b).map((x) => x.id))
+    // Its chequing account: opening, pay, spending, and the card payment. The card's balance is a debt.
+    expect(twin.netWorth.current).toMatchObject({ assetsMinor: 200_000 + 600_000 - 24_000 - 6_000 - 80_000 - 10_000, liabilitiesMinor: -80_000 })
+    expect(twin.exported).toHaveLength(6)
+    expect(twin.purchases.items.map((i) => i.transaction.id)).not.toContain(alone.purchases.items[0]!.transaction.id)
   })
 })

@@ -21,28 +21,28 @@ function rng(seed: number) {
   }
 }
 
-export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
-  // Anything of yours stops it: the demo replaces accounts, reports, tags and recurring items too.
-  const existing = ctx.sqlite
-    .prepare(
-      `SELECT (SELECT count(*) FROM transactions) + (SELECT count(*) FROM accounts) + (SELECT count(*) FROM recurring_items)
-         + (SELECT count(*) FROM custom_reports) + (SELECT count(*) FROM tags) AS n`,
-    )
-    .get() as { n: number }
-  if (existing.n && !opts.force) {
+/**
+ * Seeds a ledger with no data (accounts, transactions, recurring items, reports or tags). To
+ * replace a ledger's data, clear it first (`pnpm seed:demo --force` does, after saving a copy).
+ */
+export function seedDemo(ctx: AppContext) {
+  // Anything of yours stops it: the demo would sit next to your accounts, reports, tags and recurring items.
+  const existing = ctx.q.pluck<number>(
+    `SELECT (SELECT count(*) FROM transactions WHERE ledger_id = @ledger) + (SELECT count(*) FROM ledger_accounts WHERE ledger_id = @ledger)
+       + (SELECT count(*) FROM recurring_items WHERE ledger_id = @ledger) + (SELECT count(*) FROM custom_reports WHERE ledger_id = @ledger)
+       + (SELECT count(*) FROM tags WHERE ledger_id = @ledger)`,
+  )!
+  if (existing) {
     throw new Error('This ledger already has data. Re-run with --force to replace it with demo data (a copy is saved in backups/ first).')
   }
-  ctx.sqlite.exec(`
-    DELETE FROM transaction_tags; DELETE FROM transactions; DELETE FROM recurring_items; DELETE FROM import_batches;
-    DELETE FROM balance_snapshots; DELETE FROM accounts; DELETE FROM payee_category_stats; DELETE FROM tags;
-    DELETE FROM ai_calls; DELETE FROM custom_reports; DELETE FROM sqlite_sequence WHERE name = 'custom_reports';
-  `)
+  // What's left of older data would skew the demo: what was learned about payees, and the AI call log.
+  ctx.q.run('DELETE FROM payee_category_stats WHERE ledger_id = @ledger')
+  ctx.q.run('DELETE FROM ai_calls WHERE ledger_id = @ledger')
 
   const rand = rng(20260930)
   const between = (min: number, max: number) => Math.round((min + rand() * (max - min)) * 100)
   const pick = <T>(xs: T[]) => xs[Math.floor(rand() * xs.length)]!
-  const cat = (name: string) =>
-    (ctx.sqlite.prepare('SELECT id FROM categories WHERE name = ?').get(name) as { id: number } | undefined)?.id ?? null
+  const cat = (name: string) => ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND name = ?', name) ?? null
 
   const end = today(ctx)
   const start = `${monthOf(addMonthsToDate(end, -12))}-01`
@@ -175,26 +175,30 @@ export function seedDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
   }
 
   // Uncategorized recent rows: apply history where it is confident, otherwise flag for review.
-  const pending = ctx.sqlite
-    .prepare('SELECT id, payee, amount_minor AS amount FROM transactions WHERE category_id IS NULL AND transfer_pair_id IS NULL')
-    .all() as Array<{ id: number; payee: string; amount: number }>
+  const pending = ctx.q.all<{ id: number; payee: string; amount: number }>(
+    'SELECT id, payee, amount_minor AS amount FROM transactions WHERE ledger_id = @ledger AND category_id IS NULL AND transfer_pair_id IS NULL',
+  )
   return { count, pending, tfsa: tfsa.id, plans, end, firstMonthly }
 }
 
 /** Seeds demo data and runs the same follow-up the app would: history categories and recurring detection. */
-export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
-  const { count, pending, plans, end, firstMonthly } = seedDemo(ctx, opts)
+export function loadDemo(ctx: AppContext) {
+  const { count, pending, plans, end, firstMonthly } = seedDemo(ctx)
 
   for (const p of pending) {
     const s = historySuggestion(ctx, p.payee, p.amount)
     if (!s?.categoryId) continue
-    ctx.sqlite
-      .prepare(`UPDATE transactions SET category_id = ?, category_source = 'history', category_confidence = ?, needs_review = ? WHERE id = ?`)
-      .run(s.categoryId, s.confidence, s.confidence >= 0.8 ? 0 : 1, p.id)
+    ctx.q.run(
+      `UPDATE transactions SET category_id = ?, category_source = 'history', category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger`,
+      s.categoryId,
+      s.confidence,
+      s.confidence >= 0.8 ? 0 : 1,
+      p.id,
+    )
   }
 
   // The plans, as you'd add them: named, with their number of payments, and the laptop's down payment added at its own amount.
-  const category = (name: string) => (ctx.sqlite.prepare('SELECT id FROM categories WHERE name = ?').pluck().get(name) as number | undefined) ?? null
+  const category = (name: string) => ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND name = ?', name) ?? null
   createRecurring(
     ctx,
     recurringCreateSchema.parse({
@@ -233,14 +237,12 @@ export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
     else if (/tim hortons|starbucks|balzacs/i.test(item.payee)) dismissRecurring(ctx, item.id)
   }
   // Mark the newest Uber Eats charge as an AI-style suggestion to show the review flow.
-  ctx.sqlite
-    .prepare(
-      `UPDATE transactions SET category_source = 'ai', category_confidence = 0.86, needs_review = 1
-       WHERE id = (SELECT id FROM transactions WHERE payee LIKE 'UBER *EATS%' ORDER BY date DESC LIMIT 1)`,
-    )
-    .run()
-  // A custom report (id 1): spending without the trip and other big one-offs. Rent is a recurring item, so it stays.
-  const trip = ctx.sqlite.prepare("SELECT id FROM tags WHERE name = 'trip-japan'").pluck().get() as number
+  ctx.q.run(
+    `UPDATE transactions SET category_source = 'ai', category_confidence = 0.86, needs_review = 1
+     WHERE ledger_id = @ledger AND id = (SELECT id FROM transactions WHERE ledger_id = @ledger AND payee LIKE 'UBER *EATS%' ORDER BY date DESC LIMIT 1)`,
+  )
+  // A custom report: spending without the trip and other big one-offs. Rent is a recurring item, so it stays.
+  const trip = ctx.q.pluck<number>("SELECT id FROM tags WHERE ledger_id = @ledger AND name = 'trip-japan'")!
   createCustomReport(ctx, {
     name: 'Everyday spending',
     spec: {

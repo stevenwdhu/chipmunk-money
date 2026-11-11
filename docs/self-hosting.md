@@ -35,11 +35,11 @@ docker compose up -d
 
 Then open http://localhost:8787. It builds the image the first time, and runs one container with the app, the API and the MCP endpoint.
 
-- **Your data** lives in the `chipmunk-data` volume, mounted at `/data`. Removing the container keeps it, `docker compose down -v` deletes it.
+- **Your data** lives in the `chipmunk-data` volume, mounted at `/data`: `chipmunk.db` (one database with every ledger), `secret.key` and `backups/`. Removing the container keeps it, `docker compose down -v` deletes it.
 - **The port** is published on `127.0.0.1:8787` only, so only this machine can reach it. Put a proxy in front of it (see [Security](security.md)), or change the line in `compose.yaml` to `"8787:8787"` to open it to your network.
 - **Time zone:** set `TZ` for "today" and the daily jobs, e.g. `TZ=America/Toronto docker compose up -d`, or put it in `.env`. It defaults to UTC. App settings → General can also set one, and that wins.
 - **Settings:** copy `.env.example` to `.env` for AI or Plaid keys and the like. Compose passes it to the container. `DATA_DIR`, `API_PORT` and `HOST` in it are ignored there, as compose sets those for the image.
-- **Update:** `git pull && docker compose up -d --build`. Migrations run on start, after a copy of each database is saved in `backups/`.
+- **Update:** `git pull && docker compose up -d --build`. Migrations run on start, after a copy of the database is saved in `backups/`.
 - **Back up the volume:** stop it, copy `/data` out, and start it again:
 
   ```bash
@@ -82,8 +82,11 @@ To use it from your phone on the same network, open `http://<your-computer's-ip>
 
 ## Backups
 
-- **Ledger settings → Data → Download backup** gives you a consistent copy of that ledger. **App settings → Ledgers → Full backup** zips every ledger plus `meta.db`. To move machines, stop the server and unzip it into the data directory.
-- **Ledger settings → Data → Restore from backup** (or the welcome screen, or New ledger → From a backup) puts a backup into a ledger. Older backups are upgraded to the current version first.
-- Before a migration, restore, erase, ledger deletion or `pnpm seed:demo --force`, the server saves a copy in `backups/` in the data directory.
+Everything is in one SQLite database, `chipmunk.db` in the data directory, with every ledger, the app settings and the bank connections. While the server runs, SQLite also keeps `chipmunk.db-wal` and `chipmunk.db-shm` beside it.
+
+- **Ledger settings → Data → Download backup** gives you that ledger alone: its rows and the category list it uses, in one `.db` file. Nothing app-wide is in it (API keys, bank connections, app settings).
+- **Ledger settings → Data → Restore from backup** (or the welcome screen, or New ledger → From a backup) puts such a file into a ledger, replacing its data. Its activity log stays. Backups from older versions are upgraded first.
+- **App settings → Ledgers → Full backup** is a zip of the whole database (`chipmunk.db`) and a `manifest.json` that says how to restore it. To move machines, stop the server, remove `chipmunk.db-wal` and `chipmunk.db-shm` from the new data directory if they're there, unzip `chipmunk.db` into it, and copy `secret.key` over from the old one. Copying `chipmunk.db` from a running server without its `-wal` file can lose the latest changes, so stop it or use the full backup.
+- Before a migration, the server saves a copy of the whole database in `backups/`. Before a restore, an erase, deleting a ledger or `pnpm seed:demo --force`, it saves that ledger's backup there (`pre-restore-…`, `pre-erase-…`, `deleted-…` and `pre-seed-demo-…`), which restores like any ledger backup. Nothing in `backups/` is ever deleted for you, so clear out old copies now and then.
 - Backups don't include `secret.key`, so bank connections, the ChatGPT sign-in and the AI and Plaid keys don't come along. After moving machines, either copy that file over as well, or enter the keys again and reconnect your banks (SimpleFIN with a new setup token, Plaid in its window, Wealthsimple by signing in). If the server finds saved secrets it can't read at startup, it says how many in its log.
 - In Docker, see [Back up the volume](#docker).

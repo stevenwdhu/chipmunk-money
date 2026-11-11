@@ -7,7 +7,9 @@ import { openStorage } from './storage'
 
 /** `pnpm docs:update`: writes the reference parts of docs/api.md and docs/mcp.md from the code. */
 const root = path.resolve(import.meta.dirname, '../../..')
-const { specs } = createApi(openStorage({ dataDir: null }))
+const storage = openStorage({ dataDir: null })
+const { specs } = createApi(storage)
+storage.close()
 for (const [file, reference] of [
   ['docs/api.md', apiReference(specs)],
   ['docs/mcp.md', mcpReference(TOOLS)],

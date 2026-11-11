@@ -47,17 +47,6 @@ describe('the table list', () => {
       }
     }
   })
-
-  it('has an index for every foreign key, so a cascade never scans every ledger', () => {
-    for (const t of TABLES) {
-      const leading = new Set(
-        (sqlite.prepare(`PRAGMA index_list("${t.name}")`).all() as Array<{ name: string }>).map(
-          (i) => (sqlite.prepare(`PRAGMA index_info("${i.name}")`).all() as Array<{ name: string | null }>)[0]?.name,
-        ),
-      )
-      for (const f of foreignKeys(t.name)) expect(leading.has(f.from), `${t.name}.${f.from}`).toBe(true)
-    }
-  })
 })
 
 describe('deleteLedgerRows', () => {

@@ -1,12 +1,13 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import Database from 'better-sqlite3'
 import { eq } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
 import { describe, expect, it } from 'vitest'
 import { repoRoot } from '../env'
 import { testLedger, testStorage } from '../test/helpers'
 import { appSettings, tags } from './schema'
-import { allLedgers, LedgerQuery, ledgerMaintenance, LedgerScopeError, scopedConnection } from './scope'
+import { allLedgers, LedgerQuery, ledgerMaintenance, LedgerScopeError } from './scope'
 import { UNSCOPED_SITES } from './unscoped-sites'
 
 const OUTSIDE = 'write outside the ledger scope'
@@ -154,7 +155,7 @@ describe('the write guards', () => {
     const { storage, a } = twoLedgers()
     const food = storage.sqlite.prepare("SELECT id FROM categories WHERE ledger_id IS NULL AND name = 'Groceries'").pluck().get() as number
     expect(() => ledgerMaintenance(storage.sqlite, a.ledger.id, () => storage.sqlite.prepare("UPDATE categories SET name = 'x' WHERE id = ?").run(food))).toThrow(OUTSIDE)
-    storage.allLedgers('seed the shared category list', (sqlite) => sqlite.prepare("UPDATE categories SET name = 'Food' WHERE id = ?").run(food))
+    storage.allLedgers('seed the shared category list', (db) => db.run("UPDATE categories SET name = 'Food' WHERE id = ?", food))
     expect(a.q.pluck('SELECT name FROM ledger_categories WHERE ledger_id = @ledger AND id = ?', food)).toBe('Food')
   })
 
@@ -167,19 +168,6 @@ describe('the write guards', () => {
     })
     expect(() => storage.sqlite.prepare("UPDATE tags SET color = 'blue' WHERE id = ?").run(aTag)).toThrow(OUTSIDE)
     expect(() => ledgerMaintenance(storage.sqlite, a.ledger.id, async () => 1)).toThrow('synchronous')
-  })
-
-  it('give the deprecated raw handle its ledger’s scope, and refuse to copy the database', () => {
-    const { storage, a, b, aTag, bTag } = twoLedgers()
-    const raw = scopedConnection(storage.sqlite, a.ledger.id)
-    raw.prepare("UPDATE tags SET color = 'red' WHERE id = ?").run(aTag)
-    expect(() => raw.prepare("UPDATE tags SET color = 'red' WHERE id = ?").run(bTag)).toThrow(OUTSIDE)
-    expect(raw.prepare('SELECT color FROM tags WHERE id = ?').pluck().get(aTag)).toBe('red')
-    expect(() => raw.serialize()).toThrow()
-    expect(b.q.pluck('SELECT color FROM tags WHERE ledger_id = @ledger')).toBeNull()
-    // ctx.db runs on it too.
-    a.db.update(tags).set({ color: 'green' }).where(eq(tags.id, aTag)).run()
-    expect(() => a.db.update(tags).set({ color: 'green' }).where(eq(tags.id, bTag)).run()).toThrow(OUTSIDE)
   })
 })
 
@@ -250,7 +238,6 @@ describe('unscoped sites', () => {
 
 describe('LedgerQuery', () => {
   it('needs a connection with write guards', () => {
-    const { storage } = twoLedgers()
-    expect(() => new LedgerQuery(scopedConnection(storage.sqlite, 'x'), 'x')).toThrow(/no write guards/)
+    expect(() => new LedgerQuery(new Database(':memory:'), 'x')).toThrow(/no write guards/)
   })
 })

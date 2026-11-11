@@ -16,18 +16,15 @@ export function monthToDate(ctx: AppContext, dates: ISODate[], accountId?: numbe
   const out = new Map<number, number[]>()
   if (!dates.length) return out
   const monthStart = (d: ISODate) => `${d.slice(0, 7)}-01`
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT t.account_id AS accountId, t.date, sum(t.amount_minor) AS total
-       FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
-       WHERE ${COUNTABLE} AND t.date BETWEEN ? AND ?${accountId === undefined ? '' : ' AND t.account_id = ?'}
-       GROUP BY t.account_id, t.date`,
-    )
-    .all(monthStart(dates[0]!), dates[dates.length - 1]!, ...(accountId === undefined ? [] : [accountId])) as Array<{
-    accountId: number
-    date: string
-    total: number
-  }>
+  const rows = ctx.q.all<{ accountId: number; date: string; total: number }>(
+    `SELECT t.account_id AS accountId, t.date, sum(t.amount_minor) AS total
+     FROM transactions t LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+     WHERE t.ledger_id = @ledger AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${accountId === undefined ? '' : ' AND t.account_id = ?'}
+     GROUP BY t.account_id, t.date`,
+    monthStart(dates[0]!),
+    dates[dates.length - 1]!,
+    ...(accountId === undefined ? [] : [accountId]),
+  )
   for (const r of rows) {
     const sums = out.get(r.accountId) ?? dates.map(() => 0)
     dates.forEach((d, i) => {

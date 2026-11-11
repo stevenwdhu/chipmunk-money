@@ -13,7 +13,7 @@ import { getAppSetting, setAppSetting } from './settings'
  * (`ext_agent_host_id`, a random UUID made once). OpenAI sends the browser back to
  * http://127.0.0.1:<this server's port>/auth/callback, which reaches this server when the browser
  * runs on the same machine; otherwise you paste the address it lands on. Tokens are kept encrypted
- * in meta.db, refreshed an hour at a time, and used for Responses API requests at api.openai.com.
+ * in the app settings, refreshed an hour at a time, and used for Responses API requests at api.openai.com.
  */
 
 const ISSUER = 'https://auth.openai.com'
@@ -81,7 +81,7 @@ function load(meta: MetaStore): Session | null {
   try {
     return JSON.parse(meta.secrets.open(sealed)) as Session
   } catch {
-    // meta.db copied without its secret.key: sign in again.
+    // The database copied without its secret.key: sign in again.
     return null
   }
 }

@@ -115,15 +115,24 @@ interface ItemRow {
   last_amount: number | null
 }
 
+/**
+ * The item `@item` of this ledger, for a child table's item column: `${THIS_ITEM('item_id')}` keeps a
+ * read or write of recurring_payees, recurring_price_changes, recurring_not_payments or
+ * recurring_payment_dues to the ledger's own item (ids are global, so an id alone could be another's).
+ */
+const THIS_ITEM = (column: string) => `${column} IN (SELECT id FROM recurring_items WHERE ledger_id = @ledger AND id = @item)`
+
 // Linked payments; a suggestion's aren't linked yet, so `suggestedEvidence` finds them.
-const ITEM_TX = 't.deleted_at IS NULL AND t.recurring_item_id = r.id'
+const ITEM_TX = 't.ledger_id = r.ledger_id AND t.deleted_at IS NULL AND t.recurring_item_id = r.id'
 /**
  * A payment added at its own amount (`addPayment`), like a plan's down payment: not its amount. In
  * recurring_payment_dues, one_off is 1, or 2 when it was one of the plan's payments from before your
- * history (taking it off gives that back).
+ * history (taking it off gives that back). `itemPin` says which item's: `d.item_id = r.id` with r
+ * pinned, or THIS_ITEM('d.item_id').
  */
-const ONE_OFF = (item: string, tx: string) => `${tx} IN (SELECT transaction_id FROM recurring_payment_dues WHERE item_id = ${item} AND one_off <> 0)`
+const ONE_OFF = (itemPin: string, tx: string) => `${tx} IN (SELECT d.transaction_id FROM recurring_payment_dues d WHERE ${itemPin} AND d.one_off <> 0)`
 const FROM_BEFORE = 2
+/** The ledger's items with what they need for the API; add `AND ...` for which. */
 const ITEM_SQL = `
   SELECT r.*,
     (SELECT count(*) FROM transactions t WHERE ${ITEM_TX}) AS occurrences,
@@ -131,8 +140,17 @@ const ITEM_SQL = `
     (SELECT json_group_array(p.name) FROM recurring_payees p WHERE p.item_id = r.id) AS other_payees,
     (SELECT json_group_array(p.payee_key) FROM recurring_payees p WHERE p.item_id = r.id) AS other_keys,
     (SELECT max(t.date) FROM transactions t WHERE ${ITEM_TX}) AS last_seen,
-    (SELECT t.amount_minor FROM transactions t WHERE ${ITEM_TX} AND NOT ${ONE_OFF('r.id', 't.id')} ORDER BY t.date DESC, t.id DESC LIMIT 1) AS last_amount
-  FROM recurring_items r`
+    (SELECT t.amount_minor FROM transactions t WHERE ${ITEM_TX} AND NOT ${ONE_OFF('d.item_id = r.id', 't.id')} ORDER BY t.date DESC, t.id DESC LIMIT 1) AS last_amount
+  FROM recurring_items r
+  WHERE r.ledger_id = @ledger`
+
+/** An item's linked payments, oldest first, with the due date each was said to be for. */
+const LINKED_WITH_DUES = `
+  FROM transactions t
+  LEFT JOIN recurring_payment_dues d ON d.item_id = t.recurring_item_id AND d.transaction_id = t.id
+  WHERE t.ledger_id = @ledger AND t.recurring_item_id = @item AND t.deleted_at IS NULL`
+
+const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
 /** A suggestion's payments, newest first: its payees' unlinked ones at about its amount, on its schedule. */
 function suggestedPayments(ctx: AppContext, r: ItemRow): Array<{ id: number; date: string; amount: number }> {
@@ -146,15 +164,15 @@ function suggestedPayments(ctx: AppContext, r: ItemRow): Array<{ id: number; dat
     nextDueDate: r.next_due_date,
     total: r.total_payments,
   }
-  return (
-    ctx.sqlite
-      .prepare(
-        `SELECT id, date, amount_minor AS amount FROM transactions
-         WHERE payee_key IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL
-         ORDER BY date DESC, id DESC`,
-      )
-      .all(JSON.stringify([r.payee_key, ...(JSON.parse(r.other_keys) as string[])])) as Array<{ id: number; date: string; amount: number }>
-  ).filter((t) => amountWithin(t.amount, r.expected_amount_minor, r.amount_tolerance_pct) && onSchedule(item, t.date))
+  return ctx.q
+    .all<{ id: number; date: string; amount: number }>(
+      `SELECT id, date, amount_minor AS amount FROM transactions
+       WHERE ledger_id = @ledger AND payee_key IN (SELECT value FROM json_each(@keys))
+         AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL
+       ORDER BY date DESC, id DESC`,
+      { keys: JSON.stringify([r.payee_key, ...(JSON.parse(r.other_keys) as string[])]) },
+    )
+    .filter((t) => amountWithin(t.amount, r.expected_amount_minor, r.amount_tolerance_pct) && onSchedule(item, t.date))
 }
 
 function suggestedEvidence(ctx: AppContext, r: ItemRow): Pick<ItemRow, 'occurrences' | 'paid_amount' | 'last_seen' | 'last_amount'> {
@@ -261,14 +279,13 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
   const keys = [r.payee_key, ...(JSON.parse(r.other_keys) as string[])]
   const window = matchWindow(r.cadence)
   const unlinked = (from: ISODate, to: ISODate) =>
-    ctx.sqlite
-      .prepare(
-        `SELECT id, date, payee, payee_key AS payeeKey, amount_minor AS amount FROM transactions
-         WHERE deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND date BETWEEN ? AND ?
-           AND (? IS NULL OR account_id = ?)
-           AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE item_id = ?)`,
-      )
-      .all(from, to, r.account_id, r.account_id, r.id) as Array<{ id: number; date: string; payee: string; payeeKey: string; amount: number }>
+    ctx.q.all<{ id: number; date: string; payee: string; payeeKey: string; amount: number }>(
+      `SELECT id, date, payee, payee_key AS payeeKey, amount_minor AS amount FROM transactions
+       WHERE ledger_id = @ledger AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND date BETWEEN @from AND @to
+         AND (@account IS NULL OR account_id = @account)
+         AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')})`,
+      { from, to, account: r.account_id, item: r.id },
+    )
   const offer = (t: { id: number; date: string; payee: string; amount: number }, dueDate: ISODate, newAmount: boolean, role: 'first' | 'last' | null = null) => ({
     transactionId: t.id,
     date: t.date,
@@ -320,13 +337,10 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
   // to the cent (a down payment), only while they don't (what's left isn't its amount).
   const schedule = { cadence: r.cadence, anchorDate: r.anchor_date, secondDay: r.second_day, nextDueDate: r.next_due_date }
   if (lastPayment !== null && r.paid_before === 0 && !amountWithin(lastPayment, r.expected_amount_minor, r.amount_tolerance_pct)) {
-    const first = ctx.sqlite
-      .prepare(
-        `SELECT t.date, d.due_date AS due, coalesce(d.one_off, 0) AS oneOff FROM transactions t
-         LEFT JOIN recurring_payment_dues d ON d.item_id = t.recurring_item_id AND d.transaction_id = t.id
-         WHERE t.recurring_item_id = ? AND t.deleted_at IS NULL ORDER BY t.date, t.id LIMIT 1`,
-      )
-      .get(r.id) as { date: string; due: string | null; oneOff: number } | undefined
+    const first = ctx.q.get<{ date: string; due: string | null; oneOff: number }>(
+      `SELECT t.date, d.due_date AS due, coalesce(d.one_off, 0) AS oneOff ${LINKED_WITH_DUES} ORDER BY t.date, t.id LIMIT 1`,
+      { item: r.id },
+    )
     if (first && !first.oneOff) {
       const period = Math.ceil(cadenceInfo(r.cadence).days)
       const found = unlinked(addDays(first.date, -(period + window)), first.date)
@@ -338,13 +352,10 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
   }
 
   // A gap in its history: a due date between its first and latest payments that has none.
-  const paid = ctx.sqlite
-    .prepare(
-      `SELECT t.date, t.amount_minor AS amount, d.due_date AS due, coalesce(d.one_off, 0) AS oneOff FROM transactions t
-       LEFT JOIN recurring_payment_dues d ON d.item_id = t.recurring_item_id AND d.transaction_id = t.id
-       WHERE t.recurring_item_id = ? AND t.deleted_at IS NULL ORDER BY t.date`,
-    )
-    .all(r.id) as Array<{ date: string; amount: number; due: string | null; oneOff: number }>
+  const paid = ctx.q.all<{ date: string; amount: number; due: string | null; oneOff: number }>(
+    `SELECT t.date, t.amount_minor AS amount, d.due_date AS due, coalesce(d.one_off, 0) AS oneOff ${LINKED_WITH_DUES} ORDER BY t.date`,
+    { item: r.id },
+  )
   if (paid.length < 2) return null
   const dues = duesCovering(schedule, paid[0]!.date, paid[paid.length - 1]!.date, window)
   const periodOf = (date: string) => dues.find((d) => addDays(d, -window) <= date)
@@ -367,16 +378,21 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
 
 /** A payment to link to an item: one that isn't another item's, or a transfer. */
 function paymentToLink(ctx: AppContext, txId: number) {
-  const tx = ctx.sqlite
-    .prepare(
-      `SELECT payee, payee_key AS payeeKey, date, account_id AS accountId, amount_minor AS amount, recurring_item_id AS recurringItemId,
-         transfer_pair_id AS transferPairId
-       FROM transactions WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .get(txId) as
-    | { payee: string; payeeKey: string; date: string; accountId: number; amount: number; recurringItemId: number | null; transferPairId: number | null }
-    | undefined
-  if (!tx) notFound('Transaction not found')
+  const tx = ctx.q.mustGet<{
+    payee: string
+    payeeKey: string
+    date: string
+    accountId: number
+    amount: number
+    recurringItemId: number | null
+    transferPairId: number | null
+  }>(
+    `SELECT payee, payee_key AS payeeKey, date, account_id AS accountId, amount_minor AS amount, recurring_item_id AS recurringItemId,
+       transfer_pair_id AS transferPairId
+     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL`,
+    'Transaction not found',
+    { id: txId },
+  )
   if (tx.recurringItemId) badRequest('That payment already belongs to a recurring item')
   if (tx.transferPairId) badRequest('That’s a transfer, not a payment')
   return tx
@@ -392,8 +408,8 @@ function paymentToLink(ctx: AppContext, txId: number) {
 export function linkPossiblePayment(ctx: AppContext, itemId: number, txId: number): RecurringItem {
   const item = getRecurring(ctx, itemId)
   const tx = paymentToLink(ctx, txId)
-  const stored = ctx.sqlite.prepare('SELECT expected_amount_minor FROM recurring_items WHERE id = ?').pluck().get(itemId) as number
-  const row = ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.id = ?`).get(itemId) as ItemRow
+  const stored = storedAmount(ctx, itemId)
+  const row = itemRow(ctx, itemId)!
   const offered = item.status === 'active' ? possiblePayment(ctx, row, today(ctx)) : null
   // A plan's first or last payment it asked about, or its last at another amount: at its own amount.
   if (offered?.transactionId === txId && offered.role) return addPayment(ctx, itemId, txId)
@@ -401,20 +417,18 @@ export function linkPossiblePayment(ctx: AppContext, itemId: number, txId: numbe
   // The due date it's for: the one it was offered for, or the one whose window it's in.
   const window = matchWindow(item.cadence)
   const due = offered?.transactionId === txId ? offered.dueDate : duesCovering(item, tx.date, tx.date, window).at(-1)!
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     if (tx.payeeKey !== item.payeeKey) {
-      ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)').run(itemId, tx.payeeKey, tx.payee)
+      ctx.q.run('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)', itemId, tx.payeeKey, tx.payee)
     }
     if (!amountWithin(tx.amount, stored, item.amountTolerancePct)) {
-      ctx.sqlite
-        .prepare('INSERT OR REPLACE INTO recurring_price_changes (item_id, from_date, previous_amount_minor) VALUES (?, ?, ?)')
-        .run(itemId, due, stored)
-      ctx.sqlite.prepare('UPDATE recurring_items SET expected_amount_minor = ? WHERE id = ?').run(tx.amount, itemId)
+      ctx.q.run('INSERT OR REPLACE INTO recurring_price_changes (item_id, from_date, previous_amount_minor) VALUES (?, ?, ?)', itemId, due, stored)
+      ctx.q.run('UPDATE recurring_items SET expected_amount_minor = @amount WHERE ledger_id = @ledger AND id = @item', { amount: tx.amount, item: itemId })
     }
-    ctx.sqlite.prepare('DELETE FROM recurring_not_payments WHERE item_id = ? AND transaction_id = ?').run(itemId, txId)
-    ctx.sqlite.prepare('INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date) VALUES (?, ?, ?)').run(itemId, txId, due)
-    ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?').run(itemId, txId)
-  })()
+    forgetNotPayment(ctx, itemId, txId)
+    ctx.q.run('INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date) VALUES (?, ?, ?)', itemId, txId, due)
+    linkTo(ctx, itemId, txId)
+  })
   recalculateRecurring(ctx, itemId, { followAmount: true })
   return getRecurring(ctx, itemId)
 }
@@ -439,14 +453,8 @@ export function addPayment(ctx: AppContext, itemId: number, txId: number): Recur
     badRequest(item.expectedAmountMinor < 0 ? 'That’s money in, and this item is money out' : 'That’s money out, and this item is money in')
   }
   if (item.accountId !== null && tx.accountId !== item.accountId) badRequest('That’s from another account than the item’s')
-  const paidBefore = ctx.sqlite.prepare('SELECT paid_before FROM recurring_items WHERE id = ?').pluck().get(itemId) as number
-  const linked = ctx.sqlite
-    .prepare(
-      `SELECT t.date, d.due_date AS due FROM transactions t
-       LEFT JOIN recurring_payment_dues d ON d.item_id = t.recurring_item_id AND d.transaction_id = t.id
-       WHERE t.recurring_item_id = ? AND t.deleted_at IS NULL ORDER BY t.date, t.id`,
-    )
-    .all(itemId) as Array<{ date: string; due: string | null }>
+  const paidBefore = paidBeforeOf(ctx, itemId)
+  const linked = ctx.q.all<{ date: string; due: string | null }>(`SELECT t.date, d.due_date AS due ${LINKED_WITH_DUES} ORDER BY t.date, t.id`, { item: itemId })
   const plan = item.totalPayments
   const window = matchWindow(item.cadence)
   // Before the plan's other payments, and its next one isn't due yet: one of those paid before your history.
@@ -458,14 +466,18 @@ export function addPayment(ctx: AppContext, itemId: number, txId: number): Recur
   const due = duesCovering(item, tx.date, tx.date, window).at(-1)!
 
   const wasPaidOff = paidOff(ctx, itemId)
-  ctx.sqlite.transaction(() => {
-    if (fromBefore) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = paid_before - 1 WHERE id = ?').run(itemId)
-    ctx.sqlite.prepare('DELETE FROM recurring_not_payments WHERE item_id = ? AND transaction_id = ?').run(itemId, txId)
-    ctx.sqlite
-      .prepare('INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)')
-      .run(itemId, txId, due, fromBefore ? FROM_BEFORE : 1)
-    ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?').run(itemId, txId)
-  })()
+  ctx.q.transaction(() => {
+    if (fromBefore) ctx.q.run('UPDATE recurring_items SET paid_before = paid_before - 1 WHERE ledger_id = @ledger AND id = @item', { item: itemId })
+    forgetNotPayment(ctx, itemId, txId)
+    ctx.q.run(
+      'INSERT OR REPLACE INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)',
+      itemId,
+      txId,
+      due,
+      fromBefore ? FROM_BEFORE : 1,
+    )
+    linkTo(ctx, itemId, txId)
+  })
   recalculateRecurring(ctx, itemId, { wasPaidOff })
   return getRecurring(ctx, itemId)
 }
@@ -476,14 +488,20 @@ export function addPayment(ctx: AppContext, itemId: number, txId: number): Recur
  */
 export function notItsPayment(ctx: AppContext, itemId: number, txId: number): RecurringItem {
   getRecurring(ctx, itemId)
-  const linked = ctx.sqlite.prepare('SELECT recurring_item_id FROM transactions WHERE id = ?').pluck().get(txId) === itemId
+  // Any of the ledger's transactions, deleted ones too; another ledger's is one it doesn't have.
+  const tx = ctx.q.mustGet<{ itemId: number | null }>(
+    'SELECT recurring_item_id AS itemId FROM transactions WHERE ledger_id = @ledger AND id = @id',
+    'Transaction not found',
+    { id: txId },
+  )
+  const linked = tx.itemId === itemId
   const wasPaidOff = paidOff(ctx, itemId)
-  ctx.sqlite.transaction(() => {
-    ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)').run(itemId, txId)
+  ctx.q.transaction(() => {
+    ctx.q.run('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', itemId, txId)
     giveBackPaidBefore(ctx, itemId, [txId])
-    ctx.sqlite.prepare('DELETE FROM recurring_payment_dues WHERE item_id = ? AND transaction_id = ?').run(itemId, txId)
+    ctx.q.run(`DELETE FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')} AND transaction_id = @tx`, { item: itemId, tx: txId })
     if (linked) unlinkPayment(ctx, itemId, txId)
-  })()
+  })
   if (linked) recalculateRecurring(ctx, itemId, { removed: true, followAmount: true, wasPaidOff })
   return getRecurring(ctx, itemId)
 }
@@ -493,65 +511,83 @@ export function notItsPayment(ctx: AppContext, itemId: number, txId: number): Re
  * they count as paid before again.
  */
 function giveBackPaidBefore(ctx: AppContext, itemId: number, txIds: number[]) {
-  const n = ctx.sqlite
-    .prepare(`SELECT count(*) FROM recurring_payment_dues WHERE item_id = ? AND one_off = ${FROM_BEFORE} AND transaction_id IN (SELECT value FROM json_each(?))`)
-    .pluck()
-    .get(itemId, JSON.stringify(txIds)) as number
-  if (n) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = paid_before + ? WHERE id = ?').run(n, itemId)
+  const n = ctx.q.pluck<number>(
+    `SELECT count(*) FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')} AND one_off = ${FROM_BEFORE} AND transaction_id IN (SELECT value FROM json_each(@txs))`,
+    { item: itemId, txs: JSON.stringify(txIds) },
+  )!
+  if (n) ctx.q.run('UPDATE recurring_items SET paid_before = paid_before + @n WHERE ledger_id = @ledger AND id = @item', { n, item: itemId })
+}
+
+/** The ledger's item with what the API needs, or undefined. */
+function itemRow(ctx: AppContext, id: number): ItemRow | undefined {
+  return ctx.q.get<ItemRow>(`${ITEM_SQL} AND r.id = @id`, { id })
+}
+
+/** The amount stored on the item (the API's follows its latest payment). */
+function storedAmount(ctx: AppContext, id: number): number {
+  return ctx.q.pluck<number>('SELECT expected_amount_minor FROM recurring_items WHERE ledger_id = @ledger AND id = @id', { id })!
+}
+
+function paidBeforeOf(ctx: AppContext, id: number): number {
+  return ctx.q.pluck<number>('SELECT paid_before FROM recurring_items WHERE ledger_id = @ledger AND id = @id', { id })!
+}
+
+/** Links a payment of the ledger to the item. */
+function linkTo(ctx: AppContext, itemId: number, txId: number) {
+  ctx.q.run('UPDATE transactions SET recurring_item_id = @item WHERE ledger_id = @ledger AND id = @id', { item: itemId, id: txId })
+}
+
+/** It's the item's payment after all: no longer one you said isn't. */
+function forgetNotPayment(ctx: AppContext, itemId: number, txId: number) {
+  ctx.q.run(`DELETE FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')} AND transaction_id = @tx`, { item: itemId, tx: txId })
 }
 
 export function listRecurring(ctx: AppContext, status?: RecurringStatus): RecurringItem[] {
-  const rows = (
-    status
-      ? ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.status = ? ORDER BY r.next_due_date`).all(status)
-      : ctx.sqlite.prepare(`${ITEM_SQL} ORDER BY r.next_due_date`).all()
-  ) as ItemRow[]
+  const rows = status
+    ? ctx.q.all<ItemRow>(`${ITEM_SQL} AND r.status = @status ORDER BY r.next_due_date, r.id`, { status })
+    : ctx.q.all<ItemRow>(`${ITEM_SQL} ORDER BY r.next_due_date, r.id`)
   const t = today(ctx)
   return rows.map((r) => toDTO(ctx, r, t))
 }
 
 export function getRecurring(ctx: AppContext, id: number): RecurringItem {
-  const row = ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.id = ?`).get(id) as ItemRow | undefined
+  const row = itemRow(ctx, id)
   if (!row) notFound('Recurring item not found')
   return toDTO(ctx, row, today(ctx))
 }
 
 /** An item's payments, newest first: the linked ones, or for a suggestion, the ones the scan found. */
 export function recurringPaymentIds(ctx: AppContext, id: number): number[] {
-  const row = ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.id = ?`).get(id) as ItemRow | undefined
+  const row = itemRow(ctx, id)
   if (!row) notFound('Recurring item not found')
   if (row.status === 'suggested') return suggestedPayments(ctx, row).map((t) => t.id)
-  return ctx.sqlite
-    .prepare('SELECT id FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL ORDER BY date DESC, id DESC')
-    .pluck()
-    .all(id) as number[]
+  return ctx.q.column<number>(
+    'SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND deleted_at IS NULL ORDER BY date DESC, id DESC',
+    { item: id },
+  )
 }
 
 /** Links an unlinked transaction to a matching active recurring item. Returns the item id. */
 export function matchRecurring(ctx: AppContext, txId: number): number | null {
-  const tx = ctx.sqlite
-    .prepare(
-      `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey, category_id AS categoryId,
-         recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
-       FROM transactions WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .get(txId) as
-    | { id: number; accountId: number; date: string; amount: number; payeeKey: string; categoryId: number | null; recurringItemId: number | null; transferPairId: number | null }
-    | undefined
+  const tx = ctx.q.get<{
+    id: number
+    accountId: number
+    date: string
+    amount: number
+    payeeKey: string
+    categoryId: number | null
+    recurringItemId: number | null
+    transferPairId: number | null
+  }>(
+    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey, category_id AS categoryId,
+       recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
+     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL`,
+    { id: txId },
+  )
   if (!tx || tx.recurringItemId || tx.transferPairId) return null
 
-  const items = ctx.sqlite
-    .prepare(
-      `SELECT r.id, payee_key AS payeeKey, cadence, anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate,
-         expected_amount_minor AS expected, amount_tolerance_pct AS tolerance, category_id AS categoryId, total_payments AS total,
-         paid_before AS paidBefore, full_price_minor AS fullPrice,
-         (SELECT count(*) FROM transactions t WHERE t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS linked,
-         (SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS paidAmount
-       FROM recurring_items r
-       WHERE status = 'active' AND (payee_key = @key OR id IN (SELECT item_id FROM recurring_payees WHERE payee_key = @key))
-         AND (account_id IS NULL OR account_id = @account)`,
-    )
-    .all({ key: tx.payeeKey, account: tx.accountId }) as Array<{
+  // The ledger's items from this payee, as theirs or as one of their other payees.
+  const items = ctx.q.all<{
     id: number
     payeeKey: string
     tolerance: number
@@ -566,7 +602,19 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
     fullPrice: number | null
     linked: number
     paidAmount: number
-  }>
+  }>(
+    `SELECT r.id, r.payee_key AS payeeKey, r.cadence, r.anchor_date AS anchorDate, r.second_day AS secondDay, r.next_due_date AS nextDueDate,
+       r.expected_amount_minor AS expected, r.amount_tolerance_pct AS tolerance, r.category_id AS categoryId, r.total_payments AS total,
+       r.paid_before AS paidBefore, r.full_price_minor AS fullPrice,
+       (SELECT count(*) FROM transactions t WHERE t.ledger_id = r.ledger_id AND t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS linked,
+       (SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.ledger_id = r.ledger_id AND t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS paidAmount
+     FROM recurring_items r
+     WHERE r.ledger_id = @ledger AND r.status = 'active'
+       AND (r.payee_key = @key OR EXISTS (SELECT 1 FROM recurring_payees p WHERE p.item_id = r.id AND p.payee_key = @key))
+       AND (r.account_id IS NULL OR r.account_id = @account)
+     ORDER BY r.id`,
+    { key: tx.payeeKey, account: tx.accountId },
+  )
 
   // What each expects next: its amount, and a plan with one payment to go also what's left of its full price.
   const expecting = new Map(
@@ -590,13 +638,13 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
     let next = item.nextDueDate
     while (daysBetween(tx.date, next) <= window) next = stepDue(item, next)
 
-    ctx.sqlite.transaction(() => {
-      ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?').run(item.id, tx.id)
-      ctx.sqlite.prepare('UPDATE recurring_items SET next_due_date = ? WHERE id = ?').run(next, item.id)
+    ctx.q.transaction(() => {
+      linkTo(ctx, item.id, tx.id)
+      setNextDue(ctx, item.id, next)
       applyItemCategory(ctx, item.id)
       followLatestAmount(ctx, item.id)
       settleInstalments(ctx, item.id)
-    })()
+    })
     return item.id
   }
   return null
@@ -616,65 +664,62 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
  * only moves back when a payment was taken off, and not before one you just set). Returns how many were unlinked.
  */
 function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; removed?: boolean } = {}): number {
-  const item = ctx.sqlite
-    .prepare(
-      `SELECT payee_key AS payeeKey, account_id AS accountId, expected_amount_minor AS expected, cadence, status,
-         anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate, amount_tolerance_pct AS tolerance, total_payments AS total,
-         paid_before AS paidBefore, full_price_minor AS fullPrice
-       FROM recurring_items WHERE id = ?`,
-    )
-    .get(itemId) as
-    | (KnownItem & { accountId: number | null; tolerance: number; paidBefore: number; fullPrice: number | null; status: RecurringStatus })
-    | undefined
+  const item = ctx.q.get<KnownItem & { accountId: number | null; tolerance: number; paidBefore: number; fullPrice: number | null; status: RecurringStatus }>(
+    `SELECT payee_key AS payeeKey, account_id AS accountId, expected_amount_minor AS expected, cadence, status,
+       anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate, amount_tolerance_pct AS tolerance, total_payments AS total,
+       paid_before AS paidBefore, full_price_minor AS fullPrice
+     FROM recurring_items WHERE ledger_id = @ledger AND id = @id`,
+    { id: itemId },
+  )
   if (!item || (item.status !== 'active' && item.status !== 'ended')) return 0
+  const forItem = { item: itemId }
   // An added payment that was deleted: if it was one paid before your history, it's that again.
-  const gone = ctx.sqlite
-    .prepare(
-      `SELECT d.transaction_id FROM recurring_payment_dues d JOIN transactions t ON t.id = d.transaction_id
-       WHERE d.item_id = ? AND d.one_off <> 0 AND t.deleted_at IS NOT NULL`,
-    )
-    .pluck()
-    .all(itemId) as number[]
+  const gone = ctx.q.column<number>(
+    `SELECT d.transaction_id FROM recurring_payment_dues d JOIN transactions t ON t.id = d.transaction_id
+     WHERE t.ledger_id = @ledger AND d.item_id = @item AND d.one_off <> 0 AND t.deleted_at IS NOT NULL`,
+    forItem,
+  )
   if (gone.length) {
     giveBackPaidBefore(ctx, itemId, gone)
-    item.paidBefore = ctx.sqlite.prepare('SELECT paid_before FROM recurring_items WHERE id = ?').pluck().get(itemId) as number
-    ctx.sqlite.prepare('DELETE FROM recurring_payment_dues WHERE item_id = ? AND transaction_id IN (SELECT value FROM json_each(?))').run(itemId, JSON.stringify(gone))
+    item.paidBefore = paidBeforeOf(ctx, itemId)
+    ctx.q.run(`DELETE FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')} AND transaction_id IN (SELECT value FROM json_each(@txs))`, {
+      ...forItem,
+      txs: JSON.stringify(gone),
+    })
   }
-  const others = ctx.sqlite
-    .prepare(`SELECT expected_amount_minor FROM recurring_items WHERE payee_key = ? AND status = 'active' AND id <> ?`)
-    .pluck()
-    .all(item.payeeKey, itemId) as number[]
-  const keys = [item.payeeKey, ...(ctx.sqlite.prepare('SELECT payee_key FROM recurring_payees WHERE item_id = ?').pluck().all(itemId) as string[])]
+  // The ledger's other active items from its payee.
+  const others = ctx.q.column<number>(
+    `SELECT expected_amount_minor FROM recurring_items WHERE ledger_id = @ledger AND payee_key = @key AND status = 'active' AND id <> @item`,
+    { ...forItem, key: item.payeeKey },
+  )
+  const keys = [item.payeeKey, ...ctx.q.column<string>(`SELECT payee_key FROM recurring_payees WHERE ${THIS_ITEM('item_id')}`, forItem)]
   // Its payees' payments: linked to it, or to nothing yet.
-  const txs = ctx.sqlite
-    .prepare(
-      `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, account_id AS accountId, recurring_item_id AS itemId FROM transactions
-       WHERE deleted_at IS NULL AND transfer_pair_id IS NULL AND (recurring_item_id IS NULL OR recurring_item_id = ?)
-         AND payee_key IN (SELECT value FROM json_each(?))
-         AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE item_id = ?)
-       ORDER BY date, id`,
-    )
-    .all(itemId, JSON.stringify(keys), itemId) as Array<{ id: number; date: string; amount: number; payeeKey: string; accountId: number; itemId: number | null }>
+  const txs = ctx.q.all<{ id: number; date: string; amount: number; payeeKey: string; accountId: number; itemId: number | null }>(
+    `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, account_id AS accountId, recurring_item_id AS itemId FROM transactions
+     WHERE ledger_id = @ledger AND deleted_at IS NULL AND transfer_pair_id IS NULL AND (recurring_item_id IS NULL OR recurring_item_id = @item)
+       AND payee_key IN (SELECT value FROM json_each(@keys))
+       AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')})
+     ORDER BY date, id`,
+    { ...forItem, keys: JSON.stringify(keys) },
+  )
   const linking = item.status === 'active'
   const candidates = txs.filter((t) => (item.accountId === null || t.accountId === item.accountId) && (linking || t.itemId === itemId))
   // Payments linked to it another way (by hand, from another payee) keep their due dates.
-  const fixed = ctx.sqlite
-    .prepare(
-      'SELECT id, date, amount_minor AS amount FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL AND payee_key NOT IN (SELECT value FROM json_each(?))',
-    )
-    .all(itemId, JSON.stringify(keys)) as Array<{ id: number; date: string; amount: number }>
-  // Payments added at their own amount (`addPayment`): extra ones, kept, that don't take a due date's place.
-  const oneOff = new Set(
-    ctx.sqlite.prepare('SELECT transaction_id FROM recurring_payment_dues WHERE item_id = ? AND one_off <> 0').pluck().all(itemId) as number[],
+  const fixed = ctx.q.all<{ id: number; date: string; amount: number }>(
+    `SELECT id, date, amount_minor AS amount FROM transactions
+     WHERE ledger_id = @ledger AND recurring_item_id = @item AND deleted_at IS NULL AND payee_key NOT IN (SELECT value FROM json_each(@keys))`,
+    { ...forItem, keys: JSON.stringify(keys) },
   )
+  // Payments added at their own amount (`addPayment`): extra ones, kept, that don't take a due date's place.
+  const oneOff = new Set(ctx.q.column<number>(`SELECT transaction_id FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')} AND one_off <> 0`, forItem))
   const extras = candidates.filter((t) => oneOff.has(t.id))
   const window = matchWindow(item.cadence)
   const gap = (t: { amount: number }, expected: number) => Math.abs(t.amount - expected)
   // Payments you said are its, each for a due date (one that came early or late stays that date's).
   const pinned = new Map(
-    (ctx.sqlite.prepare('SELECT transaction_id AS id, due_date AS due FROM recurring_payment_dues WHERE item_id = ?').all(itemId) as Array<{ id: number; due: string }>).map(
-      (p) => [p.id, p.due],
-    ),
+    ctx.q
+      .all<{ id: number; due: string }>(`SELECT transaction_id AS id, due_date AS due FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')}`, forItem)
+      .map((p) => [p.id, p.due]),
   )
 
   let matching: typeof candidates = []
@@ -691,9 +736,10 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
     const taken = new Set(fixed.filter((f) => !oneOff.has(f.id)).map((f) => pinned.get(f.id) ?? periodOf(f.date)))
     // A plan's payment much later than its due date isn't taken without asking (`possiblePayment`): it may be another plan's.
     const onTime = (t: { date: string }, due: ISODate) => item.total === null || daysBetween(due, t.date) <= window
-    const changes = ctx.sqlite
-      .prepare('SELECT from_date AS fromDate, previous_amount_minor AS previous FROM recurring_price_changes WHERE item_id = ? ORDER BY from_date DESC')
-      .all(itemId) as Array<{ fromDate: string; previous: number }>
+    const changes = ctx.q.all<{ fromDate: string; previous: number }>(
+      `SELECT from_date AS fromDate, previous_amount_minor AS previous FROM recurring_price_changes WHERE ${THIS_ITEM('item_id')} ORDER BY from_date DESC`,
+      forItem,
+    )
     let amount = item.expected
     let change = 0
     for (const due of dues) {
@@ -740,18 +786,24 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
   const unlink = txs.filter((t) => t.itemId === itemId && !wanted.has(t.id))
   const link = matching.filter((t) => t.itemId !== itemId)
 
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     for (const t of unlink) unlinkPayment(ctx, itemId, t.id)
-    const add = ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = ? WHERE id = ?')
-    for (const t of link) add.run(itemId, t.id)
-    const latest = ctx.sqlite.prepare('SELECT max(date) FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL').pluck().get(itemId) as string | null
+    for (const t of link) linkTo(ctx, itemId, t.id)
+    const latest = ctx.q.pluck<string | null>(
+      'SELECT max(date) FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND deleted_at IS NULL',
+      forItem,
+    )
     if (!latest) return
     const after = stepDue(item, duesCovering(item, latest, latest, window).at(-1)!)
     const back = (unlink.length > 0 || !!opts.removed) && !opts.keepNextDue
     const next = back || after > item.nextDueDate ? after : item.nextDueDate
-    ctx.sqlite.prepare('UPDATE recurring_items SET next_due_date = ? WHERE id = ?').run(next, itemId)
-  })()
+    setNextDue(ctx, itemId, next)
+  })
   return unlink.length
+}
+
+function setNextDue(ctx: AppContext, itemId: number, next: ISODate) {
+  ctx.q.run('UPDATE recurring_items SET next_due_date = @next WHERE ledger_id = @ledger AND id = @item', { next, item: itemId })
 }
 
 /** Due dates, newest first: from the one whose period holds `to` back to the one whose period holds `from`. */
@@ -768,20 +820,27 @@ function duesCovering(item: Scheduled & { nextDueDate: string }, from: ISODate, 
 
 /** Takes a payment off its recurring item. The item's category comes off too: it's uncategorized (and so are its refunds). */
 function unlinkPayment(ctx: AppContext, itemId: number, txId: number) {
-  const itemCategory = ctx.sqlite.prepare('SELECT category_id FROM recurring_items WHERE id = ?').pluck().get(itemId) as number | null
-  const tx = ctx.sqlite.prepare('SELECT category_id AS categoryId, category_source AS source FROM transactions WHERE id = ?').get(txId) as {
-    categoryId: number | null
-    source: string | null
-  }
-  ctx.sqlite.prepare('UPDATE transactions SET recurring_item_id = NULL WHERE id = ?').run(txId)
-  if (tx.source === 'recurring' || (itemCategory !== null && tx.categoryId === itemCategory)) {
-    ctx.sqlite
-      .prepare(
-        `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0,
-           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-      )
-      .run(txId)
-  }
+  const itemCategory = itemCategoryOf(ctx, itemId)
+  const tx = ctx.q.get<{ categoryId: number | null; source: string | null }>(
+    'SELECT category_id AS categoryId, category_source AS source FROM transactions WHERE ledger_id = @ledger AND id = @id',
+    { id: txId },
+  )
+  if (!tx) return
+  ctx.q.run('UPDATE transactions SET recurring_item_id = NULL WHERE ledger_id = @ledger AND id = @id', { id: txId })
+  if (tx.source === 'recurring' || (itemCategory !== null && tx.categoryId === itemCategory)) clearCategory(ctx, txId)
+}
+
+function itemCategoryOf(ctx: AppContext, itemId: number): number | null {
+  return ctx.q.pluck<number | null>('SELECT category_id FROM recurring_items WHERE ledger_id = @ledger AND id = @id', { id: itemId }) ?? null
+}
+
+/** Leaves a payment uncategorized (and so its refunds). */
+function clearCategory(ctx: AppContext, txId: number) {
+  ctx.q.run(
+    `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0, updated_at = ${NOW}
+     WHERE ledger_id = @ledger AND id = @id`,
+    { id: txId },
+  )
 }
 
 /**
@@ -807,9 +866,10 @@ export function recalculateRecurring(
 
 /** A plan with all its payments made. */
 export function paidOff(ctx: AppContext, id: number) {
-  const row = ctx.sqlite.prepare('SELECT total_payments AS total, paid_before AS paidBefore FROM recurring_items WHERE id = ?').get(id) as
-    | { total: number | null; paidBefore: number }
-    | undefined
+  const row = ctx.q.get<{ total: number | null; paidBefore: number }>(
+    'SELECT total_payments AS total, paid_before AS paidBefore FROM recurring_items WHERE ledger_id = @ledger AND id = @id',
+    { id },
+  )
   return !!row && row.total !== null && linkedCount(ctx, id) + row.paidBefore >= row.total
 }
 
@@ -818,14 +878,13 @@ export function paidOff(ctx: AppContext, id: number) {
  * item and on all the others.
  */
 export function setItemCategory(ctx: AppContext, itemId: number, categoryId: number | null) {
-  ctx.sqlite.prepare('UPDATE recurring_items SET category_id = ? WHERE id = ?').run(categoryId, itemId)
+  ctx.q.run('UPDATE recurring_items SET category_id = @category WHERE ledger_id = @ledger AND id = @item', { category: categoryId, item: itemId })
   if (categoryId) return applyItemCategory(ctx, itemId)
-  const ids = ctx.sqlite.prepare('SELECT id FROM transactions WHERE recurring_item_id = ? AND category_id IS NOT NULL').pluck().all(itemId) as number[]
-  const clear = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+  const ids = ctx.q.column<number>(
+    'SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND category_id IS NOT NULL',
+    { item: itemId },
   )
-  for (const id of ids) clear.run(id)
+  for (const id of ids) clearCategory(ctx, id)
 }
 
 /**
@@ -833,17 +892,19 @@ export function setItemCategory(ctx: AppContext, itemId: number, categoryId: num
  * a payee's, AI's or one set by hand. Their refunds follow them. An item without one leaves them be.
  */
 function applyItemCategory(ctx: AppContext, itemId: number) {
-  const categoryId = ctx.sqlite.prepare('SELECT category_id FROM recurring_items WHERE id = ?').pluck().get(itemId) as number | null
+  const categoryId = itemCategoryOf(ctx, itemId)
   if (!categoryId) return
-  const ids = ctx.sqlite
-    .prepare('SELECT id FROM transactions WHERE recurring_item_id = ? AND (category_id IS NOT ? OR needs_review = 1)')
-    .pluck()
-    .all(itemId, categoryId) as number[]
-  const set = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = ?, category_source = 'recurring', category_confidence = NULL, needs_review = 0,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+  const ids = ctx.q.column<number>(
+    'SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND (category_id IS NOT @category OR needs_review = 1)',
+    { item: itemId, category: categoryId },
   )
-  for (const id of ids) set.run(categoryId, id)
+  for (const id of ids) {
+    ctx.q.run(
+      `UPDATE transactions SET category_id = @category, category_source = 'recurring', category_confidence = NULL, needs_review = 0, updated_at = ${NOW}
+       WHERE ledger_id = @ledger AND id = @id`,
+      { category: categoryId, id },
+    )
+  }
 }
 
 /**
@@ -853,17 +914,17 @@ function applyItemCategory(ctx: AppContext, itemId: number) {
  * little different) doesn't count, and nor does one added at its own amount (`addPayment`).
  */
 function followLatestAmount(ctx: AppContext, id: number) {
-  ctx.sqlite
-    .prepare(
-      `UPDATE recurring_items SET expected_amount_minor = latest.amount
-       FROM (SELECT amount_minor AS amount FROM transactions t WHERE recurring_item_id = ? AND deleted_at IS NULL AND NOT ${ONE_OFF('?', 't.id')}
-             ORDER BY date DESC, id DESC LIMIT 1) AS latest
-       WHERE id = ? AND (latest.amount > 0) = (expected_amount_minor > 0)
-         AND abs(latest.amount - expected_amount_minor) <= max(abs(expected_amount_minor) * amount_tolerance_pct / 100.0, 1)
-         AND (total_payments IS NULL
-           OR paid_before + (SELECT count(*) FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL) < total_payments)`,
-    )
-    .run(id, id, id, id)
+  ctx.q.run(
+    `UPDATE recurring_items SET expected_amount_minor = latest.amount
+     FROM (SELECT t.amount_minor AS amount FROM transactions t
+           WHERE t.ledger_id = @ledger AND t.recurring_item_id = @item AND t.deleted_at IS NULL AND NOT ${ONE_OFF(THIS_ITEM('d.item_id'), 't.id')}
+           ORDER BY t.date DESC, t.id DESC LIMIT 1) AS latest
+     WHERE ledger_id = @ledger AND id = @item AND (latest.amount > 0) = (expected_amount_minor > 0)
+       AND abs(latest.amount - expected_amount_minor) <= max(abs(expected_amount_minor) * amount_tolerance_pct / 100.0, 1)
+       AND (total_payments IS NULL
+         OR paid_before + (SELECT count(*) FROM transactions c WHERE c.ledger_id = @ledger AND c.recurring_item_id = @item AND c.deleted_at IS NULL) < total_payments)`,
+    { item: id },
+  )
 }
 
 /**
@@ -871,27 +932,29 @@ function followLatestAmount(ctx: AppContext, id: number) {
  * moved onto the other day, they swap). Other schedules have none.
  */
 function settleSecondDay(ctx: AppContext, id: number, before: RecurringItem) {
-  const row = ctx.sqlite.prepare('SELECT cadence, anchor_date AS anchorDate, second_day AS secondDay FROM recurring_items WHERE id = ?').get(id) as Scheduled
-  const set = ctx.sqlite.prepare('UPDATE recurring_items SET second_day = ? WHERE id = ?')
+  const row = ctx.q.get<Scheduled>('SELECT cadence, anchor_date AS anchorDate, second_day AS secondDay FROM recurring_items WHERE ledger_id = @ledger AND id = @id', {
+    id,
+  })!
+  const set = (day: number | null) => ctx.q.run('UPDATE recurring_items SET second_day = @day WHERE ledger_id = @ledger AND id = @id', { day, id })
   if (row.cadence !== 'semimonthly') {
-    if (row.secondDay !== null) set.run(null, id)
+    if (row.secondDay !== null) set(null)
     return
   }
   const first = Number(row.anchorDate.slice(8, 10))
   const same = row.secondDay === first || (row.secondDay === 31 && isMonthEnd(row.anchorDate))
   if (row.secondDay !== null && !same) return
   const was = before.cadence === 'semimonthly' ? Number(before.anchorDate.slice(8, 10)) : null
-  set.run(same && was !== null && was !== first ? was : semiMonthlyPartner(first), id)
+  set(same && was !== null && was !== first ? was : semiMonthlyPartner(first))
 }
 
 /** Linked payments of an item. */
 function linkedCount(ctx: AppContext, id: number) {
-  return ctx.sqlite.prepare('SELECT count(*) FROM transactions WHERE recurring_item_id = ? AND deleted_at IS NULL').pluck().get(id) as number
+  return ctx.q.pluck<number>('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND deleted_at IS NULL', { item: id })!
 }
 
 /** "Paid so far" for an instalment plan: what isn't linked came before your history. */
 function setPaidSoFar(ctx: AppContext, id: number, paid: number) {
-  ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = ? WHERE id = ?').run(Math.max(0, paid - linkedCount(ctx, id)), id)
+  ctx.q.run('UPDATE recurring_items SET paid_before = @n WHERE ledger_id = @ledger AND id = @id', { n: Math.max(0, paid - linkedCount(ctx, id)), id })
 }
 
 /**
@@ -899,13 +962,15 @@ function setPaidSoFar(ctx: AppContext, id: number, paid: number) {
  * ended one with payments to go is back on.
  */
 function settleInstalments(ctx: AppContext, id: number, reopen = false) {
-  const row = ctx.sqlite.prepare('SELECT status, total_payments AS total, paid_before AS paidBefore FROM recurring_items WHERE id = ?').get(id) as
-    | { status: RecurringStatus; total: number | null; paidBefore: number }
-    | undefined
+  const row = ctx.q.get<{ status: RecurringStatus; total: number | null; paidBefore: number }>(
+    'SELECT status, total_payments AS total, paid_before AS paidBefore FROM recurring_items WHERE ledger_id = @ledger AND id = @id',
+    { id },
+  )
   if (!row || row.total === null) return
   const paid = linkedCount(ctx, id) + row.paidBefore
-  if (paid >= row.total && row.status === 'active') ctx.sqlite.prepare("UPDATE recurring_items SET status = 'ended' WHERE id = ?").run(id)
-  else if (reopen && paid < row.total && row.status === 'ended') ctx.sqlite.prepare("UPDATE recurring_items SET status = 'active' WHERE id = ?").run(id)
+  const setStatus = (status: RecurringStatus) => ctx.q.run('UPDATE recurring_items SET status = @status WHERE ledger_id = @ledger AND id = @id', { status, id })
+  if (paid >= row.total && row.status === 'active') setStatus('ended')
+  else if (reopen && paid < row.total && row.status === 'ended') setStatus('active')
 }
 
 /** A full price is a plan's, the same way as its amount (money out or in). */
@@ -915,10 +980,12 @@ function checkFullPrice(fullPrice: number | null | undefined, plan: { total: num
   if (Math.sign(fullPrice) !== Math.sign(plan.expected)) badRequest(`The full price is money ${plan.expected < 0 ? 'out' : 'in'}, like its payments.`)
 }
 
-/** The account and category an item is given exist (an archived one is fine: it's the item's already). */
+/** The account and category an item is given are the ledger's (an archived one is fine: it's the item's already). */
 function checkReferences(ctx: AppContext, input: { accountId?: number | null; categoryId?: number | null }) {
-  if (input.accountId != null && !ctx.sqlite.prepare('SELECT 1 FROM accounts WHERE id = ?').get(input.accountId)) badRequest('That account does not exist')
-  if (input.categoryId != null && !ctx.sqlite.prepare('SELECT 1 FROM categories WHERE id = ?').get(input.categoryId)) {
+  if (input.accountId != null && !ctx.q.get('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = @id', { id: input.accountId })) {
+    badRequest('That account does not exist')
+  }
+  if (input.categoryId != null && !ctx.q.get('SELECT 1 FROM ledger_categories WHERE ledger_id = @ledger AND id = @id', { id: input.categoryId })) {
     badRequest('That category does not exist')
   }
 }
@@ -928,27 +995,26 @@ export function createRecurring(ctx: AppContext, input: CreateInput): RecurringI
   checkFullPrice(input.fullPriceMinor, { total: input.totalPayments, expected: input.expectedAmountMinor })
   const payeeKey = payeeKeyOf(ctx, input.payee)
   const id = Number(
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO recurring_items (name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
-           cadence, anchor_date, second_day, next_due_date, status, origin, total_payments, full_price_minor)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', ?, ?)`,
-      )
-      .run(
-        input.payee,
-        input.name,
+    ctx.q.run(
+      `INSERT INTO recurring_items (ledger_id, name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
+         cadence, anchor_date, second_day, next_due_date, status, origin, total_payments, full_price_minor)
+       VALUES (@ledger, @payee, @title, @payeeKey, @category, @account, @expected, @tolerance,
+         @cadence, @anchor, @secondDay, @anchor, 'active', 'manual', @total, @fullPrice)`,
+      {
+        payee: input.payee,
+        title: input.name,
         payeeKey,
-        input.categoryId,
-        input.accountId,
-        input.expectedAmountMinor,
-        input.amountTolerancePct,
-        input.cadence,
-        input.anchorDate,
-        input.cadence === 'semimonthly' ? (input.secondDay ?? semiMonthlyPartner(Number(input.anchorDate.slice(8, 10)))) : null,
-        input.anchorDate,
-        input.totalPayments,
-        input.totalPayments === null ? null : (input.fullPriceMinor ?? null),
-      ).lastInsertRowid,
+        category: input.categoryId,
+        account: input.accountId,
+        expected: input.expectedAmountMinor,
+        tolerance: input.amountTolerancePct,
+        cadence: input.cadence,
+        anchor: input.anchorDate,
+        secondDay: input.cadence === 'semimonthly' ? (input.secondDay ?? semiMonthlyPartner(Number(input.anchorDate.slice(8, 10)))) : null,
+        total: input.totalPayments,
+        fullPrice: input.totalPayments === null ? null : (input.fullPriceMinor ?? null),
+      },
+    ).lastInsertRowid,
   )
   relink(ctx, id)
   followLatestAmount(ctx, id)
@@ -961,7 +1027,7 @@ export function createRecurring(ctx: AppContext, input: CreateInput): RecurringI
 export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput): RecurringItem {
   const before = getRecurring(ctx, id)
   checkReferences(ctx, input)
-  const stored = ctx.sqlite.prepare('SELECT expected_amount_minor FROM recurring_items WHERE id = ?').pluck().get(id) as number
+  const stored = storedAmount(ctx, id)
   checkFullPrice(input.fullPriceMinor, {
     total: input.totalPayments !== undefined ? input.totalPayments : before.totalPayments,
     expected: input.expectedAmountMinor ?? stored,
@@ -992,11 +1058,13 @@ export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput)
     sets.push('anchor_date = @nextDueDate')
   }
   if (sets.length) {
-    sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
-    ctx.sqlite.prepare(`UPDATE recurring_items SET ${sets.join(', ')} WHERE id = @id`).run(params)
+    sets.push(`updated_at = ${NOW}`)
+    ctx.q.run(`UPDATE recurring_items SET ${sets.join(', ')} WHERE ledger_id = @ledger AND id = @id`, params)
   }
   // No longer a plan: no payments from before your history, and no full price.
-  if (input.totalPayments === null) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = 0, full_price_minor = NULL WHERE id = ?').run(id)
+  if (input.totalPayments === null) {
+    ctx.q.run('UPDATE recurring_items SET paid_before = 0, full_price_minor = NULL WHERE ledger_id = @ledger AND id = @id', { id })
+  }
   if (input.otherPayees) setOtherPayees(ctx, id, before.payeeKey, input.otherPayees)
   settleSecondDay(ctx, id, before)
   // Every change: its payments again from what it is now. The amount follows the latest payment when
@@ -1010,21 +1078,20 @@ export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput)
   if (wasPaidOff && !paidOff(ctx, id)) relink(ctx, id)
   // A suggestion whose payments have stopped, confirmed: its payments linked, it's kept as ended.
   if (before.stopped && input.status === 'active') {
-    ctx.sqlite.prepare("UPDATE recurring_items SET status = 'ended' WHERE id = ? AND status = 'active'").run(id)
+    ctx.q.run("UPDATE recurring_items SET status = 'ended' WHERE ledger_id = @ledger AND id = @id AND status = 'active'", { id })
   }
   applyItemCategory(ctx, id)
   return getRecurring(ctx, id)
 }
 
 function setOtherPayees(ctx: AppContext, id: number, ownKey: string, names: string[]) {
-  ctx.sqlite.transaction(() => {
-    ctx.sqlite.prepare('DELETE FROM recurring_payees WHERE item_id = ?').run(id)
-    const add = ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)')
+  ctx.q.transaction(() => {
+    ctx.q.run(`DELETE FROM recurring_payees WHERE ${THIS_ITEM('item_id')}`, { item: id })
     for (const name of names) {
       const key = payeeKeyOf(ctx, name)
-      if (key && key !== ownKey) add.run(id, key, name)
+      if (key && key !== ownKey) ctx.q.run('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)', id, key, name)
     }
-  })()
+  })
 }
 
 export function confirmRecurring(ctx: AppContext, id: number) {
@@ -1036,9 +1103,8 @@ export function dismissRecurring(ctx: AppContext, id: number) {
 }
 
 export function deleteRecurring(ctx: AppContext, id: number) {
-  ctx.sqlite.prepare('DELETE FROM recurring_items WHERE id = ?').run(id)
+  ctx.q.run('DELETE FROM recurring_items WHERE ledger_id = @ledger AND id = @id', { id })
 }
-
 
 const weekday = (d: ISODate) => new Date(`${d}T00:00:00Z`).getUTCDay()
 const isWeekend = (d: ISODate) => weekday(d) === 0 || weekday(d) === 6
@@ -1103,32 +1169,29 @@ interface DetectRow {
  * match one in any status (a dismissed one too), are skipped.
  */
 export function detectRecurring(ctx: AppContext): { created: number } {
-  const { priceVariationPct: pct, dateVariationDays: days } = recurringDetection(ctx.meta)
+  const { priceVariationPct: pct, dateVariationDays: days } = recurringDetection(ctx.app)
   const todayDate = today(ctx)
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT t.id, t.payee_key AS payeeKey, t.payee, t.date, t.amount_minor AS amount, t.category_id AS categoryId,
-         t.account_id AS accountId, t.recurring_item_id AS recurringItemId
-       FROM transactions t LEFT JOIN categories c ON c.id = t.category_id
-       WHERE t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND COALESCE(c.exclude_from_totals, 0) = 0
-         AND t.date <= ? AND t.payee_key <> '' AND t.amount_minor <> 0
-       ORDER BY t.payee_key, t.date, t.id`,
-    )
-    .all(todayDate) as DetectRow[]
-  const items = ctx.sqlite
-    .prepare(
-      `SELECT payee_key AS payeeKey, expected_amount_minor AS expected, amount_tolerance_pct AS tolerance, cadence, anchor_date AS anchorDate,
-         second_day AS secondDay, next_due_date AS nextDueDate, total_payments AS total
-       FROM recurring_items`,
-    )
-    .all() as KnownItem[]
-  const otherPayees = ctx.sqlite
-    .prepare(
-      `SELECT p.payee_key AS payeeKey, r.expected_amount_minor AS expected, r.amount_tolerance_pct AS tolerance, r.cadence, r.anchor_date AS anchorDate,
-         r.second_day AS secondDay, r.next_due_date AS nextDueDate, r.total_payments AS total
-       FROM recurring_payees p JOIN recurring_items r ON r.id = p.item_id`,
-    )
-    .all() as KnownItem[]
+  const rows = ctx.q.all<DetectRow>(
+    `SELECT t.id, t.payee_key AS payeeKey, t.payee, t.date, t.amount_minor AS amount, t.category_id AS categoryId,
+       t.account_id AS accountId, t.recurring_item_id AS recurringItemId
+     FROM transactions t LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+     WHERE t.ledger_id = @ledger AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND COALESCE(c.exclude_from_totals, 0) = 0
+       AND t.date <= @today AND t.payee_key <> '' AND t.amount_minor <> 0
+     ORDER BY t.payee_key, t.date, t.id`,
+    { today: todayDate },
+  )
+  // The ledger's items in any status, and their other payees: their payments aren't suggested again.
+  const items = ctx.q.all<KnownItem>(
+    `SELECT payee_key AS payeeKey, expected_amount_minor AS expected, amount_tolerance_pct AS tolerance, cadence, anchor_date AS anchorDate,
+       second_day AS secondDay, next_due_date AS nextDueDate, total_payments AS total
+     FROM recurring_items WHERE ledger_id = @ledger`,
+  )
+  const otherPayees = ctx.q.all<KnownItem>(
+    `SELECT p.payee_key AS payeeKey, r.expected_amount_minor AS expected, r.amount_tolerance_pct AS tolerance, r.cadence, r.anchor_date AS anchorDate,
+       r.second_day AS secondDay, r.next_due_date AS nextDueDate, r.total_payments AS total
+     FROM recurring_payees p JOIN recurring_items r ON r.id = p.item_id
+     WHERE r.ledger_id = @ledger`,
+  )
   // An item's payment: from its payee (or another you said is its), within its price variation, on its
   // schedule. Another amount from the payee is a series of its own (or a price change, asked about).
   const known = (r: DetectRow) =>
@@ -1141,14 +1204,20 @@ export function detectRecurring(ctx: AppContext): { created: number } {
     groups.set(key, [...(groups.get(key) ?? []), r])
   }
 
-  const addPayee = ctx.sqlite.prepare('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)')
+  const addPayee = (itemId: number, key: string, name: string) =>
+    ctx.q.run('INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)', itemId, key, name)
   // What the payee is called: by your rule, by AI tidying, or as sent.
   const shownPayee = (raw: string) => payeeNameOf(ctx, raw).name
-  const insert = ctx.sqlite.prepare(
-    `INSERT INTO recurring_items (name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
-       cadence, anchor_date, second_day, next_due_date, status, origin, detection_score, total_payments)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'suggested', 'detected', ?, ?)`,
-  )
+  const insert = (values: Record<string, unknown>) =>
+    Number(
+      ctx.q.run(
+        `INSERT INTO recurring_items (ledger_id, name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
+           cadence, anchor_date, second_day, next_due_date, status, origin, detection_score, total_payments)
+         VALUES (@ledger, @payee, @title, @payeeKey, @category, @account, @expected, @tolerance,
+           @cadence, @anchor, @secondDay, @nextDue, 'suggested', 'detected', @score, @total)`,
+        values,
+      ).lastInsertRowid,
+    )
   let created = 0
   const used = new Set<number>()
   /** `history`: series that have stopped too, after every one still going has been found. */
@@ -1287,26 +1356,26 @@ export function detectRecurring(ctx: AppContext): { created: number } {
         const all = finished ? [...series, finished.last] : series
         // Paid from more than one account: from any.
         const accountId = all.every((t) => t.accountId === anchor.accountId) ? anchor.accountId : null
-        const itemId = insert.run(
+        const itemId = insert({
           payee,
-          store,
-          anchor.payeeKey,
-          anchor.categoryId ?? series.find((t) => t.categoryId)?.categoryId ?? null,
-          accountId,
-          amount,
-          finished?.tolerance ?? pct,
+          title: store,
+          payeeKey: anchor.payeeKey,
+          category: anchor.categoryId ?? series.find((t) => t.categoryId)?.categoryId ?? null,
+          account: accountId,
+          expected: amount,
+          tolerance: finished?.tolerance ?? pct,
           cadence,
-          schedule.anchorDate,
-          schedule.secondDay ?? null,
-          nextDueDate,
-          Number(Math.max(0.5, score).toFixed(2)),
+          anchor: schedule.anchorDate,
+          secondDay: schedule.secondDay ?? null,
+          nextDue: nextDueDate,
+          score: Number(Math.max(0.5, score).toFixed(2)),
           total,
-        ).lastInsertRowid
+        })
         // Its payments under other names (the bank's description changed) are its other payees.
         const tolerance = finished?.tolerance ?? pct
         const others = new Map(all.filter((t) => t.payeeKey !== anchor.payeeKey).map((t) => [t.payeeKey, shownPayee(t.payee)]))
         for (const [key, name] of others) {
-          addPayee.run(itemId, key, name)
+          addPayee(itemId, key, name)
           otherPayees.push({ payeeKey: key, expected: amount, tolerance, ...schedule, nextDueDate, total })
         }
         for (const t of all) used.add(t.id)

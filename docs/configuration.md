@@ -4,7 +4,7 @@ Copy `.env.example` to `.env` (all optional). The server reads `.env` from the r
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATA_DIR` | `data` (Docker: `/data`) | Holds `meta.db` (ledgers, app settings, bank connections), one `ledgers/<id>.db` per ledger, `secret.key` and `backups/`. A relative path is from the repo root |
+| `DATA_DIR` | `data` (Docker: `/data`) | Holds `chipmunk.db` (one SQLite database with every ledger, the app settings and the bank connections), `secret.key` and `backups/`. A relative path is from the repo root |
 | `API_PORT` | `8787` | Port for the API (and the app in production). In development the Vite dev server sends `/api` there too. Not `PORT`, which dev tools often set for the web dev server |
 | `HOST` | `0.0.0.0` | Address to listen on. `0.0.0.0` is every interface, `127.0.0.1` only this machine. In Docker, leave it and choose in `compose.yaml` instead |
 | `NODE_ENV` | — (`production` in `pnpm start` and Docker) | `production` serves the built web app from `apps/web/dist` and turns off request logs |

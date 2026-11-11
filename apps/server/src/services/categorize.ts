@@ -31,15 +31,14 @@ export const directionOf = (amountMinor: number | undefined): Direction => ((amo
 /** History for a payee, the given way only when there's an amount. */
 function statsFor(ctx: AppContext, payeeKey: string, amountMinor: number | undefined): StatRow[] {
   const oneWay = amountMinor !== undefined && amountMinor !== 0
-  return ctx.sqlite
-    .prepare(
-      `SELECT s.payee_key AS payeeKey, s.category_id AS categoryId, sum(s.count) AS count, c.name, c.is_income AS isIncome
-       FROM payee_category_stats s JOIN categories c ON c.id = s.category_id
-       WHERE s.payee_key = ? AND c.archived_at IS NULL AND s.count > 0${oneWay ? ' AND s.direction = ?' : ''}
-       GROUP BY s.category_id
-       ORDER BY count DESC, max(s.last_used_at) DESC`,
-    )
-    .all(...(oneWay ? [payeeKey, directionOf(amountMinor)] : [payeeKey])) as StatRow[]
+  return ctx.q.all<StatRow>(
+    `SELECT s.payee_key AS payeeKey, s.category_id AS categoryId, sum(s.count) AS count, c.name, c.is_income AS isIncome
+     FROM payee_category_stats s JOIN ledger_categories c ON c.id = s.category_id AND c.ledger_id = s.ledger_id
+     WHERE s.ledger_id = @ledger AND s.payee_key = ? AND c.archived_at IS NULL AND s.count > 0${oneWay ? ' AND s.direction = ?' : ''}
+     GROUP BY s.category_id
+     ORDER BY count DESC, max(s.last_used_at) DESC`,
+    ...(oneWay ? [payeeKey, directionOf(amountMinor)] : [payeeKey]),
+  )
 }
 
 function signFits(isIncome: number | boolean, amountMinor: number | undefined) {
@@ -52,19 +51,25 @@ export function learn(ctx: AppContext, payeeKey: string, amountMinor: number, ca
   if (!categoryId || !payeeKey || delta === 0) return
   const direction = directionOf(amountMinor)
   if (delta > 0) {
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO payee_category_stats (payee_key, direction, category_id, count, last_used_at)
-         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-         ON CONFLICT (payee_key, direction, category_id) DO UPDATE SET
-           count = count + excluded.count,
-           last_used_at = excluded.last_used_at`,
-      )
-      .run(payeeKey, direction, categoryId, delta)
+    ctx.q.run(
+      `INSERT INTO payee_category_stats (ledger_id, payee_key, direction, category_id, count, last_used_at)
+       VALUES (@ledger, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT (ledger_id, payee_key, direction, category_id) DO UPDATE SET
+         count = count + excluded.count,
+         last_used_at = excluded.last_used_at`,
+      payeeKey,
+      direction,
+      categoryId,
+      delta,
+    )
   } else {
-    ctx.sqlite
-      .prepare('UPDATE payee_category_stats SET count = max(count + ?, 0) WHERE payee_key = ? AND direction = ? AND category_id = ?')
-      .run(delta, payeeKey, direction, categoryId)
+    ctx.q.run(
+      'UPDATE payee_category_stats SET count = max(count + ?, 0) WHERE ledger_id = @ledger AND payee_key = ? AND direction = ? AND category_id = ?',
+      delta,
+      payeeKey,
+      direction,
+      categoryId,
+    )
   }
 }
 
@@ -76,18 +81,17 @@ export interface PayeeRule {
 /** What you chose for a payee, if anything. */
 export function payeeRule(ctx: AppContext, payeeKey: string): PayeeRule | null {
   return (
-    (ctx.sqlite.prepare('SELECT mode, category_id AS categoryId FROM payee_rules WHERE payee_key = ?').get(payeeKey) as PayeeRule | undefined) ?? null
+    ctx.q.get<PayeeRule>('SELECT mode, category_id AS categoryId FROM payee_rules WHERE ledger_id = @ledger AND payee_key = ?', payeeKey) ?? null
   )
 }
 
 /** The category a payee is always set to, when it's on and fits the money's direction. */
 function alwaysSuggestion(ctx: AppContext, payeeKey: string, amountMinor: number | undefined): SuggestionResult | null {
-  const row = ctx.sqlite
-    .prepare(
-      `SELECT c.id, c.name, c.is_income AS isIncome FROM payee_rules r JOIN categories c ON c.id = r.category_id
-       WHERE r.payee_key = ? AND r.mode = 'always' AND c.archived_at IS NULL`,
-    )
-    .get(payeeKey) as { id: number; name: string; isIncome: number } | undefined
+  const row = ctx.q.get<{ id: number; name: string; isIncome: number }>(
+    `SELECT c.id, c.name, c.is_income AS isIncome FROM payee_rules r JOIN ledger_categories c ON c.id = r.category_id AND c.ledger_id = r.ledger_id
+     WHERE r.ledger_id = @ledger AND r.payee_key = ? AND r.mode = 'always' AND c.archived_at IS NULL`,
+    payeeKey,
+  )
   if (!row || !signFits(row.isIncome, amountMinor)) return null
   return { categoryId: row.id, source: 'history', confidence: 1, reason: `You always put “${payeeKey}” in ${row.name}`, autoApply: true }
 }
@@ -115,14 +119,15 @@ export function historySuggestion(
     }
   }
 
-  // Fuzzy: similar payee keys the user has categorized before (money the same way).
-  const keys = ctx.sqlite
-    .prepare(
-      `SELECT s.payee_key AS payeeKey, s.category_id AS categoryId, s.count, c.name, c.is_income AS isIncome
-       FROM payee_category_stats s JOIN categories c ON c.id = s.category_id
-       WHERE c.archived_at IS NULL AND s.count > 0 AND s.direction = ?`,
-    )
-    .all(directionOf(amountMinor)) as StatRow[]
+  // Fuzzy: similar payee keys the user has categorized before (money the same way). A tie goes to
+  // what was learned first.
+  const keys = ctx.q.all<StatRow>(
+    `SELECT s.payee_key AS payeeKey, s.category_id AS categoryId, s.count, c.name, c.is_income AS isIncome
+     FROM payee_category_stats s JOIN ledger_categories c ON c.id = s.category_id AND c.ledger_id = s.ledger_id
+     WHERE s.ledger_id = @ledger AND c.archived_at IS NULL AND s.count > 0 AND s.direction = ?
+     ORDER BY s.rowid`,
+    directionOf(amountMinor),
+  )
   let best: { row: StatRow; score: number } | null = null
   for (const row of keys) {
     if (!signFits(row.isIncome, amountMinor)) continue
@@ -155,22 +160,19 @@ export interface AiInput {
 
 function buildLlmRequest(ctx: AppContext, input: AiInput): LlmCategoryRequest {
   // Categories left out of totals (transfers, card payments) are offered too, marked as such.
-  const cats = ctx.sqlite
-    .prepare(
-      `SELECT c.id, c.name, g.name AS groupName, c.is_income AS isIncome, c.exclude_from_totals AS excluded
-       FROM categories c LEFT JOIN category_groups g ON g.id = c.group_id
-       WHERE c.archived_at IS NULL
-       ORDER BY g.sort, c.sort`,
-    )
-    .all() as Array<{ id: number; name: string; groupName: string | null; isIncome: number; excluded: number }>
-  const examples = ctx.sqlite
-    .prepare(
-      `SELECT s.payee_key AS payee, c.name AS category
-       FROM payee_category_stats s JOIN categories c ON c.id = s.category_id
-       WHERE s.count > 0 AND c.archived_at IS NULL AND s.direction = ?
-       ORDER BY s.last_used_at DESC LIMIT 40`,
-    )
-    .all(directionOf(input.amountMinor)) as Array<{ payee: string; category: string }>
+  const cats = ctx.q.all<{ id: number; name: string; groupName: string | null; isIncome: number; excluded: number }>(
+    `SELECT c.id, c.name, g.name AS groupName, c.is_income AS isIncome, c.exclude_from_totals AS excluded
+     FROM ledger_categories c LEFT JOIN ledger_category_groups g ON g.id = c.group_id AND g.ledger_id = c.ledger_id
+     WHERE c.ledger_id = @ledger AND c.archived_at IS NULL
+     ORDER BY g.sort, c.sort`,
+  )
+  const examples = ctx.q.all<{ payee: string; category: string }>(
+    `SELECT s.payee_key AS payee, c.name AS category
+     FROM payee_category_stats s JOIN ledger_categories c ON c.id = s.category_id AND c.ledger_id = s.ledger_id
+     WHERE s.ledger_id = @ledger AND s.count > 0 AND c.archived_at IS NULL AND s.direction = ?
+     ORDER BY s.last_used_at DESC LIMIT 40`,
+    directionOf(input.amountMinor),
+  )
   const key = payeeKeyOf(ctx, input.payee)
   // Most similar examples first, then the most recent ones.
   const ranked = examples
@@ -179,8 +181,7 @@ function buildLlmRequest(ctx: AppContext, input: AiInput): LlmCategoryRequest {
     .slice(0, 15)
     .map(({ payee, category }) => ({ payee, category }))
   const accountType = input.accountId
-    ? ((ctx.sqlite.prepare('SELECT type FROM accounts WHERE id = ?').get(input.accountId) as { type: string } | undefined)
-        ?.type ?? null)
+    ? (ctx.q.pluck<string>('SELECT type FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', input.accountId) ?? null)
     : null
   return {
     payee: input.payee,
@@ -208,9 +209,10 @@ export async function aiSuggestion(ctx: AppContext, input: AiInput): Promise<Sug
   const llm = ctx.llm ?? configuredCategorizer(ctx)
   const res = await llm(req)
   if (!res) return null
-  const match = ctx.sqlite
-    .prepare('SELECT id, is_income AS isIncome FROM categories WHERE lower(name) = lower(?) AND archived_at IS NULL')
-    .get(res.category) as { id: number; isIncome: number } | undefined
+  const match = ctx.q.get<{ id: number; isIncome: number }>(
+    'SELECT id, is_income AS isIncome FROM ledger_categories WHERE ledger_id = @ledger AND lower(name) = lower(?) AND archived_at IS NULL',
+    res.category,
+  )
   if (!match || !signFits(match.isIncome, input.amountMinor)) return null
   // Not for a payee you always review yourself.
   const backedByBank =

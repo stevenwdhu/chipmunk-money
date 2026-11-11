@@ -150,8 +150,8 @@ describe('request timeouts', () => {
       expiresAt: Date.now() + 60 * 60_000,
       scopes: ['chatgpt.tokens.use.direct'],
     }
-    setAppSetting(storage.meta, 'chatgpt.session', storage.secrets.seal(JSON.stringify(session)))
-    await expect(chatgptModels(storage.meta)).rejects.toThrow('OpenAI didn’t answer within 30 seconds')
+    setAppSetting(storage.app, 'chatgpt.session', storage.secrets.seal(JSON.stringify(session)))
+    await expect(chatgptModels(storage.app)).rejects.toThrow('OpenAI didn’t answer within 30 seconds')
     expect(signals[0]).toBeInstanceOf(AbortSignal)
   })
 })

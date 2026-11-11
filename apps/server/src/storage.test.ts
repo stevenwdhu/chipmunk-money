@@ -5,9 +5,9 @@ import { unzipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
 import { transactionCreateSchema } from '@chipmunk/shared'
 import { createApp } from './app'
-import { seedDefaults } from './db/seed'
 import { SecretBox } from './lib/secrets'
 import { listAccounts } from './services/accounts'
+import { leaveSharedList } from './services/catalog'
 import { listCategories, updateCategory } from './services/categories'
 import { suggestCategory } from './services/categorize'
 import { getAppSetting, setAppSetting } from './services/settings'
@@ -48,6 +48,8 @@ describe('ledgers', () => {
     expect(listAccounts(personal).map((a) => a.name)).toEqual(['My Chequing'])
     expect(listAccounts(fam)).toEqual([])
 
+    // A ledger with its own list renames its copy: the shared list, and Personal, keep the name.
+    leaveSharedList(fam)
     updateCategory(fam, categoryId(fam, 'Groceries'), { name: 'Food at home' })
     expect(listCategories(personal).categories.some((c) => c.name === 'Groceries')).toBe(true)
     expect(listCategories(fam).categories.some((c) => c.name === 'Food at home')).toBe(true)
@@ -187,8 +189,9 @@ describe('app-wide AI usage', () => {
     const log = (slug: string, ok: boolean) =>
       storage.registry
         .context(slug)
-        .sqlite.prepare(`INSERT INTO ai_calls (slot, model, latency_ms, ok, input_tokens, output_tokens) VALUES ('primary', 'm', 100, ?, 10, 2)`)
-        .run(ok ? 1 : 0)
+        .q.run(`INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, input_tokens, output_tokens) VALUES (@ledger, 'primary', 'm', 100, @ok, 10, 2)`, {
+          ok: ok ? 1 : 0,
+        })
     log('personal', true)
     log(family.slug, false)
     log(family.slug, true)

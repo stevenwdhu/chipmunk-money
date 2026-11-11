@@ -35,8 +35,10 @@ export function onError(err: Error, c: Context) {
   if (err instanceof HTTPException) return errorResponse(c, err.status as ContentfulStatusCode, err.message)
   // A unique index caught a duplicate the code didn't check for.
   if ((err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') return errorResponse(c, 409, 'That already exists.')
-  // An id the code didn't check: an account, category or the like that doesn't exist.
-  if ((err as { code?: string }).code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+  // An id the code didn't check: an account, category or the like that doesn't exist, or (a guard
+  // trigger says) is another ledger's, which from this ledger is the same thing.
+  const code = (err as { code?: string }).code
+  if (code === 'SQLITE_CONSTRAINT_FOREIGNKEY' || (code === 'SQLITE_CONSTRAINT_TRIGGER' && err.message === 'cross-ledger reference')) {
     return errorResponse(c, 400, 'That refers to something that doesn’t exist, like an account or category. Check the ids you sent.')
   }
   console.error(err)

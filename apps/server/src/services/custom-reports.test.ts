@@ -1,10 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { transactionCreateSchema, type CustomReport, type ReportSpec } from '@chipmunk/shared'
 import { createApp } from '../app'
-import { categoryId, makeAccount, testContext, testStorage } from '../test/helpers'
+import { exportLedger } from '../db/ledger-backup'
+import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
+import { leaveSharedList } from './catalog'
 import { createGroup, createTag, deleteGroup, deleteTag, mergeCategory, setCategoryEnabled } from './categories'
 import {
   carryPayeeRefs,
@@ -22,9 +21,6 @@ import { eraseAll, restoreBackup, startDemo } from './setup'
 import { createTransaction, deleteTransaction } from './transactions'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
-
-const dirs: string[] = []
-afterEach(() => dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })))
 
 const spending = (side: Record<string, unknown>) => ({ filter: { spending: side } }) as ReportSpec
 const spend = (ctx: ReturnType<typeof testContext>, payee: string, extra: Record<string, unknown> = {}) =>
@@ -136,6 +132,8 @@ describe('custom reports', () => {
 
   it('follow a category merged or turned off into another', async () => {
     const ctx = testContext()
+    // A ledger merges categories of its own list (the shared list's are merged in App settings).
+    leaveSharedList(ctx)
     const [dineOut, treats, groceries] = [categoryId(ctx, 'Dine out'), categoryId(ctx, 'Drinks & treats'), categoryId(ctx, 'Groceries')]
     await spend(ctx, 'Starbucks', { categoryId: treats })
     const both = createCustomReport(ctx, { name: 'Eating', spec: spending({ only: [{ field: 'category', ids: [dineOut, treats, 'none'] }] }) })
@@ -151,18 +149,18 @@ describe('custom reports', () => {
     expect(getCustomReport(ctx, both.id)).toMatchObject({ spec: { filter: { spending: { only: [{ field: 'category', ids: [groceries, 'none'] }] } } }, missing: [] })
   })
 
-  it('are cleared by erasing, and carried by a backup', async () => {
-    const source = testContext()
+  it('are cleared by erasing, and carried by a backup', () => {
+    const sourceStorage = testStorage()
+    const source = sourceStorage.registry.defaultContext()
     const tag = createTag(source, 'kept')
     createCustomReport(source, { name: 'Kept', spec: spending({ only: [{ field: 'tag', ids: [tag.id] }] }) })
-    const dir = mkdtempSync(path.join(tmpdir(), 'st-test-'))
-    dirs.push(dir)
-    await source.sqlite.backup(path.join(dir, 'backup.db'))
+    const bytes = exportLedger(sourceStorage.sqlite, source.ledger.id)
 
-    const target = testContext()
-    restoreBackup(target, new Uint8Array(readFileSync(path.join(dir, 'backup.db'))))
+    const storage = testStorage()
+    const target = storage.registry.defaultContext()
+    restoreBackup(storage, target, bytes)
     expect(listCustomReports(target)).toEqual([expect.objectContaining({ name: 'Kept', description: 'Spending: Only #kept', missing: [] })])
-    eraseAll(target)
+    eraseAll(storage, target)
     expect(listCustomReports(target)).toEqual([])
   })
 
@@ -179,7 +177,9 @@ describe('custom reports', () => {
 
   it('name the groups and labels they filter by, and say when one is gone', () => {
     const ctx = testContext()
-    const food = ctx.sqlite.prepare("SELECT id FROM category_groups WHERE name = 'Food'").pluck().get() as number
+    // Groups and labels are edited in a ledger with its own list (the shared list's in App settings).
+    leaveSharedList(ctx)
+    const food = ctx.q.pluck<number>("SELECT id FROM ledger_category_groups WHERE ledger_id = @ledger AND name = 'Food'")!
     const boats = createGroup(ctx, { name: 'Boats' })
     const splurge = createLabel(ctx, { name: 'Splurge' })
     const report = createCustomReport(ctx, {
@@ -205,18 +205,18 @@ describe('custom reports', () => {
     })
   })
 
-  it('still point at what’s gone after a restore: its ids aren’t handed out again', async () => {
-    const source = testContext()
+  it('still point at what’s gone after a restore: its ids aren’t handed out again', () => {
+    const sourceStorage = testStorage()
+    const source = sourceStorage.registry.defaultContext()
     createTag(source, 'kept')
     const gone = createTag(source, 'gone')
     const report = createCustomReport(source, { name: 'Gone', spec: spending({ only: [{ field: 'tag', ids: [gone.id] }] }) })
     deleteTag(source, gone.id)
-    const dir = mkdtempSync(path.join(tmpdir(), 'st-test-'))
-    dirs.push(dir)
-    await source.sqlite.backup(path.join(dir, 'backup.db'))
+    const bytes = exportLedger(sourceStorage.sqlite, source.ledger.id)
 
-    const target = testContext()
-    restoreBackup(target, new Uint8Array(readFileSync(path.join(dir, 'backup.db'))))
+    const storage = testStorage()
+    const target = storage.registry.defaultContext()
+    restoreBackup(storage, target, bytes)
     expect(createTag(target, 'new').id).toBeGreaterThan(gone.id)
     expect(getCustomReport(target, report.id).missing).toEqual([{ kind: 'tag', id: gone.id, reason: 'deleted' }])
   })
@@ -233,7 +233,7 @@ describe('custom reports', () => {
     const other = createCustomReport(ctx, { name: 'Other', spec: spending({ only: [{ field: 'payee', keys: ['old', 'new'] }] }) })
     carryPayeeRefs(ctx, [['old', 'new']])
     expect(getCustomReport(ctx, other.id).spec.filter.spending!.only).toEqual([{ field: 'payee', keys: ['new'] }])
-    expect(ctx.sqlite.prepare("SELECT summary FROM activity WHERE entity = 'custom_report' ORDER BY id").pluck().all()).toEqual([
+    expect(ctx.q.column("SELECT summary FROM activity WHERE ledger_id = @ledger AND entity = 'custom_report' ORDER BY id")).toEqual([
       'Shop couldn’t follow a payee to its new names: there were too many for one report',
       'Other no longer filters by the payee’s old name, old',
     ])
@@ -242,7 +242,7 @@ describe('custom reports', () => {
   it('come with the demo: everyday spending, without the trip or big one-offs', () => {
     const ctx = testContext()
     startDemo(ctx)
-    const trip = ctx.sqlite.prepare("SELECT id FROM tags WHERE name = 'trip-japan'").pluck().get() as number
+    const trip = ctx.q.pluck<number>("SELECT id FROM tags WHERE ledger_id = @ledger AND name = 'trip-japan'")!
     expect(getCustomReport(ctx, 1)).toMatchObject({
       name: 'Everyday spending',
       spec: {
@@ -263,7 +263,7 @@ describe('custom reports', () => {
     })
     // Rent is a recurring item's payments, so the second rule doesn't take it out.
     const rent = listRecurring(ctx, 'active').find((r) => /rent/i.test(r.payee))!
-    const rentPaid = ctx.sqlite.prepare("SELECT recurring_item_id FROM transactions WHERE payee LIKE 'Rent%'").pluck().all()
+    const rentPaid = ctx.q.column("SELECT recurring_item_id FROM transactions WHERE ledger_id = @ledger AND payee LIKE 'Rent%'")
     expect(rentPaid.length).toBeGreaterThan(10)
     expect(new Set(rentPaid)).toEqual(new Set([rent.id]))
   })
@@ -315,15 +315,69 @@ describe('custom reports over HTTP', () => {
 
     expect((await call('PATCH', `/categories/${dineOut}`, { enabled: false, moveTo: groceries })).status).toBe(200)
     await call('PUT', '/categories/sharing', { shared: false })
-    expect((await call('POST', `/categories/${treats}/merge`, { into: groceries })).body).toEqual({ into: expect.objectContaining({ id: groceries }), transactions: 0, recurring: 0 })
+    // Its own list is a copy with new ids, and its reports follow them.
+    const [ownTreats, ownGroceries] = [categoryId(ctx, 'Drinks & treats'), categoryId(ctx, 'Groceries')]
+    expect(ownTreats).not.toBe(treats)
+    expect((await call('POST', `/categories/${ownTreats}/merge`, { into: ownGroceries })).body).toEqual({ into: expect.objectContaining({ id: ownGroceries }), transactions: 0, recurring: 0 })
     const summaries = ((await call('GET', '/activity?entity=category')).body.items as Json[]).map((a) => a.summary)
     expect(summaries).toEqual([
       'Merged the category Drinks & treats into Groceries (0 transactions and 2 custom reports)',
       'Turned off the category Dine out and moved its 1 transaction and 1 custom report to Groceries',
     ])
     expect(((await call('GET', '/custom-reports')).body as CustomReport[]).map((r) => r.spec.filter.spending!.only)).toEqual([
-      [{ field: 'category', ids: [groceries] }],
-      [{ field: 'category', ids: [groceries] }],
+      [{ field: 'category', ids: [ownGroceries] }],
+      [{ field: 'category', ids: [ownGroceries] }],
     ])
+  })
+})
+
+describe('custom reports in two ledgers', () => {
+  it('are each ledger’s own: names, order, limits, and what their ids mean', () => {
+    const storage = testStorage()
+    const a = storage.registry.defaultContext()
+    const b = testLedger(storage, 'Family')
+    const [tagA, tagB] = [createTag(a, 'trip'), createTag(b, 'trip')]
+    const ra = createCustomReport(a, { name: 'Trips', spec: spending({ only: [{ field: 'tag', ids: [tagA.id] }] }) })
+    // The same name in another ledger is fine, and it's first in that ledger's order.
+    const rb = createCustomReport(b, { name: 'trips', spec: spending({ only: [{ field: 'tag', ids: [tagB.id] }] }) })
+    expect(listCustomReports(a)).toEqual([ra])
+    expect(listCustomReports(b)).toEqual([rb])
+    expect(rb).toMatchObject({ description: 'Spending: Only #trip', missing: [] })
+
+    // Another ledger's report isn't there, and can't be changed, ordered or deleted from here.
+    expect(() => getCustomReport(a, rb.id)).toThrow('Custom report not found')
+    expect(() => updateCustomReport(a, rb.id, { name: 'Mine' })).toThrow('Custom report not found')
+    expect(() => deleteCustomReport(a, rb.id)).toThrow('Custom report not found')
+    expect(() => reorderCustomReports(a, [rb.id])).toThrow(`There's no custom report ${rb.id}`)
+    expect(getCustomReport(b, rb.id)).toEqual(rb)
+
+    // Ids of another ledger's tag, account or own category match nothing here: they read as deleted.
+    const card = makeAccount(b, 'Visa', 'credit')
+    const odd = createCustomReport(a, {
+      name: 'Odd',
+      spec: spending({ only: [{ field: 'tag', ids: [tagB.id] }, { field: 'account', ids: [card] }] }),
+    })
+    expect(odd.missing).toEqual([
+      { kind: 'tag', id: tagB.id, reason: 'deleted' },
+      { kind: 'account', id: card, reason: 'deleted' },
+    ])
+
+    // The limit is per ledger.
+    for (let i = listCustomReports(b).length; i < CUSTOM_REPORTS_MAX; i++) createCustomReport(b, { name: `Report ${i}`, spec: spending({}) })
+    expect(() => createCustomReport(b, { name: 'One more', spec: spending({}) })).toThrow(`You can keep up to ${CUSTOM_REPORTS_MAX} custom reports`)
+    expect(createCustomReport(a, { name: 'One more', spec: spending({}) }).name).toBe('One more')
+  })
+
+  it('follow a payee to its new key in their own ledger only', async () => {
+    const storage = testStorage()
+    const a = storage.registry.defaultContext()
+    const b = testLedger(storage, 'Family')
+    await spend(a, 'Shop')
+    const ra = createCustomReport(a, { name: 'Shop', spec: spending({ only: [{ field: 'payee', keys: ['shop'] }] }) })
+    const rb = createCustomReport(b, { name: 'Shop', spec: spending({ only: [{ field: 'payee', keys: ['shop'] }] }) })
+    carryPayeeRefs(a, [['shop', 'the shop']])
+    // A still has transactions keyed shop, so its report keeps that key with the new one.
+    expect(getCustomReport(a, ra.id).spec.filter.spending!.only).toEqual([{ field: 'payee', keys: ['shop', 'the shop'] }])
+    expect(getCustomReport(b, rb.id)).toEqual(rb)
   })
 })

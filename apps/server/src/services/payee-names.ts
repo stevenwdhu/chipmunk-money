@@ -13,6 +13,8 @@ import {
   type PayeeRename,
   type PayeeWordingsName,
 } from '@chipmunk/shared'
+import { eq, sql } from 'drizzle-orm'
+import { payeeNameRules } from '../db/schema'
 import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { learn } from './categorize'
@@ -21,13 +23,13 @@ import { carryPayeeRefs } from './custom-reports'
 import { aiTidyOn, forgetPayeeNamer, loadNameRules, payeeNamerFor, tidiedNames } from './payee-namer'
 import { applyPayeeChoices } from './payees'
 
-/** Where payee names apply: the app's rules and AI names (meta.db), and every ledger. */
+/** Where payee names apply: the app's rules and AI names (app-wide tables), and every ledger. */
 export interface PayeeWorld {
   meta: MetaStore
   ledgers: () => AppContext[]
 }
-export const worldOf = (storage: Pick<Storage, 'meta' | 'registry'>): PayeeWorld => ({
-  meta: storage.meta,
+export const worldOf = (storage: Pick<Storage, 'app' | 'registry'>): PayeeWorld => ({
+  meta: storage.app,
   ledgers: () => storage.registry.list().map((l) => storage.registry.context(l.id)),
 })
 /** One ledger as all there is (a test's). */
@@ -41,6 +43,19 @@ export const worldOfLedger = (ctx: AppContext): PayeeWorld => ({ meta: ctx.meta,
  */
 
 type RuleInput = ReturnType<typeof payeeNameRuleCreateSchema.parse>
+
+const NOW = sql`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+
+/** A rule's patterns (and name) changed. */
+function writeRule(meta: MetaStore, id: number, set: { patterns: string[]; name?: string | null }) {
+  meta.db
+    .update(payeeNameRules)
+    .set({ patterns: JSON.stringify(set.patterns), ...(set.name !== undefined && { name: set.name }), updatedAt: NOW })
+    .where(eq(payeeNameRules.id, id))
+    .run()
+}
+
+const deleteRow = (meta: MetaStore, id: number) => meta.db.delete(payeeNameRules).where(eq(payeeNameRules.id, id)).run()
 
 /** A rule as it can be saved: a `same` one names its payee, a regex is one that works. */
 function checked(r: RuleInput): RuleInput {
@@ -57,7 +72,9 @@ function checked(r: RuleInput): RuleInput {
 export function payeesSent(world: PayeeWorld): Map<string, number> {
   const sent = new Map<string, number>()
   for (const ctx of world.ledgers()) {
-    for (const { payee, n } of ctx.sqlite.prepare('SELECT payee, count(*) AS n FROM transactions WHERE deleted_at IS NULL GROUP BY payee').all() as Array<{ payee: string; n: number }>) {
+    for (const { payee, n } of ctx.q.all<{ payee: string; n: number }>(
+      'SELECT payee, count(*) AS n FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NULL GROUP BY payee',
+    )) {
       sent.set(payee, (sent.get(payee) ?? 0) + n)
     }
   }
@@ -72,7 +89,11 @@ export function listNameRules(world: PayeeWorld): PayeeNameRule[] {
     if (id !== null) counts.set(id, (counts.get(id) ?? 0) + n)
   }
   const stamps = new Map(
-    (world.meta.sqlite.prepare('SELECT id, updated_at AS updatedAt FROM payee_name_rules').all() as Array<{ id: number; updatedAt: string }>).map((r) => [r.id, r.updatedAt]),
+    world.meta.db
+      .select({ id: payeeNameRules.id, updatedAt: payeeNameRules.updatedAt })
+      .from(payeeNameRules)
+      .all()
+      .map((r) => [r.id, r.updatedAt]),
   )
   return loadNameRules(world.meta).map((r) => ({ ...r, transactionCount: counts.get(r.id) ?? 0, updatedAt: stamps.get(r.id)! }))
 }
@@ -98,19 +119,18 @@ export function createNameRule(world: PayeeWorld, input: PayeeNameRuleCreate): {
 export function updateNameRule(world: PayeeWorld, id: number, input: PayeeNameRuleUpdate): { rule: PayeeNameRule; changed: number } {
   const before = getRule(world, id)
   const r = checked(payeeNameRuleCreateSchema.parse({ ...before, ...input }))
-  world.meta.sqlite
-    .prepare(
-      `UPDATE payee_name_rules SET kind = ?, match = ?, patterns = ?, name = ?, enabled = ?,
-         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-    )
-    .run(r.kind, r.match, JSON.stringify(r.patterns), r.name, r.enabled ? 1 : 0, id)
+  world.meta.db
+    .update(payeeNameRules)
+    .set({ kind: r.kind, match: r.match, patterns: JSON.stringify(r.patterns), name: r.name, enabled: r.enabled ? 1 : 0, updatedAt: NOW })
+    .where(eq(payeeNameRules.id, id))
+    .run()
   const count = renamed(world)
   return { rule: getRule(world, id), changed: count }
 }
 
 export function deleteNameRule(world: PayeeWorld, id: number): { changed: number } {
   getRule(world, id)
-  world.meta.sqlite.prepare('DELETE FROM payee_name_rules WHERE id = ?').run(id)
+  deleteRow(world.meta, id)
   return { changed: renamed(world) }
 }
 
@@ -118,8 +138,7 @@ export function deleteNameRule(world: PayeeWorld, id: number): { changed: number
 export function orderNameRules(world: PayeeWorld, ids: number[]): { changed: number } {
   const all = loadNameRules(world.meta).map((r) => r.id)
   if (ids.length !== all.length || !all.every((id) => ids.includes(id))) badRequest('List every rule once, in the order they apply.')
-  const set = world.meta.sqlite.prepare('UPDATE payee_name_rules SET sort = ? WHERE id = ?')
-  world.meta.sqlite.transaction(() => ids.forEach((id, i) => set.run(i + 1, id)))()
+  world.meta.db.transaction(() => ids.forEach((id, i) => world.meta.db.update(payeeNameRules).set({ sort: i + 1 }).where(eq(payeeNameRules.id, id)).run()))
   return { changed: renamed(world) }
 }
 
@@ -171,31 +190,31 @@ export function renamePayee(world: PayeeWorld, input: PayeeRename): { rule: Paye
   ]
   /** Its patterns that these wordings fit. */
   const fitting = (r: PayeeNameRuleSpec) => r.patterns.filter((p) => wordings.some((w) => payeeNamer([{ ...r, id: -1, patterns: [p] }])(w).ruleId === -1))
-  const write = world.meta.sqlite.prepare(`UPDATE payee_name_rules SET patterns = ?, name = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
+  const write = (patterns: string[], name: string | null, id: number) => writeRule(world.meta, id, { patterns, name })
   const drop = (r: PayeeNameRuleSpec) => {
     const keep = r.patterns.filter((p) => !fitting(r).includes(p))
-    if (keep.length) write.run(JSON.stringify(keep), r.name, r.id)
-    else world.meta.sqlite.prepare('DELETE FROM payee_name_rules WHERE id = ?').run(r.id)
+    if (keep.length) write(keep, r.name, r.id)
+    else deleteRow(world.meta, r.id)
   }
   const name = input.name?.trim() || null
   let ruleId: number | null = null
-  world.meta.sqlite.transaction(() => {
+  world.meta.db.transaction(() => {
     if (!name) {
       if (own) drop(own)
       return
     }
     const joins = rules.find((r) => r.kind === 'same' && r.id !== own?.id && r.name?.trim().toLowerCase() === name.toLowerCase())
     if (own && !joins) {
-      write.run(JSON.stringify(own.patterns), name, own.id)
+      write(own.patterns, name, own.id)
       ruleId = own.id
     } else if (joins) {
       if (own) drop(own)
-      write.run(JSON.stringify([...new Set([...joins.patterns, ...wordings])]), joins.name, joins.id)
+      write([...new Set([...joins.patterns, ...wordings])], joins.name, joins.id)
       ruleId = joins.id
     } else if (name !== called.name) {
       ruleId = createRow(world.meta, { kind: 'same', match: 'is', patterns: wordings, name, enabled: true })
     }
-  })()
+  })
   const count = renamed(world)
   return { rule: ruleId ? getRule(world, ruleId) : null, changed: count }
 }
@@ -211,36 +230,39 @@ export function nameWordings(world: PayeeWorld, input: PayeeWordingsName): { rul
   const name = input.name?.trim() || null
   /** Whether a rule's pattern names any of them. */
   const names = (r: PayeeNameRuleSpec, pattern: string) => wordings.some((w) => payeeNamer([{ ...r, id: -1, patterns: [pattern], enabled: true }])(w).ruleId === -1)
-  const write = world.meta.sqlite.prepare(`UPDATE payee_name_rules SET patterns = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
+  const write = (patterns: string[], id: number) => writeRule(world.meta, id, { patterns })
   let ruleId: number | null = null
-  world.meta.sqlite.transaction(() => {
+  world.meta.db.transaction(() => {
     for (const r of loadNameRules(world.meta)) {
       if (r.kind !== 'same' || (r.match ?? 'is') !== 'is') continue
       const keep = r.patterns.filter((p) => !names(r, p))
       if (keep.length === r.patterns.length) continue
-      if (keep.length) write.run(JSON.stringify(keep), r.id)
-      else world.meta.sqlite.prepare('DELETE FROM payee_name_rules WHERE id = ?').run(r.id)
+      if (keep.length) write(keep, r.id)
+      else deleteRow(world.meta, r.id)
     }
     if (!name) return
     const joins = loadNameRules(world.meta).find((r) => r.kind === 'same' && r.name?.trim().toLowerCase() === name.toLowerCase())
     if (joins) {
-      write.run(JSON.stringify([...new Set([...joins.patterns, ...wordings])]), joins.id)
+      write([...new Set([...joins.patterns, ...wordings])], joins.id)
       ruleId = joins.id
     } else {
       ruleId = createRow(world.meta, { kind: 'same', match: 'is', patterns: wordings, name, enabled: true })
     }
-  })()
+  })
   const changed = renamed(world)
   return { rule: ruleId ? getRule(world, ruleId) : null, changed }
 }
 
 function createRow(meta: MetaStore, r: RuleInput) {
-  const sort = meta.sqlite.prepare('SELECT coalesce(max(sort), 0) + 1 FROM payee_name_rules').pluck().get() as number
-  return Number(
-    meta.sqlite
-      .prepare('INSERT INTO payee_name_rules (kind, match, patterns, name, enabled, sort) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(r.kind, r.match, JSON.stringify(r.patterns), r.name, r.enabled ? 1 : 0, sort).lastInsertRowid,
-  )
+  const { sort } = meta.db
+    .select({ sort: sql<number>`coalesce(max(${payeeNameRules.sort}), 0) + 1` })
+    .from(payeeNameRules)
+    .get()!
+  return meta.db
+    .insert(payeeNameRules)
+    .values({ kind: r.kind, match: r.match, patterns: JSON.stringify(r.patterns), name: r.name, enabled: r.enabled ? 1 : 0, sort })
+    .returning({ id: payeeNameRules.id })
+    .get().id
 }
 
 /**
@@ -256,9 +278,12 @@ export function followBankPayee(ctx: AppContext, tx: { id: number; payee: string
   if (before.ruleId !== null && name(payee).ruleId !== before.ruleId) keepNamed(ctx.meta, before, payee)
   name = payeeNamerFor(ctx)
   const key = name(payee).key
-  ctx.sqlite
-    .prepare(`UPDATE transactions SET payee = ?, payee_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
-    .run(payee, key, tx.id)
+  ctx.q.run(
+    `UPDATE transactions SET payee = ?, payee_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE ledger_id = @ledger AND id = ?`,
+    payee,
+    key,
+    tx.id,
+  )
   if (key !== tx.payeeKey) {
     carryPayeeOver(ctx, tx.id, tx.payeeKey, key, payee)
     applyPayeeChoices(ctx, [key])
@@ -270,9 +295,7 @@ export function followBankPayee(ctx: AppContext, tx: { id: number; payee: string
 function keepNamed(meta: MetaStore, before: PayeeNaming, payee: string) {
   const rule = loadNameRules(meta).find((r) => r.id === before.ruleId)
   if (rule?.kind !== 'same') return
-  meta.sqlite
-    .prepare(`UPDATE payee_name_rules SET patterns = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
-    .run(JSON.stringify([...new Set([...rule.patterns, payee])]), rule.id)
+  writeRule(meta, rule.id, { patterns: [...new Set([...rule.patterns, payee])] })
   forgetPayeeNamer(meta)
 }
 
@@ -283,24 +306,34 @@ function keepNamed(meta: MetaStore, before: PayeeNaming, payee: string) {
  * transactions are left.
  */
 function carryPayeeOver(ctx: AppContext, id: number, from: string, to: string, payee: string) {
-  const t = ctx.sqlite
-    .prepare('SELECT amount_minor AS amount, category_id AS categoryId, category_source AS source, recurring_item_id AS itemId FROM transactions WHERE id = ?')
-    .get(id) as { amount: number; categoryId: number | null; source: string | null; itemId: number | null }
+  const t = ctx.q.get<{ amount: number; categoryId: number | null; source: string | null; itemId: number | null }>(
+    `SELECT amount_minor AS amount, category_id AS categoryId, category_source AS source, recurring_item_id AS itemId
+     FROM transactions WHERE ledger_id = @ledger AND id = ?`,
+    id,
+  )!
   if (t.source === 'user' && t.categoryId) {
     learn(ctx, from, t.amount, t.categoryId, -1)
     learn(ctx, to, t.amount, t.categoryId)
   }
-  ctx.sqlite.prepare('INSERT OR IGNORE INTO payee_rules (payee_key, mode, category_id) SELECT ?, mode, category_id FROM payee_rules WHERE payee_key = ?').run(to, from)
-  if (!ctx.sqlite.prepare('SELECT 1 FROM transactions WHERE payee_key = ? LIMIT 1').get(from)) {
-    ctx.sqlite.prepare('DELETE FROM payee_rules WHERE payee_key = ?').run(from)
+  ctx.q.run(
+    `INSERT OR IGNORE INTO payee_rules (ledger_id, payee_key, mode, category_id)
+     SELECT r.ledger_id, ?, r.mode, r.category_id FROM payee_rules r WHERE r.ledger_id = @ledger AND r.payee_key = ?`,
+    to,
+    from,
+  )
+  if (!ctx.q.pluck('SELECT 1 FROM transactions WHERE ledger_id = @ledger AND payee_key = ? LIMIT 1', from)) {
+    ctx.q.run('DELETE FROM payee_rules WHERE ledger_id = @ledger AND payee_key = ?', from)
   }
   if (t.itemId) {
-    ctx.sqlite
-      .prepare(
-        `INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name)
-         SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM recurring_items WHERE id = ? AND payee_key = ?)`,
-      )
-      .run(t.itemId, to, payeeNamerFor(ctx)(payee).name, t.itemId, to)
+    ctx.q.run(
+      `INSERT OR IGNORE INTO recurring_payees (item_id, payee_key, name)
+       SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM recurring_items WHERE ledger_id = @ledger AND id = ? AND payee_key = ?)`,
+      t.itemId,
+      to,
+      payeeNamerFor(ctx)(payee).name,
+      t.itemId,
+      to,
+    )
   }
 }
 
@@ -311,16 +344,17 @@ function carryPayeeOver(ctx: AppContext, id: number, from: string, to: string, p
  */
 export function rebuildPayeeKeys(ctx: AppContext): number[] {
   const name = payeeNamerFor(ctx)
-  const rows = ctx.sqlite.prepare('SELECT id, payee, payee_key AS payeeKey FROM transactions').all() as Array<{ id: number; payee: string; payeeKey: string }>
-  const move = ctx.sqlite.prepare(`UPDATE transactions SET payee_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
+  const rows = ctx.q.all<{ id: number; payee: string; payeeKey: string }>('SELECT id, payee, payee_key AS payeeKey FROM transactions WHERE ledger_id = @ledger ORDER BY id')
+  const move = (key: string, id: number) =>
+    ctx.q.run(`UPDATE transactions SET payee_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE ledger_id = @ledger AND id = ?`, key, id)
   const moved: number[] = []
   const into = new Set<string>()
   const pairs = new Map<string, [string, string]>()
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     for (const r of rows) {
       const key = name(r.payee).key
       if (key === r.payeeKey) continue
-      move.run(key, r.id)
+      move(key, r.id)
       carryPayeeOver(ctx, r.id, r.payeeKey, key, r.payee)
       moved.push(r.id)
       into.add(key)
@@ -329,7 +363,7 @@ export function rebuildPayeeKeys(ctx: AppContext): number[] {
     // A payee you always set one way: its new transactions waiting for a category get it.
     if (into.size) applyPayeeChoices(ctx, [...into])
     carryPayeeRefs(ctx, [...pairs.values()])
-  })()
+  })
   return moved
 }
 
@@ -345,7 +379,9 @@ export function keepRuleNames(world: PayeeWorld): number {
   const name = payeeNamerFor(world)
   const added = new Map<number, Set<string>>()
   for (const ctx of world.ledgers()) {
-    const rows = ctx.sqlite.prepare('SELECT DISTINCT payee, payee_key AS payeeKey FROM transactions').all() as Array<{ payee: string; payeeKey: string }>
+    const rows = ctx.q.all<{ payee: string; payeeKey: string }>(
+      'SELECT payee, payee_key AS payeeKey FROM transactions WHERE ledger_id = @ledger GROUP BY payee, payee_key ORDER BY min(id)',
+    )
     for (const r of rows) {
       const rule = rules.find((x) => payeeKey(x.name!) === r.payeeKey)
       if (!rule || name(r.payee).ruleId === rule.id) continue
@@ -354,14 +390,13 @@ export function keepRuleNames(world: PayeeWorld): number {
       added.set(rule.id, set)
     }
   }
-  const write = world.meta.sqlite.prepare(`UPDATE payee_name_rules SET patterns = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`)
   let n = 0
-  world.meta.sqlite.transaction(() => {
+  world.meta.db.transaction(() => {
     for (const [id, set] of added) {
       n += set.size - rules.find((r) => r.id === id)!.patterns.length
-      write.run(JSON.stringify([...set]), id)
+      writeRule(world.meta, id, { patterns: [...set] })
     }
-  })()
+  })
   if (n) forgetPayeeNamer(world.meta)
   return n
 }

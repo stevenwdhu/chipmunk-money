@@ -1,27 +1,71 @@
+import { purgeIdempotencyKeys } from './api/idempotency'
+import { dailyUpkeep } from './db/client'
+import { LedgerScopeError } from './db/scope'
 import type { BankService } from './services/bank/service'
+import type { AppContext } from './services/context'
 import { detectRecurring } from './services/recurring'
-import { today } from './services/settings'
+import { setAppSetting, today } from './services/settings'
 import { purgeDeleted } from './services/transactions'
 import type { Storage } from './storage'
+
+/** Where the last daily run that a query refused (a missing ledger pin) is kept, for App settings. */
+export const LAST_JOB_ERROR = 'jobs.lastError'
+
+/** One ledger's daily maintenance: what it says it did, for the log. */
+export type DailyTask = (ctx: AppContext) => string | null
+
+/** Suggests new recurring items, then deletes what's been in the trash for 30 days. */
+export const DAILY_TASKS: DailyTask[] = [
+  (ctx) => {
+    const { created } = detectRecurring(ctx)
+    return created ? `${created} new recurring suggestion(s)` : null
+  },
+  (ctx) => {
+    purgeDeleted(ctx)
+    return null
+  },
+]
+
+/**
+ * Runs the daily maintenance for every active ledger, each in its own transaction: a ledger whose
+ * run fails keeps none of it, and the others still run. Then the database's own upkeep (its query
+ * planner's statistics, and freed pages back to the disk). Returns the ledgers that failed.
+ */
+export function runDailyJobs(storage: Storage, tasks: DailyTask[] = DAILY_TASKS): string[] {
+  const failed: string[] = []
+  for (const ledger of storage.registry.list().filter((l) => !l.archived)) {
+    try {
+      const ctx = storage.registry.context(ledger.id)
+      const said = ctx.q.transaction(() => tasks.map((task) => task(ctx)))
+      for (const line of said) if (line) console.log(`[jobs] ${ledger.name}: ${line}`)
+    } catch (err) {
+      failed.push(ledger.id)
+      console.error(`[jobs] daily maintenance failed for ${ledger.name}`, err)
+      // A query refused for a missing ledger pin fails closed: kept where App settings can show it,
+      // so it doesn't hide in the logs.
+      if (err instanceof LedgerScopeError) {
+        setAppSetting(storage.app, LAST_JOB_ERROR, { at: storage.now().toISOString(), ledger: ledger.name, message: err.message })
+      }
+    }
+  }
+  try {
+    dailyUpkeep(storage.sqlite)
+  } catch (err) {
+    console.error('[jobs] database upkeep failed', err)
+  }
+  return failed
+}
 
 /** Runs daily maintenance for every active ledger, once per local day (in the app's time zone). */
 export function startJobs(storage: Storage) {
   let lastRun: string | null = null
   const run = () => {
-    const day = today({ meta: storage.meta, now: storage.now })
+    const day = today({ meta: storage.app, now: storage.now })
     if (day === lastRun) return
-    const active = storage.registry.list().filter((l) => !l.archived)
+    runDailyJobs(storage)
+    purgeIdempotencyKeys(storage.app, storage.now())
+    // Only once it ran: when listing the ledgers failed, it's tried again on the next tick.
     lastRun = day
-    for (const ledger of active) {
-      try {
-        const ctx = storage.registry.context(ledger.id)
-        const { created } = detectRecurring(ctx)
-        purgeDeleted(ctx)
-        if (created) console.log(`[jobs] ${ledger.name}: ${created} new recurring suggestion(s)`)
-      } catch (err) {
-        console.error(`[jobs] daily maintenance failed for ${ledger.name}`, err)
-      }
-    }
   }
   // A failure is logged and tried again on the next tick; it never takes the server down.
   const tick = () => {

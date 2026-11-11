@@ -1,15 +1,14 @@
 import path from 'node:path'
 import { asc, eq } from 'drizzle-orm'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { zipSync } from 'fflate'
 import { HTTPException } from 'hono/http-exception'
 import type { Ledger, LedgerUpdate } from '@chipmunk/shared'
 import { CATEGORY_COLORS } from '@chipmunk/shared'
 import type { LlmCategorizer } from './ai/types'
-import { DB_FILE, openDatabase, type DB, type SQLite } from './db/client'
-import * as schema from './db/schema'
+import { DB_FILE, openDatabase, type SQLite } from './db/client'
 import { ledgers } from './db/schema'
-import { allLedgers, appOnlyConnection, ledgerMaintenance, LedgerQuery, scopedConnection } from './db/scope'
+import { allLedgers, appDatabase, ledgerMaintenance, LedgerQuery, type UnscopedQuery } from './db/scope'
+import { databaseCopy, reclaimSpace, saveLedgerExport } from './db/ledger-backup'
 import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
 import { seedCatalog } from './services/catalog'
@@ -18,6 +17,14 @@ import { SecretBox } from './lib/secrets'
 import type { AppContext, AppStore } from './services/context'
 import { getAppSetting, sealStoredSecrets, setAppSetting, today } from './services/settings'
 
+/**
+ * Storage is chipmunk.db and what the app keeps beside it in the data directory (secret.key, and
+ * backups/ for the safety copies). Ledgers are rows in `ledgers`, and their data is in the same
+ * tables as every other ledger's, so a ledger's context is cheap: its handle (ctx.q) is pinned to
+ * its rows, and ctx.app reaches the app-wide tables. Deleting a ledger deletes its rows
+ * (deleteLedgerRows), after saving its backup.
+ */
+
 type LedgerRow = typeof ledgers.$inferSelect
 
 export interface Storage {
@@ -25,8 +32,6 @@ export interface Storage {
   sqlite: SQLite
   /** The app-wide tables. */
   app: AppStore
-  /** @deprecated The same object as `app`, under its older name. */
-  meta: AppStore
   registry: LedgerRegistry
   now: () => Date
   /** data/ directory, or null when everything is in memory (tests). */
@@ -36,7 +41,7 @@ export interface Storage {
   /** For talking to bank-data providers; replaceable in tests. */
   fetch: typeof fetch
   /** Runs fn with every ledger in scope and no pin checker; each call site is listed in db/unscoped-sites.ts. */
-  allLedgers<T>(reason: UnscopedReason, fn: (sqlite: SQLite) => T): T
+  allLedgers<T>(reason: UnscopedReason, fn: (db: UnscopedQuery) => T): T
   /** Closes the database (which checkpoints the WAL). */
   close(): void
 }
@@ -48,9 +53,6 @@ const DEFAULT_LEDGER_KEY = 'defaultLedger'
  * the shared connection.
  */
 export class LedgerRegistry {
-  /** The deprecated raw handles of each ledger's contexts, made once (drizzle's setup isn't free). */
-  private raw = new Map<string, { sqlite: SQLite; db: DB }>()
-
   constructor(
     private sqlite: SQLite,
     private app: AppStore,
@@ -85,18 +87,10 @@ export class LedgerRegistry {
 
   context(idOrSlug: string): AppContext {
     const row = this.get(idOrSlug)
-    let raw = this.raw.get(row.id)
-    if (!raw) {
-      const sqlite = scopedConnection(this.sqlite, row.id)
-      raw = { sqlite, db: drizzle(sqlite, { schema }) }
-      this.raw.set(row.id, raw)
-    }
     return {
       q: new LedgerQuery(this.sqlite, row.id),
       app: this.app,
       meta: this.app,
-      db: raw.db,
-      sqlite: raw.sqlite,
       ledger: { id: row.id, name: row.name, slug: row.slug },
       now: this.now,
       llm: this.llm,
@@ -136,8 +130,8 @@ export class LedgerRegistry {
   list(): Ledger[] {
     const rows = this.rows()
     const defaultId = rows.length ? this.defaultOf(rows).id : ''
-    const counts = allLedgers(this.sqlite, 'ledger counts', (sqlite) => {
-      const count = (sql: string) => new Map((sqlite.prepare(sql).all() as Array<{ id: string; n: number }>).map((r) => [r.id, r.n]))
+    const counts = allLedgers(this.sqlite, 'ledger counts', (db) => {
+      const count = (sql: string) => new Map(db.all<{ id: string; n: number }>(sql).map((r) => [r.id, r.n]))
       return {
         accounts: count('SELECT ledger_id AS id, count(*) AS n FROM ledger_accounts GROUP BY ledger_id'),
         transactions: count('SELECT ledger_id AS id, count(*) AS n FROM transactions WHERE deleted_at IS NULL GROUP BY ledger_id'),
@@ -205,17 +199,16 @@ export class LedgerRegistry {
   }
 
   /**
-   * Deletes a ledger and all its data. Bank accounts linked to its accounts are unlinked (their
-   * foreign key). Then the freed pages go back to the disk.
+   * Deletes a ledger and all its data, after saving its backup as data/backups/deleted-<slug>-<time>.db
+   * (restorable into a ledger from Settings → Data). Bank accounts linked to its accounts are
+   * unlinked (their foreign key). Then the freed pages go back to the disk.
    */
   remove(idOrSlug: string): { backup: string | null } {
     const row = this.get(idOrSlug)
     if (this.rows().length === 1) {
       throw new HTTPException(409, { message: "You can't delete your only ledger. Erase its data instead." })
     }
-    // TODO(Stage C): first export the ledger to backups/deleted-<slug>-<time>.db, restorable from
-    // the UI, and return its name as `backup`.
-    const backup: string | null = null
+    const backup = saveLedgerExport(this.sqlite, row.id, `deleted-${row.slug}`)
     ledgerMaintenance(this.sqlite, row.id, () =>
       this.sqlite.transaction(() => {
         deleteLedgerRows(this.sqlite, row.id)
@@ -223,10 +216,8 @@ export class LedgerRegistry {
         if (getAppSetting(this.app, DEFAULT_LEDGER_KEY, null) === row.id) setAppSetting(this.app, DEFAULT_LEDGER_KEY, null)
       })(),
     )
-    this.raw.delete(row.id)
-    this.sqlite.pragma('incremental_vacuum')
-    if (!this.sqlite.memory) this.sqlite.pragma('wal_checkpoint(TRUNCATE)')
-    return { backup }
+    reclaimSpace(this.sqlite)
+    return { backup: backup ? path.basename(backup) : null }
   }
 
   /** Whether there's any ledger yet. */
@@ -235,15 +226,21 @@ export class LedgerRegistry {
   }
 }
 
-/** A zip of the whole database, plus a manifest, for moving to another machine. */
+/**
+ * A zip of the whole database (every ledger and the app-wide tables), plus a manifest, for moving
+ * to another machine. secret.key isn't in it: without that file the bank access and AI keys in the
+ * database can't be read, so it's copied separately.
+ */
 export function fullBackup(storage: Storage): { bytes: Uint8Array; fileName: string } {
   const rows = storage.app.db.select().from(ledgers).all()
-  const files: Record<string, Uint8Array> = { [DB_FILE]: storage.allLedgers('full backup', (sqlite) => sqlite.serialize()) }
+  const files: Record<string, Uint8Array> = { [DB_FILE]: allLedgers(storage.sqlite, 'full backup', () => databaseCopy(storage.sqlite)) }
   const manifest = {
     app: 'chipmunk',
+    format: 2,
     createdAt: storage.now().toISOString(),
     ledgers: rows.map((r) => ({ id: r.id, name: r.name, slug: r.slug })),
-    restore: `Stop the server, then unzip ${DB_FILE} into the data directory.`,
+    restore: `Stop the server, remove ${DB_FILE}-wal and ${DB_FILE}-shm from the data directory if they are there, then unzip ${DB_FILE} into it.`,
+    secretKey: `secret.key isn't in this zip. Copy it from the old data directory into the new one as well, or bank access and AI provider keys stop working.`,
   }
   files['manifest.json'] = new TextEncoder().encode(JSON.stringify(manifest, null, 2))
   const date = today({ meta: storage.app, now: storage.now })
@@ -261,17 +258,16 @@ export function openStorage(opts: {
   const fetcher: typeof fetch = opts.fetch ?? ((input, init) => globalThis.fetch(input, init))
   const { sqlite } = openDatabase(opts.dataDir ? path.join(opts.dataDir, DB_FILE) : null)
   const secrets = SecretBox.forDataDir(opts.dataDir)
-  const app: AppStore = { db: drizzle(appOnlyConnection(sqlite), { schema }), sqlite, secrets, fetch: fetcher }
+  const app: AppStore = { db: appDatabase(sqlite), secrets, fetch: fetcher }
   // Keys saved before they were encrypted get encrypted now.
   sealStoredSecrets(app)
   // The shared category list starts from the defaults.
-  allLedgers(sqlite, 'seed the shared category list', () => seedCatalog(app))
+  allLedgers(sqlite, 'seed the shared category list', (db) => seedCatalog(db))
   const registry = new LedgerRegistry(sqlite, app, now, opts.llm)
   if (!registry.hasLedgers()) registry.create({ name: 'Personal' })
   return {
     sqlite,
     app,
-    meta: app,
     registry,
     now,
     dataDir: opts.dataDir,

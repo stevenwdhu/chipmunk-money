@@ -397,6 +397,7 @@ This is a pure function, `remapJson(kind, value, maps)`, that walks the raw JSON
 - Daily jobs: the same loop over active ledgers, each ledger's `detectRecurring` and `purgeDeleted` in its own transaction. Then once a day `PRAGMA optimize`, `PRAGMA incremental_vacuum(2000)` and the idempotency purge.
   - Today `jobs.ts` only logs errors. A `LedgerScopeError` also goes into an app-level "last job error" setting, shown in App settings, so a fail-closed query doesn't hide in the logs.
 - Demo seed: it counts data by ledger, clears with `deleteLedgerRows(keep: ledger_settings, activity)`, and drops the `sqlite_sequence` reset. Its `--force` snapshot becomes a ledger export.
+  - A deliberate change: the demo's "Everyday spending" report is no longer always id 1. Loaded again after an erase, it takes the next free id, because ids are global and the sequence can't go back (setup.test.ts covers it).
 
 ### 2.6 Backups, restore, erase
 
@@ -421,13 +422,13 @@ This is a pure function, `remapJson(kind, value, maps)`, that walks the raw JSON
 3. Snapshot, if the ledger has data: a ledger export.
 4. `ATTACH`, while not in a transaction. Then one transaction under scope `[ledgerId]`, with `defer_foreign_keys=ON`:
    - `deleteLedgerRows(ledgerId, keep: activity)`. Restore keeps the activity log and ledger settings except `setup.completed`, as today.
-   - Id plan: **identity** when none of the backup's ids is used by another ledger (the usual case, restoring your own backup). Otherwise offsets above the global maximum, with the JSON remap from §2.3.
+   - Id plan, table by table: **identity** when none of the backup's ids is used by another ledger and every id it has or names is one this database has handed out (no more than its `sqlite_sequence`): the usual case, restoring your own backup. Otherwise its ids, and the ids it only names (a deleted tag a report names), are numbered again in order from past the table's largest id here, with the JSON remap from §2.3. The file's `sqlite_sequence` is never read, and ids outside 1 to `Number.MAX_SAFE_INTEGER` are refused, so a backup (from a key limited to one ledger, say) can't decide where every ledger's ids continue.
    - Insert in `tables.ts` order with `transaction_links` before `transactions`, so the triggers touch nothing. This fixes today's renamed-refund bug.
    - Categories:
-     - Token matches: the ids are the shared list's ids, and the off state goes to `ledger_category_off`.
+     - Token matches: the ids are the shared list's ids, and the off state goes to `ledger_category_off`. A shared category deleted since the backup is gone from the restore too: its transactions and recurring items come in uncategorized, its other rows don't come in, and the list stays as it is. A renamed one keeps its transactions.
      - Token differs: the name-matching path from §2.7, writing shared rows with `ledger_id NULL`.
      - Own-mode backup: own rows with new ids where ids collide, and `ledgers.category_list = 'own'`.
-   - Raise `sqlite_sequence`. A `foreign_key_check` filtered to this ledger's tables runs, and the deferred FK check runs at commit.
+   - Raise `sqlite_sequence` of a renumbered table past the ids it only names. A `foreign_key_check` filtered to this ledger's tables runs, and the deferred FK check runs at commit.
 5. `DETACH`. Afterwards, as today unless options say otherwise: clear the ledger's bank links (restore only), then `complete()`.
 
 **Erase**: an export snapshot, then `deleteLedgerRows(keep: ledger_settings, activity)`, delete `setup.completed`, delete the ledger's `ledger_category_off` rows (every shared category is on again), and run `incremental_vacuum`. Bank links clear through the FK, with foreign keys on.

@@ -40,7 +40,12 @@ import { getTransactions, transactionSpan } from './transactions'
  *    with a line per link, not `transactions`. Counts are of transactions, not lines. Linked to an
  *    uncategorized purchase, it lowers that spending: it isn't income.
  */
-const FROM = `FROM transaction_lines t LEFT JOIN categories c ON c.id = t.category_id LEFT JOIN category_groups g ON g.id = c.group_id`
+const FROM = `FROM transaction_lines t
+  LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+  LEFT JOIN ledger_category_groups g ON g.id = c.group_id AND g.ledger_id = t.ledger_id`
+
+/** The ledger's lines: every report query's first condition (the ledger handle binds @ledger). */
+const PIN = 't.ledger_id = @ledger'
 
 /** Uncategorized money, and categories without a group (which have no colour). */
 const UNCATEGORIZED = { name: 'Uncategorized', color: UNGROUPED_COLOR }
@@ -50,30 +55,32 @@ type Filter = ReportFilter | null | undefined
 
 function totals(ctx: AppContext, from: ISODate, to: ISODate, filter?: Filter) {
   const s = reportScope(filter)
-  return ctx.sqlite
-    .prepare(
-      `SELECT
-         coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spent,
-         coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS income,
-         count(DISTINCT t.id) AS n,
-         count(DISTINCT CASE WHEN t.category_id IS NULL THEN t.id END) AS uncategorized
-       ${FROM}${s.join} WHERE ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}`,
-    )
-    .get(from, to, s.params) as { spent: number; income: number; n: number; uncategorized: number }
+  return ctx.q.get<{ spent: number; income: number; n: number; uncategorized: number }>(
+    `SELECT
+       coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spent,
+       coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS income,
+       count(DISTINCT t.id) AS n,
+       count(DISTINCT CASE WHEN t.category_id IS NULL THEN t.id END) AS uncategorized
+     ${FROM}${s.join} WHERE ${PIN} AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}`,
+    from,
+    to,
+    s.params,
+  )!
 }
 
 export function byCategory(ctx: AppContext, from: ISODate, to: ISODate, kind: 'expense' | 'income' = 'expense', filter?: Filter): CategoryAmount[] {
   const side = kind === 'expense' ? IS_SPENDING : IS_INCOME
   const sign = kind === 'expense' ? '-' : ''
   const s = reportScope(filter)
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT t.category_id AS categoryId, c.name, g.color, c.group_id AS groupId, g.name AS groupName,
-         sum(${sign}t.amount_minor) AS amountMinor, count(DISTINCT t.id) AS count
-       ${FROM}${s.join} WHERE ${COUNTABLE} AND ${side} AND t.date BETWEEN ? AND ?${s.where}
-       GROUP BY t.category_id ORDER BY amountMinor DESC`,
-    )
-    .all(from, to, s.params) as Array<CategoryAmount & { name: string | null; color: string | null }>
+  const rows = ctx.q.all<CategoryAmount & { name: string | null; color: string | null }>(
+    `SELECT t.category_id AS categoryId, c.name, g.color, c.group_id AS groupId, g.name AS groupName,
+       sum(${sign}t.amount_minor) AS amountMinor, count(DISTINCT t.id) AS count
+     ${FROM}${s.join} WHERE ${PIN} AND ${COUNTABLE} AND ${side} AND t.date BETWEEN ? AND ?${s.where}
+     GROUP BY t.category_id ORDER BY amountMinor DESC`,
+    from,
+    to,
+    s.params,
+  )
   return rows.map((r) => ({
     ...r,
     name: r.name ?? UNCATEGORIZED.name,
@@ -88,9 +95,7 @@ export function monthSummary(ctx: AppContext, month: MonthKey): MonthSummary {
   const avgFrom = monthRange(addMonths(month, -3)).from
   const avgTo = monthRange(addMonths(month, -1)).to
   const avg = totals(ctx, avgFrom, avgTo)
-  const needsReview = ctx.sqlite
-    .prepare('SELECT count(*) AS n FROM transactions WHERE needs_review = 1 AND deleted_at IS NULL')
-    .get() as { n: number }
+  const needsReview = ctx.q.get<{ n: number }>('SELECT count(*) AS n FROM transactions WHERE ledger_id = @ledger AND needs_review = 1 AND deleted_at IS NULL')!
   return {
     month,
     from,
@@ -123,7 +128,7 @@ export function periodSummary(ctx: AppContext, from?: ISODate, to?: ISODate, fil
   const sums = totals(ctx, start, end, filter)
 
   const groupOrder = new Map(
-    (ctx.sqlite.prepare('SELECT id, sort FROM category_groups').all() as Array<{ id: number; sort: number }>).map((g) => [g.id, g.sort]),
+    ctx.q.all<{ id: number; sort: number }>('SELECT id, sort FROM ledger_category_groups WHERE ledger_id = @ledger').map((g) => [g.id, g.sort]),
   )
   const groups = new Map<number | null, PeriodSummary['expenses'][number]>()
   for (const c of byCategory(ctx, start, end, 'expense', filter)) {
@@ -134,42 +139,46 @@ export function periodSummary(ctx: AppContext, from?: ISODate, to?: ISODate, fil
   }
   const rank = (id: number | null) => (id === null ? Number.MAX_SAFE_INTEGER : (groupOrder.get(id) ?? 0))
 
-  const excluded = (
-    ctx.sqlite
-      .prepare(
-        `SELECT t.category_id AS categoryId, c.name, g.color, c.group_id AS groupId, g.name AS groupName,
-           sum(t.amount_minor) AS amountMinor, count(DISTINCT t.id) AS count
-         ${FROM} WHERE t.deleted_at IS NULL AND (t.transfer_pair_id IS NOT NULL OR c.exclude_from_totals = 1)
-           AND t.date BETWEEN ? AND ?
-         GROUP BY t.category_id ORDER BY abs(sum(t.amount_minor)) DESC`,
-      )
-      .all(start, end) as Array<CategoryAmount & { name: string | null; color: string | null }>
-  ).map((r) => ({ ...r, name: r.name ?? 'Transfer', color: r.color ?? '#9ca3af' }))
+  const excluded = ctx.q
+    .all<CategoryAmount & { name: string | null; color: string | null }>(
+      `SELECT t.category_id AS categoryId, c.name, g.color, c.group_id AS groupId, g.name AS groupName,
+         sum(t.amount_minor) AS amountMinor, count(DISTINCT t.id) AS count
+       ${FROM} WHERE ${PIN} AND t.deleted_at IS NULL AND (t.transfer_pair_id IS NOT NULL OR c.exclude_from_totals = 1)
+         AND t.date BETWEEN ? AND ?
+       GROUP BY t.category_id ORDER BY abs(sum(t.amount_minor)) DESC`,
+      start,
+      end,
+    )
+    .map((r) => ({ ...r, name: r.name ?? 'Transfer', color: r.color ?? '#9ca3af' }))
 
   // The same money by your category labels (a category with several labels counts under each).
-  const byLabel = ctx.sqlite
-    .prepare(
-      `SELECT cl.label_id AS labelId,
-         coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spentMinor,
-         coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS incomeMinor
-       FROM category_labels cl JOIN transaction_lines t ON t.category_id = cl.category_id JOIN categories c ON c.id = t.category_id${s.join}
-       WHERE ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
-       GROUP BY cl.label_id`,
-    )
-    .all(start, end, s.params) as Array<{ labelId: number; spentMinor: number; incomeMinor: number }>
+  const byLabel = ctx.q.all<{ labelId: number; spentMinor: number; incomeMinor: number }>(
+    `SELECT cl.label_id AS labelId,
+       coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spentMinor,
+       coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS incomeMinor
+     FROM transaction_lines t
+       JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+       JOIN category_labels cl ON cl.category_id = c.id${s.join}
+     WHERE ${PIN} AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
+     GROUP BY cl.label_id`,
+    start,
+    end,
+    s.params,
+  )
   const labelItems = listLabels(ctx)
     .filter((l) => l.categoryCount > 0)
     .map((l) => {
       const sums = byLabel.find((r) => r.labelId === l.id)
       return { labelId: l.id, name: l.name, color: l.color, spentMinor: sums?.spentMinor ?? 0, incomeMinor: sums?.incomeMinor ?? 0 }
     })
-  const unlabelled = ctx.sqlite
-    .prepare(
-      `SELECT coalesce(sum(-t.amount_minor), 0) AS spent ${FROM}${s.join}
-       WHERE ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ?${s.where}
-         AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = t.category_id)`,
-    )
-    .get(start, end, s.params) as { spent: number }
+  const unlabelled = ctx.q.get<{ spent: number }>(
+    `SELECT coalesce(sum(-t.amount_minor), 0) AS spent ${FROM}${s.join}
+     WHERE ${PIN} AND ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ?${s.where}
+       AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = c.id)`,
+    start,
+    end,
+    s.params,
+  )!
 
   return {
     from: start,
@@ -208,9 +217,12 @@ function filteredOut(ctx: AppContext, from: ISODate, to: ISODate, f: CompiledFil
     ...s.rules.map((r, i) => part(`(${s.only}) AND (${r})${notKept}`, `rule${i}`)),
     part(s.picked ? `(${s.only}) AND ${s.picked}${notKept}` : '0', 'picked'),
   ]
-  const row = ctx.sqlite
-    .prepare(`SELECT ${parts.join(',\n')} ${FROM}${f.join} WHERE ${COUNTABLE} AND ${side === 'spending' ? IS_SPENDING : IS_INCOME} AND t.date BETWEEN ? AND ?`)
-    .get(from, to, f.params) as Record<string, number>
+  const row = ctx.q.get<Record<string, number>>(
+    `SELECT ${parts.join(',\n')} ${FROM}${f.join} WHERE ${PIN} AND ${COUNTABLE} AND ${side === 'spending' ? IS_SPENDING : IS_INCOME} AND t.date BETWEEN ? AND ?`,
+    from,
+    to,
+    f.params,
+  )!
   const of = (as: string) => ({ amountMinor: row[`${as}_amount`]!, count: row[`${as}_count`]! })
   return { ...of('total'), byRule: s.rules.map((_, i) => of(`rule${i}`)), picked: of('picked') }
 }
@@ -223,27 +235,29 @@ export function trend(ctx: AppContext, endMonth: MonthKey, count: number, groupB
   const keyExpr = groupBy === 'group' ? `coalesce('g' || c.group_id, 'none')` : `coalesce('c' || t.category_id, 'none')`
   const nameExpr = groupBy === 'group' ? 'g.name' : 'c.name'
   // Groups have their colour; categories get chart colours below.
-  const colorExpr = '(SELECT g2.color FROM category_groups g2 WHERE g2.id = c.group_id)'
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT substr(t.date, 1, 7) AS month,
-         CASE WHEN ${IS_SPENDING} THEN ${keyExpr} ELSE NULL END AS key,
-         max(${nameExpr}) AS name, max(${colorExpr}) AS color,
-         sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END) AS spent,
-         sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END) AS income
-       ${FROM}${s.join} WHERE ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
-       GROUP BY month, key`,
-    )
-    .all(from, to, s.params) as Array<{ month: string; key: string | null; name: string | null; color: string | null; spent: number; income: number }>
+  const colorExpr = '(SELECT g2.color FROM ledger_category_groups g2 WHERE g2.ledger_id = @ledger AND g2.id = c.group_id)'
+  const rows = ctx.q.all<{ month: string; key: string | null; name: string | null; color: string | null; spent: number; income: number }>(
+    `SELECT substr(t.date, 1, 7) AS month,
+       CASE WHEN ${IS_SPENDING} THEN ${keyExpr} ELSE NULL END AS key,
+       max(${nameExpr}) AS name, max(${colorExpr}) AS color,
+       sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END) AS spent,
+       sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END) AS income
+     ${FROM}${s.join} WHERE ${PIN} AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
+     GROUP BY month, key`,
+    from,
+    to,
+    s.params,
+  )
   // The spending each month filters out.
   const out = s.compiled?.sides.spending
-    ? (ctx.sqlite
-        .prepare(
-          `SELECT substr(t.date, 1, 7) AS month, sum(-t.amount_minor) AS spent ${FROM}${s.join}
-           WHERE ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ? AND ${s.compiled.sides.spending.filtered}
-           GROUP BY month`,
-        )
-        .all(from, to, s.params) as Array<{ month: string; spent: number }>)
+    ? ctx.q.all<{ month: string; spent: number }>(
+        `SELECT substr(t.date, 1, 7) AS month, sum(-t.amount_minor) AS spent ${FROM}${s.join}
+         WHERE ${PIN} AND ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ? AND ${s.compiled.sides.spending.filtered}
+         GROUP BY month`,
+        from,
+        to,
+        s.params,
+      )
     : []
 
   const points = months.map((m) => ({
@@ -282,17 +296,19 @@ export function trend(ctx: AppContext, endMonth: MonthKey, count: number, groupB
 /** Spending by payee: each purchase's, less its refunds and paybacks (a friend's payback lowers the restaurant's, not their own). */
 export function topPayees(ctx: AppContext, from: ISODate, to: ISODate, limit = 15, filter?: Filter): PayeeTotal[] {
   const s = reportScope(filter)
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT o.payee_key AS payeeKey,
-         (SELECT t2.payee FROM transactions t2 WHERE t2.payee_key = o.payee_key ORDER BY t2.date DESC LIMIT 1) AS payee,
-         sum(-t.amount_minor) AS amountMinor, count(DISTINCT t.owner_id) AS count,
-         (SELECT t3.category_id FROM transactions t3 WHERE t3.payee_key = o.payee_key AND t3.category_id IS NOT NULL
-            GROUP BY t3.category_id ORDER BY count(*) DESC LIMIT 1) AS categoryId
-       ${FROM} ${OWNER_JOIN} WHERE ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ?${s.where}
-       GROUP BY o.payee_key HAVING amountMinor > 0 ORDER BY amountMinor DESC LIMIT ?`,
-    )
-    .all(from, to, limit, s.params) as PayeeTotal[]
+  const rows = ctx.q.all<PayeeTotal>(
+    `SELECT o.payee_key AS payeeKey,
+       (SELECT t2.payee FROM transactions t2 WHERE t2.ledger_id = @ledger AND t2.payee_key = o.payee_key ORDER BY t2.date DESC LIMIT 1) AS payee,
+       sum(-t.amount_minor) AS amountMinor, count(DISTINCT t.owner_id) AS count,
+       (SELECT t3.category_id FROM transactions t3 WHERE t3.ledger_id = @ledger AND t3.payee_key = o.payee_key AND t3.category_id IS NOT NULL
+          GROUP BY t3.category_id ORDER BY count(*) DESC LIMIT 1) AS categoryId
+     ${FROM} ${OWNER_JOIN} WHERE ${PIN} AND ${COUNTABLE} AND ${IS_SPENDING} AND t.date BETWEEN ? AND ?${s.where}
+     GROUP BY o.payee_key HAVING amountMinor > 0 ORDER BY amountMinor DESC LIMIT ?`,
+    from,
+    to,
+    limit,
+    s.params,
+  )
   // As the payee name rules call it.
   return rows.map((r) => ({ ...r, payee: payeeNameOf(ctx, r.payee).name }))
 }
@@ -300,21 +316,22 @@ export function topPayees(ctx: AppContext, from: ISODate, to: ISODate, limit = 1
 /** Spending and income by the tags of each purchase (or deposit): a purchase's less its refunds and paybacks. */
 export function tagTotals(ctx: AppContext, from: ISODate, to: ISODate, filter?: Filter) {
   const s = reportScope(filter)
-  return ctx.sqlite
-    .prepare(
-      `SELECT tg.id AS tagId, tg.name, tg.color,
-         coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spentMinor,
-         coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS incomeMinor,
-         count(DISTINCT t.owner_id) AS count
-       FROM transaction_lines t
-       ${OWNER_JOIN}
-       JOIN transaction_tags tt ON tt.transaction_id = o.id
-       JOIN tags tg ON tg.id = tt.tag_id
-       LEFT JOIN categories c ON c.id = t.category_id
-       WHERE ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
-       GROUP BY tg.id ORDER BY spentMinor DESC`,
-    )
-    .all(from, to, s.params) as Array<{ tagId: number; name: string; color: string | null; spentMinor: number; incomeMinor: number; count: number }>
+  return ctx.q.all<{ tagId: number; name: string; color: string | null; spentMinor: number; incomeMinor: number; count: number }>(
+    `SELECT tg.id AS tagId, tg.name, tg.color,
+       coalesce(sum(CASE WHEN ${IS_SPENDING} THEN -t.amount_minor ELSE 0 END), 0) AS spentMinor,
+       coalesce(sum(CASE WHEN ${IS_INCOME} THEN t.amount_minor ELSE 0 END), 0) AS incomeMinor,
+       count(DISTINCT t.owner_id) AS count
+     FROM transaction_lines t
+     ${OWNER_JOIN}
+     JOIN transaction_tags tt ON tt.transaction_id = o.id
+     JOIN tags tg ON tg.id = tt.tag_id AND tg.ledger_id = t.ledger_id
+     LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+     WHERE ${PIN} AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${s.where}
+     GROUP BY tg.id ORDER BY spentMinor DESC`,
+    from,
+    to,
+    s.params,
+  )
 }
 
 /**
@@ -342,9 +359,9 @@ export function purchases(
   const sql = `SELECT t.owner_id AS id, sum(${sign}t.amount_minor) AS inRange, ${shareOf(side)} AS share,
        ${[...rules, `max(${s?.picked ?? '0'}) AS picked`, `max(${s?.keep ?? '0'}) AS kept`].join(', ')}
      ${FROM} ${OWNER_JOIN}
-     WHERE ${COUNTABLE} AND ${side === 'spending' ? IS_SPENDING : IS_INCOME} AND t.date BETWEEN ? AND ? AND ${lines}
+     WHERE ${PIN} AND ${COUNTABLE} AND ${side === 'spending' ? IS_SPENDING : IS_INCOME} AND t.date BETWEEN ? AND ? AND ${lines}
      GROUP BY t.owner_id ${own}`
-  const all = ctx.sqlite.prepare(sql).all(q.from, q.to, params) as Array<Record<string, number>>
+  const all = ctx.q.all<Record<string, number>>(sql, q.from, q.to, params)
   const ranked = all.sort((a, b) => (set === 'counted' ? b.share! - a.share! : b.inRange! - a.inRange!) || b.id! - a.id!)
   const page = ranked.slice(0, limit)
   const txs = new Map(getTransactions(ctx, page.map((r) => r.id!)).map((t) => [t.id, t]))
@@ -366,12 +383,9 @@ export function netWorth(ctx: AppContext, months = 12): NetWorthReport {
   const endMonth = monthOf(t)
   const dates = monthsBetween(addMonths(endMonth, -(months - 1)), addMonths(endMonth, -1)).map((m) => monthRange(m).to)
   dates.push(t)
-  const accs = ctx.sqlite.prepare('SELECT id, name, type, archived_at AS archivedAt FROM accounts ORDER BY sort, id').all() as Array<{
-    id: number
-    name: string
-    type: AccountType
-    archivedAt: string | null
-  }>
+  const accs = ctx.q.all<{ id: number; name: string; type: AccountType; archivedAt: string | null }>(
+    'SELECT id, name, type, archived_at AS archivedAt FROM ledger_accounts WHERE ledger_id = @ledger ORDER BY sort, id',
+  )
   const balances = balancesAt(ctx, dates)
   const value = (a: (typeof accs)[number], i: number) => balances.get(a.id)?.[i] ?? 0
   const points = dates.map((date, i) => {
@@ -414,17 +428,19 @@ export function incomeVsExpense(ctx: AppContext, endMonth: MonthKey, count: numb
  */
 export function exportRows(ctx: AppContext, from?: ISODate, to?: ISODate, filter?: Filter) {
   const scope = listScope(filter, {})
-  return ctx.sqlite
-    .prepare(
-      `SELECT t.date, a.name AS account, t.payee, t.amount_minor AS amountMinor, t.currency, c.name AS category,
-         g.name AS categoryGroup, t.notes, t.status,
-         (SELECT group_concat(tg.name, ' ') FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id) AS tags
-       FROM transactions t
-       JOIN accounts a ON a.id = t.account_id
-       LEFT JOIN categories c ON c.id = t.category_id
-       LEFT JOIN category_groups g ON g.id = c.group_id
-       WHERE t.deleted_at IS NULL AND t.date BETWEEN ? AND ?${scope ? ` AND ${scope.sql}` : ''}
-       ORDER BY t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN t.amount_minor < 0 AND a.type <> 'credit' THEN 2 ELSE 0 END, t.datetime, t.id`,
-    )
-    .all(from ?? '0000-01-01', to ?? addDays(today(ctx), 3650), scope?.params ?? {}) as Array<Record<string, string | number | null>>
+  return ctx.q.all<Record<string, string | number | null>>(
+    `SELECT t.date, a.name AS account, t.payee, t.amount_minor AS amountMinor, t.currency, c.name AS category,
+       g.name AS categoryGroup, t.notes, t.status,
+       (SELECT group_concat(tg.name, ' ' ORDER BY tt.tag_id) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id AND tg.ledger_id = @ledger
+        WHERE tt.transaction_id = t.id) AS tags
+     FROM transactions t
+     JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
+     LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+     LEFT JOIN ledger_category_groups g ON g.id = c.group_id AND g.ledger_id = t.ledger_id
+     WHERE t.ledger_id = @ledger AND t.deleted_at IS NULL AND t.date BETWEEN ? AND ?${scope ? ` AND ${scope.sql}` : ''}
+     ORDER BY t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN t.amount_minor < 0 AND a.type <> 'credit' THEN 2 ELSE 0 END, t.datetime, t.id`,
+    from ?? '0000-01-01',
+    to ?? addDays(today(ctx), 3650),
+    scope?.params ?? {},
+  )
 }

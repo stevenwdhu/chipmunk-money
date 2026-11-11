@@ -1,7 +1,9 @@
 import path from 'node:path'
+import { sql } from 'drizzle-orm'
 import { serve } from '@hono/node-server'
 import { PAYEE_RULES_VERSION } from '@chipmunk/shared'
 import { createApp } from './app'
+import { appSettings, bankConnections } from './db/schema'
 import { env } from './env'
 import { startBankSync, startJobs } from './jobs'
 import { countUnreadable } from './lib/secrets'
@@ -19,10 +21,10 @@ warnUnreadableSecrets()
 const bank = new BankService(storage)
 // When the payee rules have changed (and the first time payees followed their connection), payees
 // are made again from the bank data kept: nothing is fetched.
-const payeesMadeBy = getAppSetting<number>(storage.meta, 'payees.rulesVersion', 0)
+const payeesMadeBy = getAppSetting<number>(storage.app, 'payees.rulesVersion', 0)
 if (payeesMadeBy < PAYEE_RULES_VERSION) {
   const changed = bank.refreshPayees(payeesMadeBy)
-  setAppSetting(storage.meta, 'payees.rulesVersion', PAYEE_RULES_VERSION)
+  setAppSetting(storage.app, 'payees.rulesVersion', PAYEE_RULES_VERSION)
   if (changed) console.log(`[payees] ${changed} transaction${changed === 1 ? '' : 's'} took the payee the current rules and connections give`)
 }
 const app = createApp(storage, { serveWeb: env.isProduction, log: !env.isProduction, bank })
@@ -35,17 +37,18 @@ const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (
     .map((l) => l.name)
     .join(', ')
   console.log(
-    `Chipmunk API on http://localhost:${info.port} · data ${env.dataDir} · ledgers: ${ledgers} · tz ${effectiveTimezone(storage.meta)}`,
+    `Chipmunk API on http://localhost:${info.port} · data ${env.dataDir} · ledgers: ${ledgers} · tz ${effectiveTimezone(storage.app)}`,
   )
 })
 
 /** Bank access and AI keys sealed with a secret.key that's gone can't be opened again: say so once, at start. */
 function warnUnreadableSecrets() {
-  const sqlite = storage.sqlite
+  const { db } = storage.app
   const stored = [
-    ...(sqlite.prepare('SELECT secret FROM bank_connections').pluck().all() as string[]),
-    ...(sqlite.prepare('SELECT value FROM app_settings').pluck().all() as string[]),
-  ]
+    ...db.select({ v: bankConnections.secret }).from(bankConnections).all(),
+    // As stored (JSON text), where sealed values sit inside.
+    ...db.select({ v: sql<string>`${appSettings.value}` }).from(appSettings).all(),
+  ].map((r) => r.v)
   const unreadable = countUnreadable(storage.secrets, stored)
   if (!unreadable) return
   const keyFile = path.join(env.dataDir, 'secret.key')

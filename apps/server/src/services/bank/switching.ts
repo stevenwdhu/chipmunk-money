@@ -111,10 +111,13 @@ export function planSwitch(local: SwitchLocal[], remote: RemoteTransaction[], ke
 
 /** Changes whenever the account's transactions change in a way a switch's review shows. */
 export function localStamp(ctx: AppContext, accountId: number): string {
-  const rows = ctx.sqlite
-    .prepare('SELECT id, date, amount_minor, payee, name, external_id, deleted_at IS NOT NULL FROM transactions WHERE account_id = ? ORDER BY id')
-    .raw()
-    .all(accountId)
+  const rows = ctx.q
+    .all(
+      `SELECT id, date, amount_minor, payee, name, external_id, deleted_at IS NOT NULL AS deleted
+       FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId ORDER BY id`,
+      { accountId },
+    )
+    .map((r) => Object.values(r))
   return createHash('sha1').update(JSON.stringify(rows)).digest('hex')
 }
 
@@ -129,12 +132,7 @@ type SwitchInput = z.output<typeof accountBankSwitchSchema>
  */
 export function applySwitch(ctx: AppContext, accountId: number, provider: BankProviderKind, remote: RemoteTransaction[], input: SwitchInput) {
   const result: SwitchResult & { newIds: number[] } = { matched: 0, added: 0, skipped: 0, removed: 0, kept: 0, newIds: [] }
-  const local = ctx.sqlite
-    .prepare(
-      `SELECT id, date, payee, payee_key AS payeeKey, origin, external_id AS externalId, deleted_at AS deletedAt
-       FROM transactions WHERE account_id = ? AND date >= ?`,
-    )
-    .all(accountId, addDays(input.from, -1)) as Array<{
+  const local = ctx.q.all<{
     id: number
     date: string
     payee: string
@@ -142,13 +140,17 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
     origin: 'manual' | 'import' | 'sync'
     externalId: string | null
     deletedAt: string | null
-  }>
+  }>(
+    `SELECT id, date, payee, payee_key AS payeeKey, origin, external_id AS externalId, deleted_at AS deletedAt
+     FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND date >= @from`,
+    { accountId, from: addDays(input.from, -1) },
+  )
   const localById = new Map(local.map((l) => [l.id, l]))
   const byRemote = new Map(remote.map((r) => [r.remoteId, r]))
   /** Which transaction of this account already has a bank id. */
-  const holder = ctx.sqlite.prepare('SELECT id FROM transactions WHERE account_id = ? AND external_id = ?').pluck()
-  const update = ctx.sqlite.prepare(
-    `UPDATE transactions SET external_id = @externalId,
+  const holder = (remoteId: string) =>
+    ctx.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND external_id = @remoteId', { accountId, remoteId })
+  const updateFromBank = `UPDATE transactions SET external_id = @externalId,
        date = CASE WHEN corrected_at IS NULL THEN @date ELSE date END,
        datetime = CASE WHEN corrected_at IS NOT NULL THEN datetime WHEN @datetime IS NOT NULL THEN @datetime
          WHEN datetime IS NOT NULL THEN @date || substr(datetime, 11) END,
@@ -157,25 +159,29 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
        status = @status,
        bank_category = coalesce(@bankCategory, bank_category),
        bank_category_confident = CASE WHEN @bankCategory IS NULL THEN bank_category_confident ELSE @bankConfident END,
-       updated_at = @now WHERE id = @id`,
-  )
-  const setBankCategory = ctx.sqlite.prepare('UPDATE transactions SET bank_category = ?, bank_category_confident = ? WHERE id = ?')
-  const forget = ctx.sqlite.prepare('UPDATE transactions SET external_id = NULL WHERE id = ?')
-  const markDeleted = ctx.sqlite.prepare('UPDATE transactions SET deleted_at = ? WHERE id = ?')
+       updated_at = @now WHERE id = @id AND ledger_id = @ledger`
+  const setBankCategory = (id: number, category: NonNullable<RemoteTransaction['category']>) =>
+    ctx.q.run('UPDATE transactions SET bank_category = @name, bank_category_confident = @confident WHERE id = @id AND ledger_id = @ledger', {
+      id,
+      name: category.name,
+      confident: category.confident ? 1 : 0,
+    })
   const now = ctx.now().toISOString()
+  const forget = (id: number) => ctx.q.run('UPDATE transactions SET external_id = NULL WHERE id = @id AND ledger_id = @ledger', { id })
+  const markDeleted = (id: number) => ctx.q.run('UPDATE transactions SET deleted_at = @now WHERE id = @id AND ledger_id = @ledger', { id, now })
   const skip = new Set(input.skip)
   const remove = new Set(input.remove)
 
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     const paired = new Set<number>()
     const pairedRemote = new Set<string>()
     for (const p of input.pairs) {
       const r = byRemote.get(p.remoteId)
       const l = localById.get(p.transactionId)
       if (!r || !l || paired.has(l.id) || pairedRemote.has(r.remoteId)) continue
-      const held = holder.get(accountId, r.remoteId) as number | undefined
+      const held = holder(r.remoteId)
       if (held !== undefined && held !== l.id) continue
-      update.run({
+      ctx.q.run(updateFromBank, {
         id: l.id,
         externalId: r.remoteId,
         date: r.date,
@@ -195,7 +201,7 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
     }
 
     for (const r of remote) {
-      if (pairedRemote.has(r.remoteId) || r.date < input.from || holder.get(accountId, r.remoteId) !== undefined) continue
+      if (pairedRemote.has(r.remoteId) || r.date < input.from || holder(r.remoteId) !== undefined) continue
       const skipped = skip.has(r.remoteId)
       const id = insertTransaction(
         ctx,
@@ -214,9 +220,9 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
         },
         { origin: 'sync', skipRecurring: skipped, suggestion: skipped ? null : historySuggestion(ctx, r.payee, r.amountMinor) },
       )
-      if (r.category) setBankCategory.run(r.category.name, r.category.confident ? 1 : 0, id)
+      if (r.category) setBankCategory(id, r.category)
       if (skipped) {
-        markDeleted.run(now, id)
+        markDeleted(id)
         result.skipped++
       } else {
         result.added++
@@ -231,12 +237,12 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
         result.removed++
       } else {
         // Kept as yours: no other service's id, so syncs leave it alone.
-        if (l.externalId) forget.run(l.id)
+        if (l.externalId) forget(l.id)
         result.kept++
       }
     }
 
     logPayloads(ctx, accountId, provider, remote, [])
-  })()
+  })
   return result
 }

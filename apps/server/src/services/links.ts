@@ -1,5 +1,5 @@
 import { formatMoney, type LinkKind, type TransactionLink, type TransactionLinksSet } from '@chipmunk/shared'
-import { badRequest, notFound } from '../lib/http'
+import { badRequest } from '../lib/http'
 import type { AppContext } from './context'
 
 /**
@@ -32,13 +32,14 @@ const WORD: Record<LinkKind, string> = { refund: 'refund', payback: 'pay back' }
 export function linksFor(ctx: AppContext, ids: number[]): Map<number, TransactionLink[]> {
   const map = new Map<number, TransactionLink[]>()
   if (!ids.length) return map
-  const list = JSON.stringify(ids)
-  const rows = ctx.sqlite
-    .prepare(
-      `SELECT id, kind, money_in_id AS moneyIn, money_out_id AS moneyOut, amount_minor AS amount FROM transaction_links
-       WHERE money_in_id IN (SELECT value FROM json_each(?)) OR money_out_id IN (SELECT value FROM json_each(?)) ORDER BY id`,
-    )
-    .all(list, list) as Array<{ id: number; kind: LinkKind; moneyIn: number; moneyOut: number; amount: number }>
+  // A link's two sides are in one ledger (a guard trigger says so), so its money in pins it.
+  const rows = ctx.q.all<{ id: number; kind: LinkKind; moneyIn: number; moneyOut: number; amount: number }>(
+    `SELECT l.id, l.kind, l.money_in_id AS moneyIn, l.money_out_id AS moneyOut, l.amount_minor AS amount
+     FROM transaction_links l JOIN transactions i ON i.id = l.money_in_id
+     WHERE i.ledger_id = @ledger AND (l.money_in_id IN (SELECT value FROM json_each(@ids)) OR l.money_out_id IN (SELECT value FROM json_each(@ids)))
+     ORDER BY l.id`,
+    { ids: JSON.stringify(ids) },
+  )
   const wanted = new Set(ids)
   const add = (txId: number, link: TransactionLink) => map.set(txId, [...(map.get(txId) ?? []), link])
   for (const r of rows) {
@@ -49,14 +50,12 @@ export function linksFor(ctx: AppContext, ids: number[]): Map<number, Transactio
 }
 
 function side(ctx: AppContext, id: number): Side {
-  const row = ctx.sqlite
-    .prepare(
-      `SELECT id, amount_minor, currency, payee, name, date, transfer_pair_id, recurring_item_id, category_id, category_source
-       FROM transactions WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .get(id) as Side | undefined
-  if (!row) notFound('Transaction not found')
-  return row
+  return ctx.q.mustGet<Side>(
+    `SELECT id, amount_minor, currency, payee, name, date, transfer_pair_id, recurring_item_id, category_id, category_source
+     FROM transactions WHERE id = ? AND ledger_id = @ledger AND deleted_at IS NULL`,
+    'Transaction not found',
+    id,
+  )
 }
 
 /** Money in that can pay something back: not a transfer, nor a recurring item's payment (which has the item's category). */
@@ -77,13 +76,12 @@ const describe = (t: Side) => `${t.name ?? t.payee} (${formatMoney(t.amount_mino
 function linkedAmount(ctx: AppContext, t: Side, except: number) {
   const column = t.amount_minor > 0 ? 'money_in_id' : 'money_out_id'
   const other = t.amount_minor > 0 ? 'money_out_id' : 'money_in_id'
-  return ctx.sqlite
-    .prepare(
-      `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions o ON o.id = l.${other}
-       WHERE l.${column} = ? AND l.${other} != ? AND o.deleted_at IS NULL`,
-    )
-    .pluck()
-    .get(t.id, except) as number
+  return ctx.q.pluck<number>(
+    `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions o ON o.id = l.${other}
+     WHERE o.ledger_id = @ledger AND l.${column} = ? AND l.${other} != ? AND o.deleted_at IS NULL`,
+    t.id,
+    except,
+  )!
 }
 
 /**
@@ -120,13 +118,21 @@ export function setLinks(ctx: AppContext, id: number, input: TransactionLinksSet
   }
 
   const column = isIn ? 'money_in_id' : 'money_out_id'
-  ctx.sqlite.transaction(() => {
-    const before = ctx.sqlite.prepare(`SELECT money_in_id FROM transaction_links WHERE ${column} = ?`).pluck().all(id) as number[]
-    ctx.sqlite.prepare(`DELETE FROM transaction_links WHERE ${column} = ?`).run(id)
-    const insert = ctx.sqlite.prepare('INSERT INTO transaction_links (kind, money_in_id, money_out_id, amount_minor) VALUES (?, ?, ?, ?)')
-    input.forEach((l, i) => insert.run(l.kind, isIn ? id : others[i]!.id, isIn ? others[i]!.id : id, l.amountMinor))
+  const mine = `${column} IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?)`
+  ctx.q.transaction(() => {
+    const before = ctx.q.column<number>(`SELECT money_in_id FROM transaction_links WHERE ${mine}`, id)
+    ctx.q.run(`DELETE FROM transaction_links WHERE ${mine}`, id)
+    input.forEach((l, i) =>
+      ctx.q.run(
+        'INSERT INTO transaction_links (kind, money_in_id, money_out_id, amount_minor) VALUES (?, ?, ?, ?)',
+        l.kind,
+        isIn ? id : others[i]!.id,
+        isIn ? others[i]!.id : id,
+        l.amountMinor,
+      ),
+    )
     for (const moneyIn of new Set(isIn ? [id] : [...before, ...others.map((o) => o.id)])) settleLinkedCategory(ctx, moneyIn)
-  })()
+  })
 }
 
 /**
@@ -137,11 +143,10 @@ export function setLinks(ctx: AppContext, id: number, input: TransactionLinksSet
 export function setLinksTogether(ctx: AppContext, sets: Array<{ id: number; links: TransactionLinksSet['links'] }>) {
   if (new Set(sets.map((s) => s.id)).size !== sets.length) badRequest('Set each transaction once.')
   for (const s of sets) checkMoneyIn(side(ctx, s.id))
-  ctx.sqlite.transaction(() => {
-    const clear = ctx.sqlite.prepare('DELETE FROM transaction_links WHERE money_in_id = ?')
-    for (const s of sets) clear.run(s.id)
+  ctx.q.transaction(() => {
+    for (const s of sets) ctx.q.run('DELETE FROM transaction_links WHERE money_in_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?)', s.id)
     for (const s of sets) setLinks(ctx, s.id, s.links)
-  })()
+  })
 }
 
 /**
@@ -150,36 +155,44 @@ export function setLinksTogether(ctx: AppContext, sets: Array<{ id: number; link
  * partly linked, the rest is uncategorized, for you (or AI) to say.
  */
 export function settleLinkedCategory(ctx: AppContext, moneyInId: number) {
-  const t = ctx.sqlite.prepare('SELECT amount_minor AS amount, category_id AS categoryId, category_source AS source FROM transactions WHERE id = ?').get(moneyInId) as
-    | { amount: number; categoryId: number | null; source: string | null }
-    | undefined
-  if (!t) return
-  const links = ctx.sqlite
-    .prepare(
-      `SELECT l.amount_minor AS amount, b.category_id AS categoryId FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
-       WHERE l.money_in_id = ?`,
-    )
-    .all(moneyInId) as Array<{ amount: number; categoryId: number | null }>
-  const total = links.reduce((sum, l) => sum + l.amount, 0)
-  const set = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = @categoryId, category_source = @source, category_confidence = NULL, needs_review = 0,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id`,
+  const t = ctx.q.get<{ amount: number; categoryId: number | null; source: string | null }>(
+    'SELECT amount_minor AS amount, category_id AS categoryId, category_source AS source FROM transactions WHERE id = ? AND ledger_id = @ledger',
+    moneyInId,
   )
+  if (!t) return
+  const links = ctx.q.all<{ amount: number; categoryId: number | null }>(
+    `SELECT l.amount_minor AS amount, b.category_id AS categoryId FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
+     WHERE b.ledger_id = @ledger AND l.money_in_id = ?`,
+    moneyInId,
+  )
+  const total = links.reduce((sum, l) => sum + l.amount, 0)
+  const set = (values: { id: number; categoryId: number | null; source: string | null }) =>
+    ctx.q.run(
+      `UPDATE transactions SET category_id = @categoryId, category_source = @source, category_confidence = NULL, needs_review = 0,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id AND ledger_id = @ledger`,
+      values,
+    )
   if (links.length && total >= t.amount) {
-    set.run({ id: moneyInId, categoryId: links.length === 1 ? links[0]!.categoryId : null, source: 'linked' })
+    set({ id: moneyInId, categoryId: links.length === 1 ? links[0]!.categoryId : null, source: 'linked' })
   } else if (t.source === 'linked') {
-    if (links.length) set.run({ id: moneyInId, categoryId: null, source: null })
-    else set.run({ id: moneyInId, categoryId: t.categoryId, source: t.categoryId ? 'user' : null })
+    if (links.length) set({ id: moneyInId, categoryId: null, source: null })
+    else set({ id: moneyInId, categoryId: t.categoryId, source: t.categoryId ? 'user' : null })
   }
 }
 
-/** Before transactions are deleted for good (`doomed` picks them): their links go, and the money in they paid back settles. */
+/**
+ * Before transactions are deleted for good (`doomed` picks them, a condition on the ledger's
+ * transactions with positional parameters): their links go, and the money in they paid back settles.
+ */
 export function releaseTransactionLinks(ctx: AppContext, doomed: string, ...params: unknown[]) {
-  const ids = `SELECT id FROM transactions WHERE ${doomed}`
-  const moneyIn = ctx.sqlite
-    .prepare(`SELECT DISTINCT money_in_id FROM transaction_links WHERE money_out_id IN (${ids}) AND money_in_id NOT IN (${ids})`)
-    .pluck()
-    .all(...params, ...params) as number[]
-  ctx.sqlite.prepare(`DELETE FROM transaction_links WHERE money_in_id IN (${ids}) OR money_out_id IN (${ids})`).run(...params, ...params)
+  const ids = `SELECT id FROM transactions WHERE ledger_id = @ledger AND (${doomed})`
+  const moneyIn = ctx.q.column<number>(
+    `SELECT DISTINCT money_in_id FROM transaction_links WHERE money_out_id IN (${ids}) AND money_in_id NOT IN (${ids})`,
+    ...params,
+    ...params,
+  )
+  // Each side on its own: a pin can't be under OR. A link's sides are in one ledger, so it's the same rows.
+  ctx.q.run(`DELETE FROM transaction_links WHERE money_in_id IN (${ids})`, ...params)
+  ctx.q.run(`DELETE FROM transaction_links WHERE money_out_id IN (${ids})`, ...params)
   for (const id of moneyIn) settleLinkedCategory(ctx, id)
 }

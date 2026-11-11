@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { addDays, addMonthsToDate, recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
-import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
 import type { AppContext } from './context'
 import {
   addPayment,
   confirmRecurring,
   createRecurring,
+  deleteRecurring,
   detectRecurring,
   dismissRecurring,
   getRecurring,
@@ -22,6 +23,15 @@ import { createTransaction, deleteTransaction, getTransaction, listTransactions,
 const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
 
 describe('recurring detection', () => {
+  it('lists items due the same day in the order they were added', () => {
+    const ctx = testContext()
+    const ids = ['Zed Gym', 'Acme Streaming'].map(
+      (payee) => createRecurring(ctx, recurringCreateSchema.parse({ payee, expectedAmountMinor: -1_000, cadence: 'monthly', anchorDate: '2026-10-15' })).id,
+    )
+    expect(listRecurring(ctx).map((r) => r.id)).toEqual(ids)
+    expect(listRecurring(ctx, 'active').map((r) => r.id)).toEqual(ids)
+  })
+
   it('suggests a monthly subscription, links history on confirm and matches new payments', async () => {
     const ctx = testContext()
     const acc = makeAccount(ctx, 'Amex', 'credit')
@@ -296,7 +306,7 @@ describe('recurring detection', () => {
     await pay(ctx, 'HYDRO ONE', -10_000, ['2026-07-15', '2026-08-14', '2026-09-15'])
     await pay(ctx, 'ENBRIDGE', -10_000, ['2026-07-15', '2026-08-14', '2026-09-15'])
     // Enbridge's August bill was 8% more: over the default 5%.
-    ctx.sqlite.prepare("UPDATE transactions SET amount_minor = -10800 WHERE payee = 'ENBRIDGE' AND date = '2026-08-14'").run()
+    ctx.q.run("UPDATE transactions SET amount_minor = -10800 WHERE ledger_id = @ledger AND payee = 'ENBRIDGE' AND date = '2026-08-14'")
     expect(found(detectAnd(ctx))).toEqual([[-10_000, 'monthly', '2026-10-15']])
 
     setAppSetting(ctx.meta, 'recurring.detection', { priceVariationPct: 10 })
@@ -474,7 +484,7 @@ describe('payments from another payee', () => {
     linkPossiblePayment(ctx, item.id, paid.id)
     // Linked before the one-per-due-date rule: the utilities bill a week after August's tax payment.
     const utilities = await add('PayHub', -31_950, '2026-08-25')
-    ctx.sqlite.prepare("UPDATE transactions SET recurring_item_id = ?, category_source = 'recurring' WHERE id = ?").run(item.id, utilities.id)
+    ctx.q.run("UPDATE transactions SET recurring_item_id = ?, category_source = 'recurring' WHERE id = ? AND ledger_id = @ledger", item.id, utilities.id)
     expect(getRecurring(ctx, item.id).occurrences).toBe(5)
     expect(updateRecurring(ctx, item.id, { name: 'Property tax' })).toMatchObject({ occurrences: 4, nextDueDate: '2026-10-20' })
     expect(getTransaction(ctx, utilities.id)).toMatchObject({ recurringItemId: null, categoryId: null })
@@ -915,6 +925,84 @@ describe('cases from the 0.2.0 review', () => {
     for (let i = 0; i < 400; i++) await pay(ctx, acc, `SHOP ${i}`, -500, addDays('2026-07-25', i % 100))
     const plan = item(ctx, { payee: 'AFFIRM', expectedAmountMinor: -10_000, anchorDate: '2026-08-15', totalPayments: 5, accountId: acc })
     expect(recurringPaymentCandidates(ctx, plan.id, {})[0]).toMatchObject({ transaction: { id: down.id }, likely: true })
+  })
+})
+
+describe('recurring items in two ledgers', () => {
+  /** Two ledgers of one database, each with a card and the same payee's monthly payments. */
+  const twins = async () => {
+    const storage = testStorage()
+    const a = storage.registry.defaultContext()
+    const b = testLedger(storage)
+    const cards = { a: makeAccount(a, 'Amex', 'credit'), b: makeAccount(b, 'Amex', 'credit') }
+    const pay = (ctx: AppContext, accountId: number, payee: string, amountMinor: number, date: string) =>
+      createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false, skipRecurring: true })
+    for (let m = 0; m < 6; m++) {
+      const date = addMonthsToDate('2026-04-28', m)
+      await pay(a, cards.a, 'NETFLIX.COM', -2099, date)
+      await pay(b, cards.b, 'NETFLIX.COM', -2099, date)
+    }
+    return { a, b, cards, pay }
+  }
+  const create = (ctx: AppContext, input: Record<string, unknown>) => createRecurring(ctx, recurringCreateSchema.parse({ cadence: 'monthly', ...input }))
+
+  it('scans each ledger for itself: one ledger’s items don’t hide another’s payments', async () => {
+    const { a, b } = await twins()
+    expect(detectRecurring(a).created).toBe(1)
+    confirmRecurring(a, listRecurring(a, 'suggested')[0]!.id)
+    expect(detectRecurring(a).created).toBe(0)
+    // The other ledger's payments are its own to find, and the first ledger's item isn't among its items.
+    expect(listRecurring(b)).toEqual([])
+    expect(detectRecurring(b).created).toBe(1)
+    const [mine] = listRecurring(b)
+    expect(mine).toMatchObject({ status: 'suggested', occurrences: 6 })
+    expect(listRecurring(a).map((i) => i.id)).not.toContain(mine!.id)
+    expect(listRecurring(a, 'active')[0]).toMatchObject({ occurrences: 6 })
+    expect(upcomingPayments(b, 30)).toEqual([])
+    expect(upcomingPayments(a, 30).map((u) => u.dueDate)).toEqual(['2026-10-28'])
+  })
+
+  it('links a payment only to its own ledger’s items, and relinks from its own ledger’s payments', async () => {
+    const { a, b, cards } = await twins()
+    const item = create(a, { payee: 'NETFLIX.COM', expectedAmountMinor: -2099, anchorDate: '2026-10-28' })
+    expect(item.occurrences).toBe(6)
+    expect(recurringPaymentIds(a, item.id).every((id) => getTransaction(a, id).recurringItemId === item.id)).toBe(true)
+    // A new payment in the other ledger, from the same payee: that ledger has no item for it.
+    const theirs = await createTransaction(b, tx({ accountId: cards.b, date: '2026-10-28', amountMinor: -2099, payee: 'NETFLIX.COM' }), { useAi: false })
+    expect(getTransaction(b, theirs.id).recurringItemId).toBeNull()
+    expect(listTransactions(b, { accountId: cards.b, limit: 50 }).items.every((t) => t.recurringItemId === null)).toBe(true)
+    expect(getRecurring(a, item.id)).toMatchObject({ occurrences: 6, nextDueDate: '2026-10-28' })
+  })
+
+  it('compares with its own ledger’s other items from the payee', async () => {
+    const { a, b, cards, pay } = await twins()
+    for (const date of ['2026-07-05', '2026-08-05', '2026-09-05']) await pay(a, cards.a, 'Spotify', -1100, date)
+    // Closer to this item's amount than to the first ledger's: it isn't a reason to leave those payments out.
+    create(b, { payee: 'Spotify', expectedAmountMinor: -1150, anchorDate: '2026-10-05' })
+    expect(create(a, { payee: 'Spotify', expectedAmountMinor: -1000, anchorDate: '2026-10-05' })).toMatchObject({ occurrences: 3 })
+  })
+
+  it('treats another ledger’s item, payment and account as ones it doesn’t have', async () => {
+    const { a, b, cards } = await twins()
+    const item = create(a, { payee: 'NETFLIX.COM', expectedAmountMinor: -2099, anchorDate: '2026-10-28' })
+    const theirs = listTransactions(b, { accountId: cards.b, limit: 1 }).items[0]!
+    expect(() => getRecurring(b, item.id)).toThrow('Recurring item not found')
+    expect(() => recurringPaymentIds(b, item.id)).toThrow('Recurring item not found')
+    expect(() => updateRecurring(b, item.id, { name: 'Mine' })).toThrow('Recurring item not found')
+    expect(() => linkPossiblePayment(a, item.id, theirs.id)).toThrow('Transaction not found')
+    expect(() => addPayment(a, item.id, theirs.id)).toThrow('Transaction not found')
+    expect(() => notItsPayment(a, item.id, theirs.id)).toThrow('Transaction not found')
+    expect(() => create(b, { payee: 'Gym', expectedAmountMinor: -5000, anchorDate: '2026-10-01', accountId: cards.a })).toThrow('That account does not exist')
+    deleteRecurring(b, item.id)
+    expect(getRecurring(a, item.id)).toMatchObject({ occurrences: 6 })
+    expect(getTransaction(b, theirs.id).recurringItemId).toBeNull()
+  })
+
+  it('says a transaction it doesn’t have isn’t found, when told it isn’t the item’s payment', async () => {
+    // Before, an id that didn't exist failed on its foreign key (a 400 that it refers to nothing).
+    const { a } = await twins()
+    const item = create(a, { payee: 'NETFLIX.COM', expectedAmountMinor: -2099, anchorDate: '2026-10-28' })
+    expect(() => notItsPayment(a, item.id, 999_999)).toThrow('Transaction not found')
   })
 })
 

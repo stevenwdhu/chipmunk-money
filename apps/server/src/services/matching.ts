@@ -56,7 +56,7 @@ const LINKABLE = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND t.orig
 const OPEN = `${LINKABLE}
   AND (t.category_source IS NULL OR t.category_source = 'rule' OR (t.category_source IN ('history', 'ai') AND t.needs_review = 1))`
 /** In a category left out of totals: money moving between accounts, like a card payment or a transfer. */
-const MOVES_MONEY = 't.category_id IN (SELECT id FROM categories WHERE exclude_from_totals = 1)'
+const MOVES_MONEY = 't.category_id IN (SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1)'
 /**
  * Money onto a card that you or your history already call money moving between accounts: still
  * paired with the withdrawal that paid it, keeping its category.
@@ -66,7 +66,8 @@ const PAID = `${LINKABLE} AND a.type = 'credit' AND ${MOVES_MONEY}`
 const SELECT = `SELECT t.id, t.account_id AS accountId, a.type AS accountType, t.date, t.amount_minor AS amount,
   t.payee, t.payee_key AS payeeKey, t.category_id AS categoryId, t.category_source AS source, t.needs_review AS needsReview,
   (${OPEN}) AS open
-  FROM transactions t JOIN accounts a ON a.id = t.account_id`
+  FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
+  WHERE t.ledger_id = @ledger`
 
 /**
  * A withdrawal that could have paid a card: not already a transfer, and categorized by the app, or
@@ -80,8 +81,8 @@ const sameMerchant = (a: string, b: string) => a === b || payeeSimilarity(a, b) 
 /** The ledger's category for credit card payments: "Credit card payment", else "Transfer", else none. */
 export function cardPaymentCategory(ctx: AppContext): number | null {
   for (const name of ['credit card payment', 'transfer']) {
-    const row = ctx.sqlite.prepare('SELECT id FROM categories WHERE lower(name) = ? AND archived_at IS NULL').get(name) as { id: number } | undefined
-    if (row) return row.id
+    const id = ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND lower(name) = ? AND archived_at IS NULL', name)
+    if (id !== undefined) return id
   }
   return null
 }
@@ -114,43 +115,54 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
   const result: MatchResult = { refunds: 0, transfers: 0, payments: 0, cleared: [] }
   const recent = addDays(today(ctx), -REFUND_DAYS)
   const since = opts.since ?? (opts.earliest && opts.earliest < recent ? opts.earliest : recent)
-  const credits = ctx.sqlite
-    .prepare(`${SELECT} WHERE (${OPEN} OR ${PAID}) AND t.amount_minor > 0 AND t.date >= ? ORDER BY t.date, t.id`)
-    .all(since) as Row[]
+  const credits = ctx.q.all<Row>(`${SELECT} AND (${OPEN} OR ${PAID}) AND t.amount_minor > 0 AND t.date >= ? ORDER BY t.date, t.id`, since)
   if (!credits.length) return result
 
-  const purchases = ctx.sqlite.prepare(
-    `${SELECT} WHERE t.account_id = ? AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
-       AND t.date BETWEEN ? AND ?
-     ORDER BY t.date DESC, t.id DESC`,
-  )
-  /** What's already been paid back of a purchase: refunds and paybacks. */
-  const refunded = ctx.sqlite
-    .prepare(
-      `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions m ON m.id = l.money_in_id
-       WHERE l.money_out_id = ? AND m.deleted_at IS NULL`,
+  const purchases = (accountId: number, from: string, to: string) =>
+    ctx.q.all<Row>(
+      `${SELECT} AND t.account_id = ? AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
+         AND t.date BETWEEN ? AND ?
+       ORDER BY t.date DESC, t.id DESC`,
+      accountId,
+      from,
+      to,
     )
-    .pluck()
-  const linkRefund = ctx.sqlite.prepare(`INSERT INTO transaction_links (kind, money_in_id, money_out_id, amount_minor) VALUES ('refund', @id, @purchase, @amount)`)
-  const markRefund = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = @categoryId, category_source = 'linked',
-       category_confidence = NULL, needs_review = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id`,
-  )
-  const withdrawals = ctx.sqlite.prepare(
-    `${SELECT} WHERE ${COULD_PAY} AND t.amount_minor = ? AND t.account_id != ? AND a.type IN (${PAYS_CARDS.map(() => '?').join(', ')})
-       AND t.date BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM transfer_rejections r WHERE r.in_id = ? AND r.out_id = t.id)`,
-  )
-  const setPayment = ctx.sqlite.prepare(
-    `UPDATE transactions SET transfer_pair_id = @pair, category_id = @categoryId, category_source = @source,
-       category_confidence = NULL, needs_review = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id`,
-  )
-  const clear = ctx.sqlite.prepare(
-    `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0,
-       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-  )
+  /** What's already been paid back of a purchase: refunds and paybacks. */
+  const refunded = (purchaseId: number) =>
+    ctx.q.pluck<number>(
+      `SELECT coalesce(sum(l.amount_minor), 0) FROM transaction_links l JOIN transactions m ON m.id = l.money_in_id
+       WHERE m.ledger_id = @ledger AND l.money_out_id = ? AND m.deleted_at IS NULL`,
+      purchaseId,
+    )!
+  const linkRefund = (values: { id: number; purchase: number; amount: number }) =>
+    ctx.q.run(`INSERT INTO transaction_links (kind, money_in_id, money_out_id, amount_minor) VALUES ('refund', @id, @purchase, @amount)`, values)
+  const markRefund = (values: { id: number; categoryId: number | null }) =>
+    ctx.q.run(
+      `UPDATE transactions SET category_id = @categoryId, category_source = 'linked',
+         category_confidence = NULL, needs_review = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id AND ledger_id = @ledger`,
+      values,
+    )
+  const withdrawals = (...params: unknown[]) =>
+    ctx.q.all<Row>(
+      `${SELECT} AND ${COULD_PAY} AND t.amount_minor = ? AND t.account_id != ? AND a.type IN (${PAYS_CARDS.map(() => '?').join(', ')})
+         AND t.date BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM transfer_rejections r WHERE r.in_id = ? AND r.out_id = t.id)`,
+      ...params,
+    )
+  const setPayment = (values: { id: number; pair: number | null; categoryId: number | null; source: string | null }) =>
+    ctx.q.run(
+      `UPDATE transactions SET transfer_pair_id = @pair, category_id = @categoryId, category_source = @source,
+         category_confidence = NULL, needs_review = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id AND ledger_id = @ledger`,
+      values,
+    )
+  const clear = (id: number) =>
+    ctx.q.run(
+      `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND ledger_id = @ledger`,
+      id,
+    )
   const paymentCategory = cardPaymentCategory(ctx)
 
-  ctx.sqlite.transaction(() => {
+  ctx.q.transaction(() => {
     const paired = new Set<number>()
     for (const c of credits) {
       if (paired.has(c.id)) continue
@@ -158,17 +170,17 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
       // people isn't: their names would match any e-Transfer.)
       const fromMerchant = !c.open || isPersonTransfer(c.payee)
         ? []
-        : (purchases.all(c.accountId, addDays(c.date, -MERCHANT_DAYS), c.date) as Row[]).filter(
+        : purchases(c.accountId, addDays(c.date, -MERCHANT_DAYS), c.date).filter(
             (p) => !isPersonTransfer(p.payee) && sameMerchant(p.payeeKey, c.payeeKey),
           )
       const refundFrom = addDays(c.date, -REFUND_DAYS)
       const purchase = fromMerchant
-        .filter((p) => p.date >= refundFrom && -p.amount - (refunded.get(p.id) as number) >= c.amount && (-p.amount === c.amount || c.amount >= MIN_PARTIAL_REFUND))
+        .filter((p) => p.date >= refundFrom && -p.amount - refunded(p.id) >= c.amount && (-p.amount === c.amount || c.amount >= MIN_PARTIAL_REFUND))
         // The exact amount first, then the most recent.
         .sort((a, b) => Number(-b.amount === c.amount) - Number(-a.amount === c.amount))[0]
       if (purchase) {
-        linkRefund.run({ id: c.id, purchase: purchase.id, amount: c.amount })
-        markRefund.run({ id: c.id, categoryId: purchase.categoryId })
+        linkRefund({ id: c.id, purchase: purchase.id, amount: c.amount })
+        markRefund({ id: c.id, categoryId: purchase.categoryId })
         result.refunds++
         continue
       }
@@ -178,39 +190,38 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
       if (c.accountType !== 'credit') continue
       if (isCardReward(c.payee) || fromMerchant.length) {
         if (c.source === 'rule' && !paired.has(c.id)) {
-          clear.run(c.id)
+          clear(c.id)
           result.cleared.push(c.id)
         }
         continue
       }
-      const withdrawal = (
-        withdrawals.all(-c.amount, c.accountId, ...PAYS_CARDS, addDays(c.date, -PAYMENT_DAYS), addDays(c.date, PAYMENT_DAYS), c.id) as Row[]
-      )
+      const withdrawal = withdrawals(-c.amount, c.accountId, ...PAYS_CARDS, addDays(c.date, -PAYMENT_DAYS), addDays(c.date, PAYMENT_DAYS), c.id)
         .filter((w) => !paired.has(w.id) && !isPersonTransfer(w.payee))
         .sort((a, b) => Math.abs(daysBetween(a.date, c.date)) - Math.abs(daysBetween(b.date, c.date)) || a.id - b.id)[0]
-      const category = { categoryId: paymentCategory, source: paymentCategory ? 'rule' : null }
+      const category: { categoryId: number | null; source: string | null } = { categoryId: paymentCategory, source: paymentCategory ? 'rule' : null }
       if (withdrawal) {
         // One you or your history already call a payment keeps its category.
-        setPayment.run({ id: c.id, pair: withdrawal.id, ...(c.open ? category : { categoryId: c.categoryId, source: c.source }) })
-        setPayment.run({ id: withdrawal.id, pair: c.id, ...category })
+        setPayment({ id: c.id, pair: withdrawal.id, ...(c.open ? category : { categoryId: c.categoryId, source: c.source }) })
+        setPayment({ id: withdrawal.id, pair: c.id, ...category })
         paired.add(withdrawal.id)
         result.transfers++
       } else if (c.open && (c.categoryId !== category.categoryId || c.source !== category.source || c.needsReview)) {
         // Not paired yet: a later pass pairs it once the withdrawal arrives.
-        setPayment.run({ id: c.id, pair: null, ...category })
+        setPayment({ id: c.id, pair: null, ...category })
         result.payments++
       }
     }
-  })()
+  })
   return result
 }
 
 /**
- * Before transactions are deleted for good (`doomed` picks them), what points at them lets go: a
- * transfer's other side stops being a transfer, and refunds and paybacks stop following them.
+ * Before transactions are deleted for good (`doomed` picks them, a condition on the ledger's
+ * transactions with positional parameters), what points at them lets go: a transfer's other side
+ * stops being a transfer, and refunds and paybacks stop following them.
  */
 export function releaseLinks(ctx: AppContext, doomed: string, ...params: unknown[]) {
-  const ids = `SELECT id FROM transactions WHERE ${doomed}`
-  ctx.sqlite.prepare(`UPDATE transactions SET transfer_pair_id = NULL WHERE transfer_pair_id IN (${ids})`).run(...params)
+  const ids = `SELECT id FROM transactions WHERE ledger_id = @ledger AND (${doomed})`
+  ctx.q.run(`UPDATE transactions SET transfer_pair_id = NULL WHERE ledger_id = @ledger AND transfer_pair_id IN (${ids})`, ...params)
   releaseTransactionLinks(ctx, doomed, ...params)
 }

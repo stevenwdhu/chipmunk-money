@@ -19,7 +19,7 @@ import {
   type ReportSpec,
   withSavedNames,
 } from '@chipmunk/shared'
-import type { SQLite } from '../db/client'
+import type { LedgerQuery } from '../db/scope'
 import { notFound, parseWith } from '../lib/http'
 import { recordActivity } from './activity'
 import type { AppContext } from './context'
@@ -49,7 +49,7 @@ interface Row {
 const SELECT = 'SELECT id, name, spec, created_at AS createdAt, updated_at AS updatedAt FROM custom_reports'
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
-const allRows = (sqlite: SQLite) => sqlite.prepare(`${SELECT} ORDER BY sort, id`).all() as Row[]
+const allRows = (q: LedgerQuery) => q.all<Row>(`${SELECT} WHERE ledger_id = @ledger ORDER BY sort, id`)
 const specOf = (r: Row) => JSON.parse(r.spec) as ReportSpec
 const REF_NAME_KINDS = ['category', 'group', 'label', 'tag', 'payee', 'account', 'recurring'] as const
 
@@ -73,10 +73,10 @@ function saved(ctx: AppContext, spec: ReportSpec, before?: RefNames): ReportSpec
 
 /** A payee's name: as your rules name its latest transaction (a live one if it has any). */
 function payeeName(ctx: AppContext, key: string): string | undefined {
-  const raw = ctx.sqlite
-    .prepare('SELECT payee FROM transactions WHERE payee_key = ? ORDER BY deleted_at IS NULL DESC, date DESC, id DESC LIMIT 1')
-    .pluck()
-    .get(key) as string | undefined
+  const raw = ctx.q.pluck<string>(
+    'SELECT payee FROM transactions WHERE ledger_id = @ledger AND payee_key = ? ORDER BY deleted_at IS NULL DESC, date DESC, id DESC LIMIT 1',
+    key,
+  )
   return raw === undefined ? undefined : payeeNameOf(ctx, raw).name
 }
 
@@ -88,19 +88,20 @@ function lookUp(ctx: AppContext, filters: ReportFilter[]) {
     for (const kind of CUSTOM_REPORT_REF_KINDS) for (const v of r[kind]) (refs[kind] as Set<number | string>).add(v)
   }
   const list = (s: Set<number | string>) => JSON.stringify([...s])
+  // Only this ledger's: an id of another ledger's tag, account or category reads as deleted.
   const byId = <T>(sql: string, s: Set<number>) =>
-    new Map((ctx.sqlite.prepare(`${sql} WHERE id IN (SELECT value FROM json_each(?))`).all(list(s)) as Array<T & { id: number }>).map((r) => [r.id, r]))
-  const categories = byId<{ name: string; archivedAt: string | null }>('SELECT id, name, archived_at AS archivedAt FROM categories', refs.category)
-  const groups = byId<{ name: string }>('SELECT id, name FROM category_groups', refs.group)
-  const labels = byId<{ name: string }>('SELECT id, name FROM labels', refs.label)
+    new Map(ctx.q.all<T & { id: number }>(`${sql} WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?))`, list(s)).map((r) => [r.id, r]))
+  const categories = byId<{ name: string; archivedAt: string | null }>('SELECT id, name, archived_at AS archivedAt FROM ledger_categories', refs.category)
+  const groups = byId<{ name: string }>('SELECT id, name FROM ledger_category_groups', refs.group)
+  const labels = byId<{ name: string }>('SELECT id, name FROM ledger_labels', refs.label)
   const tags = byId<{ name: string }>('SELECT id, name FROM tags', refs.tag)
-  const accounts = byId<{ name: string }>('SELECT id, name FROM accounts', refs.account)
+  const accounts = byId<{ name: string }>('SELECT id, name FROM ledger_accounts', refs.account)
   const recurring = byId<{ name: string }>('SELECT id, coalesce(title, name) AS name FROM recurring_items', refs.recurring)
   const live = new Set(
-    ctx.sqlite.prepare('SELECT id FROM transactions WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))').pluck().all(list(refs.transaction)) as number[],
+    ctx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))', list(refs.transaction)),
   )
-  const used = ctx.sqlite.prepare('SELECT 1 FROM transactions WHERE payee_key = ? AND deleted_at IS NULL LIMIT 1').pluck()
-  const payees = new Map([...refs.payee].map((k) => [k, { name: payeeName(ctx, k), used: !!used.get(k) }]))
+  const used = (key: string) => !!ctx.q.pluck('SELECT 1 FROM transactions WHERE ledger_id = @ledger AND payee_key = ? AND deleted_at IS NULL LIMIT 1', key)
+  const payees = new Map([...refs.payee].map((k) => [k, { name: payeeName(ctx, k), used: used(k) }]))
 
   const names: FilterNames = {
     category: (i) => categories.get(i)?.name,
@@ -146,36 +147,37 @@ function toDTO(r: Row, spec: ReportSpec, known: ReturnType<typeof lookUp>): Cust
 
 /** Your reports, in your order. */
 export function listCustomReports(ctx: AppContext): CustomReport[] {
-  const rows = allRows(ctx.sqlite).map((r) => ({ r, spec: specOf(r) }))
+  const rows = allRows(ctx.q).map((r) => ({ r, spec: specOf(r) }))
   const known = lookUp(ctx, rows.map((x) => x.spec.filter))
   return rows.map((x) => toDTO(x.r, x.spec, known))
 }
 
 export function getCustomReport(ctx: AppContext, id: number): CustomReport {
-  const r = ctx.sqlite.prepare(`${SELECT} WHERE id = ?`).get(id) as Row | undefined
-  if (!r) notFound('Custom report not found')
+  const r = ctx.q.mustGet<Row>(`${SELECT} WHERE ledger_id = @ledger AND id = ?`, 'Custom report not found', id)
   const spec = specOf(r)
   return toDTO(r, spec, lookUp(ctx, [spec.filter]))
 }
 
 /** Names are unique whatever their case. */
 function checkName(ctx: AppContext, name: string, except?: number) {
-  const clash = allRows(ctx.sqlite).find((r) => r.id !== except && r.name.toLowerCase() === name.toLowerCase())
+  const clash = allRows(ctx.q).find((r) => r.id !== except && r.name.toLowerCase() === name.toLowerCase())
   if (clash) throw new HTTPException(409, { message: `You already have a report called “${clash.name}”.` })
 }
 
 export function createCustomReport(ctx: AppContext, input: CustomReportCreate): CustomReport {
   const { name, spec } = parseWith(customReportCreateSchema, input)
-  const count = ctx.sqlite.prepare('SELECT count(*) FROM custom_reports').pluck().get() as number
+  const count = ctx.q.pluck<number>('SELECT count(*) FROM custom_reports WHERE ledger_id = @ledger')!
   if (count >= CUSTOM_REPORTS_MAX) {
     throw new HTTPException(409, { message: `You can keep up to ${CUSTOM_REPORTS_MAX} custom reports. Delete one to save another.` })
   }
   checkName(ctx, name)
   // A new one goes last.
-  const id = ctx.sqlite
-    .prepare('INSERT INTO custom_reports (name, spec, sort) VALUES (?, ?, (SELECT coalesce(max(sort) + 1, 0) FROM custom_reports)) RETURNING id')
-    .pluck()
-    .get(name, JSON.stringify(saved(ctx, spec))) as number
+  const id = ctx.q.pluck<number>(
+    `INSERT INTO custom_reports (ledger_id, name, spec, sort)
+     VALUES (@ledger, ?, ?, (SELECT coalesce(max(sort) + 1, 0) FROM custom_reports WHERE ledger_id = @ledger)) RETURNING id`,
+    name,
+    JSON.stringify(saved(ctx, spec)),
+  )!
   return getCustomReport(ctx, id)
 }
 
@@ -186,27 +188,26 @@ export function updateCustomReport(ctx: AppContext, id: number, input: CustomRep
   if (name !== undefined) checkName(ctx, name, id)
   const sets = Object.entries({ name, spec: spec && JSON.stringify(saved(ctx, spec, before.spec.names)) }).filter(([, v]) => v !== undefined)
   if (sets.length) {
-    ctx.sqlite.prepare(`UPDATE custom_reports SET ${sets.map(([k]) => `${k} = ?`).join(', ')}, updated_at = ${NOW} WHERE id = ?`).run(...sets.map(([, v]) => v), id)
+    ctx.q.run(`UPDATE custom_reports SET ${sets.map(([k]) => `${k} = ?`).join(', ')}, updated_at = ${NOW} WHERE ledger_id = @ledger AND id = ?`, ...sets.map(([, v]) => v), id)
   }
   return getCustomReport(ctx, id)
 }
 
 /** Puts them in this order: these ids first, then the rest as they were. */
 export function reorderCustomReports(ctx: AppContext, ids: number[]): CustomReport[] {
-  const rows = allRows(ctx.sqlite)
+  const rows = allRows(ctx.q)
   const known = new Set(rows.map((r) => r.id))
   const unknown = ids.find((id) => !known.has(id))
   if (unknown !== undefined) notFound(`There's no custom report ${unknown}`)
   const order = [...new Set(ids), ...rows.map((r) => r.id).filter((id) => !ids.includes(id))]
-  const write = ctx.sqlite.prepare('UPDATE custom_reports SET sort = ? WHERE id = ?')
-  ctx.sqlite.transaction(() => order.forEach((id, i) => write.run(i, id)))()
+  ctx.q.transaction(() => order.forEach((id, i) => ctx.q.run('UPDATE custom_reports SET sort = ? WHERE ledger_id = @ledger AND id = ?', i, id)))
   return listCustomReports(ctx)
 }
 
 /** Deletes it, returning it as it was (POST its name and spec to undo). */
 export function deleteCustomReport(ctx: AppContext, id: number): CustomReport {
   const before = getCustomReport(ctx, id)
-  ctx.sqlite.prepare('DELETE FROM custom_reports WHERE id = ?').run(id)
+  ctx.q.run('DELETE FROM custom_reports WHERE ledger_id = @ledger AND id = ?', id)
   return before
 }
 
@@ -218,11 +219,11 @@ type Change = { row: Row; before: ReportFilter; after: ReportFilter }
  * Every report's filter rewritten condition by condition (see mapConditions). Returns the ones that
  * changed, and the ones left as they were because the rewrite wouldn't fit a report's limits.
  */
-function remap(sqlite: SQLite, fn: (c: Condition, place: 'only' | 'rule') => Condition | null) {
-  const write = sqlite.prepare(`UPDATE custom_reports SET spec = ?, updated_at = ${NOW} WHERE id = ?`)
+function remap(q: LedgerQuery, fn: (c: Condition, place: 'only' | 'rule') => Condition | null) {
+  const write = (spec: string, id: number) => q.run(`UPDATE custom_reports SET spec = ?, updated_at = ${NOW} WHERE ledger_id = @ledger AND id = ?`, spec, id)
   const changed: Change[] = []
   const tooBig: Row[] = []
-  for (const row of allRows(sqlite)) {
+  for (const row of allRows(q)) {
     const spec = specOf(row)
     const before = normalizeFilter(spec.filter)
     const after = mapConditions(before, fn)
@@ -231,13 +232,13 @@ function remap(sqlite: SQLite, fn: (c: Condition, place: 'only' | 'rule') => Con
       tooBig.push(row)
       continue
     }
-    write.run(JSON.stringify({ ...spec, filter: after }), row.id)
+    write(JSON.stringify({ ...spec, filter: after }), row.id)
     changed.push({ row, before, after })
   }
   return { changed, tooBig }
 }
 
-function logChange(ctx: Pick<AppContext, 'sqlite' | 'now'>, change: Change, summary: string) {
+function logChange(ctx: Pick<AppContext, 'q' | 'now'>, change: Change, summary: string) {
   recordActivity(ctx, APP, {
     action: 'update',
     entity: 'custom_report',
@@ -250,7 +251,7 @@ function logChange(ctx: Pick<AppContext, 'sqlite' | 'now'>, change: Change, summ
 
 /** A category merged into another, or turned off with its transactions moved: reports on it are on `into`. Returns how many changed. */
 export function remapCategoryRefs(ctx: AppContext, from: number, into: number): number {
-  return remap(ctx.sqlite, (c) => (c.field === 'category' ? { ...c, ids: c.ids.map((i) => (i === from ? into : i)) } : c)).changed.length
+  return remap(ctx.q, (c) => (c.field === 'category' ? { ...c, ids: c.ids.map((i) => (i === from ? into : i)) } : c)).changed.length
 }
 
 /** Category ids in a filter's Only count conditions, and in its rules. */
@@ -279,27 +280,26 @@ export type JoinedIds = { to: Map<number, number | null>; names: Map<number, str
  * After the first join, ids point at the shared categories, groups and labels: the names a report
  * kept for them are the shared ones (so a shared one deleted later is named right).
  */
-function renameJoined(sqlite: SQLite) {
-  const write = sqlite.prepare('UPDATE custom_reports SET spec = ? WHERE id = ?')
-  const tables = { category: 'categories', group: 'category_groups', label: 'labels' } as const
-  for (const row of allRows(sqlite)) {
+function renameJoined(q: LedgerQuery) {
+  const tables = { category: 'ledger_categories', group: 'ledger_category_groups', label: 'ledger_labels' } as const
+  for (const row of allRows(q)) {
     const spec = specOf(row)
     if (!spec.names) continue
     const refs = filterRefs(spec.filter)
     const names: RefNames = { ...spec.names }
     for (const [kind, table] of Object.entries(tables) as Array<[keyof typeof tables, string]>) {
       const ids = JSON.stringify([...refs[kind]])
-      const now = sqlite.prepare(`SELECT id, name FROM ${table} WHERE id IN (SELECT value FROM json_each(?))`).all(ids) as Array<{ id: number; name: string }>
+      const now = q.all<{ id: number; name: string }>(`SELECT id, name FROM ${table} WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?))`, ids)
       if (now.length) names[kind] = Object.fromEntries(now.map((r) => [String(r.id), r.name]))
       else delete names[kind]
     }
-    write.run(JSON.stringify({ ...spec, names: Object.keys(names).length ? names : undefined }), row.id)
+    q.run('UPDATE custom_reports SET spec = ? WHERE ledger_id = @ledger AND id = ?', JSON.stringify({ ...spec, names: Object.keys(names).length ? names : undefined }), row.id)
   }
 }
 
-export function joinCategoryRefs(sqlite: SQLite, joined: Record<'category' | 'group' | 'label', JoinedIds>) {
+export function joinCategoryRefs(ctx: Pick<AppContext, 'q' | 'now'>, joined: Record<'category' | 'group' | 'label', JoinedIds>) {
   const target = (kind: keyof typeof joined, i: number) => joined[kind].to.get(i) ?? null
-  const { changed } = remap(sqlite, (c, place) => {
+  const { changed } = remap(ctx.q, (c, place) => {
     if (c.field === 'category') {
       const ids = c.ids.flatMap((i): Array<number | 'none'> => {
         if (i === 'none') return [i]
@@ -317,9 +317,8 @@ export function joinCategoryRefs(sqlite: SQLite, joined: Record<'category' | 'gr
     }
     return c
   })
-  renameJoined(sqlite)
-  const nameNow = sqlite.prepare('SELECT name FROM categories WHERE id = ?').pluck()
-  const log = { sqlite, now: () => new Date() }
+  renameJoined(ctx.q)
+  const nameNow = (id: number) => ctx.q.pluck<string>('SELECT name FROM ledger_categories WHERE ledger_id = @ledger AND id = ?', id)
   const either = (w: string[]) => (w.length > 1 ? `${w.slice(0, -1).join(', ')} or ${w[w.length - 1]}` : w[0])
   const formerNames = joined.category.names
   for (const change of changed) {
@@ -330,7 +329,7 @@ export function joinCategoryRefs(sqlite: SQLite, joined: Record<'category' | 'gr
     const gone = new Set<string>()
     for (const i of new Set([...only, ...rules])) {
       const to = target('category', i)
-      const now = to === null ? (only.has(i) ? 'Uncategorized' : undefined) : (nameNow.get(to) as string | undefined)
+      const now = to === null ? (only.has(i) ? 'Uncategorized' : undefined) : nameNow(to)
       if (to === null && rules.has(i)) gone.add(former(i))
       if (now && now.toLowerCase() !== formerNames.get(i)?.toLowerCase()) moved.set(now, (moved.get(now) ?? new Set()).add(former(i)))
     }
@@ -345,8 +344,8 @@ export function joinCategoryRefs(sqlite: SQLite, joined: Record<'category' | 'gr
     const name = change.row.name
     const filtersBy = [...moved].map(([now, was]) => `${now} in place of ${[...was].join(' and ')}`).join(', ')
     const no = gone.size ? `no longer by ${either([...gone])}` : ''
-    if (filtersBy) logChange(log, change, `${name} filters by ${filtersBy}${no && `, and ${no}`}`)
-    else if (no) logChange(log, change, `${name} no longer filters by ${either([...gone])}`)
+    if (filtersBy) logChange(ctx, change, `${name} filters by ${filtersBy}${no && `, and ${no}`}`)
+    else if (no) logChange(ctx, change, `${name} no longer filters by ${either([...gone])}`)
   }
 }
 
@@ -359,10 +358,10 @@ export function joinCategoryRefs(sqlite: SQLite, joined: Record<'category' | 'gr
 export function carryPayeeRefs(ctx: AppContext, pairs: Array<[from: string, to: string]>) {
   const tos = new Map<string, Set<string>>()
   for (const [from, to] of pairs) if (from !== to) tos.set(from, (tos.get(from) ?? new Set()).add(to))
-  if (!tos.size || !ctx.sqlite.prepare('SELECT 1 FROM custom_reports LIMIT 1').get()) return
-  const has = ctx.sqlite.prepare('SELECT 1 FROM transactions WHERE payee_key = ? LIMIT 1').pluck()
-  const { changed, tooBig } = remap(ctx.sqlite, (c) =>
-    c.field === 'payee' ? { field: 'payee', keys: c.keys.flatMap((k) => (tos.has(k) ? [...(has.get(k) ? [k] : []), ...tos.get(k)!] : [k])) } : c,
+  if (!tos.size || !ctx.q.pluck('SELECT 1 FROM custom_reports WHERE ledger_id = @ledger LIMIT 1')) return
+  const has = (key: string) => !!ctx.q.pluck('SELECT 1 FROM transactions WHERE ledger_id = @ledger AND payee_key = ? LIMIT 1', key)
+  const { changed, tooBig } = remap(ctx.q, (c) =>
+    c.field === 'payee' ? { field: 'payee', keys: c.keys.flatMap((k) => (tos.has(k) ? [...(has(k) ? [k] : []), ...tos.get(k)!] : [k])) } : c,
   )
   const named = (keys: string[]) => keys.map((k) => payeeName(ctx, k) ?? k)
   for (const change of changed) {

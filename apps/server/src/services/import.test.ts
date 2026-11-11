@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { importCommitSchema, importPreviewSchema, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { addTx, countRows, twinAccounts, twinLedgers } from '../test/transaction-twins'
 import { suggestCategory } from './categorize'
-import { commitImport, previewImport, recategorize, undoBatch, type Recategorized } from './import'
+import { categorizeUncategorized, commitImport, listBatches, previewImport, recategorize, undoBatch, type Recategorized } from './import'
 import { setPayeeChoice } from './payees'
 import { createTransaction, getTransaction, listTransactions } from './transactions'
 
@@ -63,7 +64,7 @@ describe('asking AI again', () => {
     setPayeeChoice(ctx, { payeeKey: always.payeeKey, mode: 'always', categoryId: groceries })
     // Uncategorized, though its payee is always Groceries (it became that payee after the choice).
     const waiting = await add('FRESH MARKET', -3000, '2026-09-04')
-    ctx.sqlite.prepare('UPDATE transactions SET category_id = NULL, category_source = NULL, needs_review = 0 WHERE id = ?').run(waiting.id)
+    ctx.q.run('UPDATE transactions SET category_id = NULL, category_source = NULL, needs_review = 0 WHERE id = ? AND ledger_id = @ledger', waiting.id)
     expect((await suggestCategory(ctx, { payee: 'CORNER CAFE', amountMinor: -1200, useAi: false })).categoryId).toBe(groceries)
 
     let changed: Recategorized[] = []
@@ -89,5 +90,50 @@ describe('asking AI again', () => {
   it('needs an AI provider', () => {
     const ctx = testContext()
     expect(() => recategorize(ctx, [1])).toThrow('Set up an AI provider first')
+  })
+})
+
+describe('imports in two ledgers', () => {
+  it('finds duplicates, lists batches and undoes them in its own ledger only', () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    // B already has the rows A is about to import.
+    const batchB = commitImport(b, importCommitSchema.parse({ accountId: accB.chequing, fileName: 'td.csv', rows }), { background: false })
+    expect(previewImport(a, importPreviewSchema.parse({ accountId: accA.chequing, rows })).map((r) => r.duplicateOf)).toEqual([null, null, null])
+    const batchA = commitImport(a, importCommitSchema.parse({ accountId: accA.chequing, fileName: 'td.csv', rows }), { background: false })
+    expect(batchA).toMatchObject({ imported: 3, skippedDuplicates: 0 })
+
+    expect(listBatches(a)).toEqual([expect.objectContaining({ id: batchA.batchId, accountId: accA.chequing, accountName: 'Chequing', rowCount: 3, remaining: 3 })])
+    expect(listBatches(b).map((x) => x.id)).toEqual([batchB.batchId])
+
+    // The other ledger's account and batch aren't there.
+    expect(() => previewImport(a, importPreviewSchema.parse({ accountId: accB.chequing, rows }))).toThrow('That account does not exist')
+    expect(() => commitImport(a, importCommitSchema.parse({ accountId: accB.chequing, rows }))).toThrow('That account does not exist')
+    expect(() => undoBatch(a, batchB.batchId!)).toThrow('Import not found')
+    expect(countRows(b, 'transactions')).toBe(3)
+
+    undoBatch(a, batchA.batchId!)
+    expect(countRows(a, 'transactions')).toBe(0)
+    expect(countRows(a, 'import_batches')).toBe(0)
+    expect(countRows(b, 'transactions')).toBe(3)
+    expect(listBatches(b)).toHaveLength(1)
+  })
+
+  it('asks AI about its own uncategorized transactions only', async () => {
+    const asked: string[] = []
+    const { a, b } = twinLedgers()
+    for (const ctx of [a, b]) {
+      ctx.llm = async (req) => {
+        asked.push(req.payee)
+        return { category: 'Dine out', confidence: 0.8, slot: 'primary', model: 'm' }
+      }
+    }
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const mine = addTx(a, accA.chequing, '2026-09-01', -1_200, 'CORNER CAFE')
+    const theirs = addTx(b, accB.chequing, '2026-09-01', -1_500, 'BEAN BAR')
+    await categorizeUncategorized(a)
+    expect(asked).toEqual(['CORNER CAFE'])
+    expect(getTransaction(a, mine).categoryId).toBe(categoryId(a, 'Dine out'))
+    expect(getTransaction(b, theirs).categoryId).toBeNull()
   })
 })

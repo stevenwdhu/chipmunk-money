@@ -1,7 +1,9 @@
 import type Database from 'better-sqlite3'
+import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { notFound } from '../lib/http'
-import type { SQLite } from './client'
+import type { DB, SQLite } from './client'
 import { checkPinned, ledgerTableIn, LedgerScopeError, usesLedgerParam } from './pins'
+import * as schema from './schema'
 import { TABLES } from './tables'
 import type { UnscopedReason } from './unscoped-sites'
 
@@ -115,16 +117,52 @@ export function ledgerMaintenance<T>(sqlite: SQLite, ledgerId: string, fn: () =>
   return withScope(sqlite, new Set([ledgerId]), fn)
 }
 
+type Row = Record<string, unknown>
+
+/**
+ * Statements with every ledger in scope (what allLedgers hands its callback): the same calls as
+ * the ledger handle, with no pin checker and no @ledger.
+ */
+export class UnscopedQuery {
+  constructor(private readonly sqlite: SQLite) {}
+
+  all<T = Row>(sql: string, ...params: unknown[]): T[] {
+    return this.sqlite.prepare(sql).all(...params) as T[]
+  }
+
+  get<T = Row>(sql: string, ...params: unknown[]): T | undefined {
+    return this.sqlite.prepare(sql).get(...params) as T | undefined
+  }
+
+  /** The first column of the first row. */
+  pluck<T = unknown>(sql: string, ...params: unknown[]): T | undefined {
+    return this.sqlite.prepare(sql).pluck().get(...params) as T | undefined
+  }
+
+  /** The first column of every row. */
+  column<T = unknown>(sql: string, ...params: unknown[]): T[] {
+    return this.sqlite.prepare(sql).pluck().all(...params) as T[]
+  }
+
+  run(sql: string, ...params: unknown[]): Database.RunResult {
+    return this.sqlite.prepare(sql).run(...params)
+  }
+
+  /** Runs fn in a transaction (a savepoint when one is open). */
+  transaction<T>(fn: () => T): T {
+    return this.sqlite.transaction(fn)()
+  }
+}
+
 /**
  * Runs fn with every ledger in scope and no pin checker. Each call site is listed, with why, in
  * unscoped-sites.ts (the reason is one of its keys).
  */
-export function allLedgers<T>(sqlite: SQLite, reason: UnscopedReason, fn: (sqlite: SQLite) => T): T {
+export function allLedgers<T>(sqlite: SQLite, reason: UnscopedReason, fn: (db: UnscopedQuery) => T): T {
   void reason
-  return withScope(sqlite, 'all', () => fn(sqlite))
+  return withScope(sqlite, 'all', () => fn(new UnscopedQuery(sqlite)))
 }
 
-type Row = Record<string, unknown>
 
 const isNamedParams = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)
@@ -257,44 +295,7 @@ export function appOnlyConnection(sqlite: SQLite): SQLite {
   })
 }
 
-/**
- * @deprecated For ctx.sqlite and ctx.db until Stage B converts every use to ctx.q. The one
- * connection, with statements run in one ledger's write scope but not pin checked: writes can't
- * reach another ledger, reads can. serialize() is refused, since it would copy every ledger.
- */
-export function scopedConnection(sqlite: SQLite, ledgerId: string): SQLite {
-  const scope = new Set([ledgerId])
-  const inScope = <T>(fn: () => T) => withScope(sqlite, scope, fn)
-  const wrapStatement = (stmt: Database.Statement): Database.Statement => {
-    const proxy: Database.Statement = new Proxy(stmt, {
-      get(target, prop) {
-        const value = Reflect.get(target, prop, target) as unknown
-        if (typeof value !== 'function') return value
-        return (...args: unknown[]) => {
-          const result = inScope(() => (value as (...a: unknown[]) => unknown).apply(target, args))
-          return result === target ? proxy : result
-        }
-      },
-    })
-    return proxy
-  }
-  const db: SQLite = new Proxy(sqlite, {
-    get(target, prop) {
-      if (prop === 'prepare') return (source: string) => wrapStatement(target.prepare(source))
-      if (prop === 'exec') {
-        return (source: string) => {
-          inScope(() => target.exec(source))
-          return db
-        }
-      }
-      if (prop === 'serialize') {
-        return () => {
-          throw new Error("A ledger's backup is its own export now (Stage C), not a copy of the database")
-        }
-      }
-      const value = Reflect.get(target, prop, target) as unknown
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-  return db
+/** Drizzle over the app-wide tables (ctx.app.db), on appOnlyConnection. */
+export function appDatabase(sqlite: SQLite): DB {
+  return drizzle(appOnlyConnection(sqlite), { schema })
 }

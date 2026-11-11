@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
-import type Database from 'better-sqlite3'
+import { and, asc, eq, gte, isNull, lte, min, sql } from 'drizzle-orm'
 import { addDays, type ISODate } from '@chipmunk/shared'
+import { bankTransactions } from '../../db/schema'
+import type { AppStore } from '../context'
 import type { RemoteTransaction } from './types'
 
 /**
- * Each bank account's transactions as its service last reported them (meta.db `bank_transactions`),
+ * Each bank account's transactions as its service last reported them (the app-wide `bank_transactions`),
  * linked or not. Syncs are the only thing that changes them. Switching or linking an account takes
  * them from here, so it never fetches.
  */
@@ -22,58 +24,96 @@ export interface Received {
 }
 
 /** Keeps what a sync brought: new ones and changed ones, and marks the ones that are gone. */
-export function keepTransactions(meta: Database.Database, bankAccountId: string, received: Received, now: string) {
-  const existing = meta.prepare('SELECT data, removed_at AS removedAt FROM bank_transactions WHERE bank_account_id = ? AND remote_id = ?')
-  const upsert = meta.prepare(
-    `INSERT INTO bank_transactions (bank_account_id, remote_id, date, pending, data, removed_at, first_seen_at, updated_at)
-     VALUES (@bankAccountId, @remoteId, @date, @pending, @data, NULL, @now, @now)
-     ON CONFLICT (bank_account_id, remote_id) DO UPDATE SET date = @date, pending = @pending, data = @data, removed_at = NULL, updated_at = @now`,
-  )
-  const remove = meta.prepare('UPDATE bank_transactions SET removed_at = ?, updated_at = ? WHERE bank_account_id = ? AND remote_id = ? AND removed_at IS NULL')
-  meta.transaction(() => {
-    for (const t of received.transactions) {
-      const data = JSON.stringify(t)
-      const before = existing.get(bankAccountId, t.remoteId) as { data: string; removedAt: string | null } | undefined
-      if (before && before.data === data && !before.removedAt) continue
-      upsert.run({ bankAccountId, remoteId: t.remoteId, date: t.date, pending: t.pending ? 1 : 0, data, now })
+export function keepTransactions(app: AppStore, bankAccountId: string, received: Received, now: string) {
+  const { db } = app
+  const t = bankTransactions
+  const ofAccount = eq(t.bankAccountId, bankAccountId)
+  const upsert = db
+    .insert(t)
+    .values({
+      bankAccountId,
+      remoteId: sql.placeholder('remoteId'),
+      date: sql.placeholder('date'),
+      pending: sql.placeholder('pending'),
+      data: sql.placeholder('data'),
+      removedAt: null,
+      firstSeenAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [t.bankAccountId, t.remoteId],
+      set: { date: sql`excluded.date`, pending: sql`excluded.pending`, data: sql`excluded.data`, removedAt: null, updatedAt: now },
+    })
+    .prepare()
+  const remove = db
+    .update(t)
+    .set({ removedAt: now, updatedAt: now })
+    .where(and(ofAccount, eq(t.remoteId, sql.placeholder('remoteId')), isNull(t.removedAt)))
+    .prepare()
+  db.transaction(() => {
+    const before = new Map(
+      db
+        .select({ remoteId: t.remoteId, data: t.data, removedAt: t.removedAt })
+        .from(t)
+        .where(ofAccount)
+        .all()
+        .map((r) => [r.remoteId, r]),
+    )
+    for (const tx of received.transactions) {
+      const data = JSON.stringify(tx)
+      const kept = before.get(tx.remoteId)
+      if (kept && kept.data === data && !kept.removedAt) continue
+      upsert.run({ remoteId: tx.remoteId, date: tx.date, pending: tx.pending ? 1 : 0, data })
     }
-    for (const r of received.removed) remove.run(now, now, bankAccountId, r.remoteId)
+    for (const r of received.removed) remove.run({ remoteId: r.remoteId })
     if (received.window) {
-      const reported = new Set(received.transactions.map((t) => t.remoteId))
+      const reported = new Set(received.transactions.map((tx) => tx.remoteId))
       // A day inside the window's start: it's a timestamp, and dates are local.
-      const gone = meta
-        .prepare(
-          `SELECT remote_id AS remoteId FROM bank_transactions
-           WHERE bank_account_id = ? AND pending = 1 AND removed_at IS NULL AND date >= ? AND date <= ?`,
-        )
-        .all(bankAccountId, addDays(received.window.from, 1), received.window.to) as Array<{ remoteId: string }>
-      for (const g of gone) if (!reported.has(g.remoteId)) remove.run(now, now, bankAccountId, g.remoteId)
+      const gone = db
+        .select({ remoteId: t.remoteId })
+        .from(t)
+        .where(and(ofAccount, eq(t.pending, true), isNull(t.removedAt), gte(t.date, addDays(received.window.from, 1)), lte(t.date, received.window.to)))
+        .all()
+      for (const g of gone) if (!reported.has(g.remoteId)) remove.run({ remoteId: g.remoteId })
     }
-  })()
+  })
 }
 
 /** Kept, not trades: what an account can take in. */
-const IMPORTABLE = "removed_at IS NULL AND json_extract(data, '$.trade') IS NOT 1"
+const importable = () => and(isNull(bankTransactions.removedAt), sql`json_extract(${bankTransactions.data}, '$.trade') IS NOT 1`)
 
 /** A bank account's transactions the service still reports, from `from` on, oldest first (not trades). */
-export function storedTransactions(meta: Database.Database, bankAccountId: string, from?: ISODate | null): RemoteTransaction[] {
-  const rows = meta
-    .prepare(`SELECT data FROM bank_transactions WHERE bank_account_id = ? AND ${IMPORTABLE} AND date >= ? ORDER BY date, remote_id`)
-    .pluck()
-    .all(bankAccountId, from ?? '') as string[]
-  return rows.map((d) => JSON.parse(d) as RemoteTransaction)
+export function storedTransactions(app: AppStore, bankAccountId: string, from?: ISODate | null): RemoteTransaction[] {
+  const t = bankTransactions
+  const rows = app.db
+    .select({ data: t.data })
+    .from(t)
+    .where(and(eq(t.bankAccountId, bankAccountId), importable(), gte(t.date, from ?? '')))
+    .orderBy(asc(t.date), asc(t.remoteId))
+    .all()
+  return rows.map((r) => JSON.parse(r.data) as RemoteTransaction)
 }
 
 /** The date of a bank account's oldest transaction kept (not trades), if any. */
-export function oldestStored(meta: Database.Database, bankAccountId: string): ISODate | null {
-  return meta.prepare(`SELECT min(date) FROM bank_transactions WHERE bank_account_id = ? AND ${IMPORTABLE}`).pluck().get(bankAccountId) as ISODate | null
+export function oldestStored(app: AppStore, bankAccountId: string): ISODate | null {
+  const t = bankTransactions
+  const row = app.db
+    .select({ oldest: min(t.date) })
+    .from(t)
+    .where(and(eq(t.bankAccountId, bankAccountId), importable()))
+    .get()
+  return row?.oldest ?? null
 }
 
 /** Changes whenever a sync changes what's kept for the bank account. */
-export function storedStamp(meta: Database.Database, bankAccountId: string): string {
-  const rows = meta
-    .prepare('SELECT remote_id, updated_at FROM bank_transactions WHERE bank_account_id = ? ORDER BY remote_id')
-    .raw()
-    .all(bankAccountId)
+export function storedStamp(app: AppStore, bankAccountId: string): string {
+  const t = bankTransactions
+  const rows = app.db
+    .select({ remoteId: t.remoteId, updatedAt: t.updatedAt })
+    .from(t)
+    .where(eq(t.bankAccountId, bankAccountId))
+    .orderBy(asc(t.remoteId))
+    .all()
+    .map((r) => [r.remoteId, r.updatedAt])
   return createHash('sha1').update(JSON.stringify(rows)).digest('hex')
 }

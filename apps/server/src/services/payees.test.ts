@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { transactionCreateSchema } from '@chipmunk/shared'
-import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { payeeTidy } from '../db/schema'
+import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
+import { leaveSharedList } from './catalog'
 import { mergeCategory, setCategoryEnabled } from './categories'
 import { aiSuggestion, suggestCategory } from './categorize'
 import { userPrompt } from '../ai/prompt'
 import { createCustomReport, getCustomReport } from './custom-reports'
-import { createNameRule, deleteNameRule, followBankPayee, keepRuleNames, listNameRules, nameWordings, previewNameRules, rebuildPayeeKeys, renamePayee, updateNameRule, worldOfLedger } from './payee-names'
+import { createNameRule, deleteNameRule, followBankPayee, keepRuleNames, listNameRules, nameWordings, previewNameRules, rebuildPayeeKeys, renamePayee, updateNameRule, worldOf, worldOfLedger } from './payee-names'
 import { PAYEE_TIDY_PROMPT, previewTidy, setAiTidy, tidyAgain, tidyNewPayees, tidyStatus, type KnownNames, type PayeeTidier } from './payee-tidy'
-import { getPayeeChoice, listPayeeRules, setPayeeChoice } from './payees'
+import type { AppContext } from './context'
+import { getPayeeChoice, listPayeeRules, searchPayees, setPayeeChoice } from './payees'
 import { createTransaction, getTransaction, insertTransaction, listTransactions, updateTransaction } from './transactions'
 
 const tx = (input: Record<string, unknown>) => transactionCreateSchema.parse(input)
@@ -22,7 +25,7 @@ describe('payee choices', () => {
     const confirmed = await add('2026-09-01', { categoryId: groceries })
     const waiting = await add('2026-09-02')
     const loose = await add('2026-09-03')
-    ctx.sqlite.prepare('UPDATE transactions SET category_id = NULL, needs_review = 0 WHERE id = ?').run(loose.id)
+    ctx.q.run('UPDATE transactions SET category_id = NULL, needs_review = 0 WHERE ledger_id = @ledger AND id = ?', loose.id)
     expect(getTransaction(ctx, waiting.id)).toMatchObject({ categoryId: groceries, needsReview: true })
 
     expect(getPayeeChoice(ctx, 'a&w restaurants 123', dineOut)).toMatchObject({ mode: 'ask', pending: 2 })
@@ -79,6 +82,8 @@ describe('payee choices', () => {
 
   it('follows its category when it’s merged, and goes when it’s turned off', async () => {
     const ctx = testContext()
+    // A ledger merges categories of its own list (the shared list's are merged in App settings).
+    leaveSharedList(ctx)
     const [dineOut, treats, groceries] = [categoryId(ctx, 'Dine out'), categoryId(ctx, 'Drinks & treats'), categoryId(ctx, 'Groceries')]
     setPayeeChoice(ctx, { payeeKey: 'starbucks', mode: 'always', categoryId: treats })
     setPayeeChoice(ctx, { payeeKey: 'loblaws', mode: 'always', categoryId: groceries })
@@ -179,7 +184,7 @@ describe('payee name rules', () => {
     const groceries = categoryId(ctx, 'Groceries')
     const id = insertTransaction(ctx, tx({ accountId: acc, date: '2026-10-07', amountMinor: -2040, payee: 'Nbx*Snackbox', categoryId: groceries }), { origin: 'sync', skipRecurring: true, suggestion: null })
     // Keyed as the old built-in cleanup made it, with a choice for that payee.
-    ctx.sqlite.prepare("UPDATE transactions SET payee_key = 'snackbox' WHERE id = ?").run(id)
+    ctx.q.run("UPDATE transactions SET payee_key = 'snackbox' WHERE ledger_id = @ledger AND id = ?", id)
     setPayeeChoice(ctx, { payeeKey: 'snackbox', mode: 'always', categoryId: groceries })
 
     expect(rebuildPayeeKeys(ctx)).toEqual([id])
@@ -193,7 +198,7 @@ describe('payee name rules', () => {
     const acc = makeAccount(ctx, 'Visa', 'credit')
     const add = (payee: string, olderKey?: string) => {
       const id = insertTransaction(ctx, tx({ accountId: acc, date: '2026-10-07', amountMinor: -2040, payee }), { origin: 'sync', skipRecurring: true, suggestion: null })
-      if (olderKey) ctx.sqlite.prepare('UPDATE transactions SET payee_key = ? WHERE id = ?').run(olderKey, id)
+      if (olderKey) ctx.q.run('UPDATE transactions SET payee_key = ? WHERE ledger_id = @ledger AND id = ?', olderKey, id)
       return id
     }
     // Keyed as older naming made them: one of snackbox's transactions moves, and all of corner cafe's.
@@ -213,7 +218,7 @@ describe('payee name rules', () => {
       filterOut: [{ when: [{ field: 'payee', keys: [cafeKey] }] }],
     })
     expect(getCustomReport(ctx, other.id)).toEqual(other)
-    expect(ctx.sqlite.prepare("SELECT actor, entity_id AS id, summary FROM activity WHERE entity = 'custom_report'").all()).toEqual([
+    expect(ctx.q.all("SELECT actor, entity_id AS id, summary FROM activity WHERE ledger_id = @ledger AND entity = 'custom_report' ORDER BY id")).toEqual([
       { actor: 'Chipmunk', id: String(report.id), summary: 'Treats now filters by the payees’ new names, Nbx*Snackbox, Tst-Corner Cafe' },
     ])
   })
@@ -234,7 +239,7 @@ describe('payee name rules', () => {
     const id = sync('2026-10-07', 'Tst-Corner Cafe')
     const { rule } = createNameRule(world, { kind: 'same', patterns: ['Corner Cafe'], name: 'The Corner' })
     // Named when the built-in cleanup dropped Toast's “Tst-”.
-    ctx.sqlite.prepare("UPDATE transactions SET payee_key = 'the corner' WHERE id = ?").run(id)
+    ctx.q.run("UPDATE transactions SET payee_key = 'the corner' WHERE ledger_id = @ledger AND id = ?", id)
     expect(keepRuleNames(world)).toBe(1)
     expect(listNameRules(world)).toEqual([expect.objectContaining({ id: rule.id, patterns: ['Corner Cafe', 'Tst-Corner Cafe'], transactionCount: 1 })])
     expect(rebuildPayeeKeys(ctx)).toEqual([])
@@ -440,7 +445,7 @@ describe('AI tidying of payee names', () => {
     const world = worldOfLedger(ctx)
     const acc = makeAccount(ctx)
     const id = insertTransaction(ctx, tx({ accountId: acc, date: '2026-10-01', amountMinor: 5000, payee: 'JANE DOE - INTERAC e-Transfer®' }), { origin: 'sync', skipRecurring: true, suggestion: null })
-    ctx.meta.sqlite.prepare('INSERT INTO payee_tidy (original, tidied, prompt) VALUES (?, ?, ?)').run('JANE DOE - INTERAC e-Transfer®', 'Jane Doe', PAYEE_TIDY_PROMPT - 1)
+    ctx.meta.db.insert(payeeTidy).values({ original: 'JANE DOE - INTERAC e-Transfer®', tidied: 'Jane Doe', prompt: PAYEE_TIDY_PROMPT - 1 }).run()
     const ai = fakeAi({ 'JANE DOE - INTERAC e-Transfer®': 'Jane Doe - e-Transfer' })
 
     // The old name isn't shown as one to reuse, and the preview asks again.
@@ -466,5 +471,74 @@ describe('AI tidying of payee names', () => {
     })
     await settle()
     expect(tidyStatus(world)).toMatchObject({ enabled: true, running: false, error: 'Rate limited', names: [] })
+  })
+})
+
+describe('payees in two ledgers', () => {
+  /** Two ledgers in one database, with the same payees synced into each. */
+  function twins() {
+    const storage = testStorage()
+    const a = storage.registry.defaultContext()
+    const b = testLedger(storage, 'Family')
+    const accounts = new Map([a, b].map((ctx) => [ctx, makeAccount(ctx, 'Visa', 'credit')]))
+    const sync = (ctx: AppContext, date: string, payee: string) =>
+      insertTransaction(ctx, tx({ accountId: accounts.get(ctx)!, date, amountMinor: -1500, payee }), { origin: 'sync', skipRecurring: true, suggestion: null })
+    return { storage, a, b, sync, world: worldOf(storage) }
+  }
+
+  it('keep each ledger’s choices and payee counts to itself', () => {
+    const { a, b, sync } = twins()
+    const groceries = categoryId(a, 'Groceries')
+    const mine = sync(a, '2026-10-01', 'SHOP 123')
+    const theirs = [sync(b, '2026-10-01', 'SHOP 123'), sync(b, '2026-10-02', 'SHOP 123')]
+    const key = getTransaction(a, mine).payeeKey
+    expect(getTransaction(b, theirs[0]!).payeeKey).toBe(key)
+
+    expect(searchPayees(a, { limit: 10 })).toEqual([expect.objectContaining({ payeeKey: key, count: 1 })])
+    expect(searchPayees(b, { limit: 10 })).toEqual([expect.objectContaining({ payeeKey: key, count: 2 })])
+    expect(getPayeeChoice(b, key, groceries)).toMatchObject({ mode: 'ask', pending: 2 })
+
+    // Always Groceries, in one ledger: only its own transaction is set.
+    expect(setPayeeChoice(a, { payeeKey: key, mode: 'always', categoryId: groceries })).toMatchObject({ updated: 1 })
+    expect(getTransaction(a, mine).categoryId).toBe(groceries)
+    expect(theirs.map((id) => getTransaction(b, id).categoryId)).toEqual([null, null])
+    expect(listPayeeRules(a)).toEqual([expect.objectContaining({ payeeKey: key, transactionCount: 1 })])
+    expect(listPayeeRules(b)).toEqual([])
+    expect(getPayeeChoice(b, key)).toMatchObject({ mode: 'ask', categoryId: null, pending: 0 })
+
+    // The other ledger can choose otherwise for the same payee.
+    setPayeeChoice(b, { payeeKey: key, mode: 'review' })
+    expect([getPayeeChoice(a, key).mode, getPayeeChoice(b, key).mode]).toEqual(['always', 'review'])
+    setPayeeChoice(b, { payeeKey: key, mode: 'ask' })
+    expect(getPayeeChoice(a, key).mode).toBe('always')
+  })
+
+  it('are renamed in every ledger, each ledger’s choice and reports following in that ledger', () => {
+    const { a, b, sync, world } = twins()
+    const groceries = categoryId(a, 'Groceries')
+    const mine = sync(a, '2026-10-01', 'SHOP 123')
+    const theirs = sync(b, '2026-10-01', 'SHOP 123')
+    sync(b, '2026-10-02', 'SHOP 123')
+    const key = getTransaction(a, mine).payeeKey
+    setPayeeChoice(a, { payeeKey: key, mode: 'always', categoryId: groceries })
+    const reportOf = (ctx: AppContext) => createCustomReport(ctx, { name: 'Shop', spec: { filter: { spending: { only: [{ field: 'payee', keys: [key] }] } } } })
+    const [ra, rb] = [reportOf(a), reportOf(b)]
+
+    // Counted across ledgers: the rule names three transactions.
+    expect(createNameRule(world, { kind: 'same', patterns: ['SHOP 123'], name: 'The Shop' })).toMatchObject({ changed: 3, rule: { transactionCount: 3 } })
+    const now = getTransaction(a, mine).payeeKey
+    expect(now).not.toBe(key)
+    expect(getTransaction(b, theirs)).toMatchObject({ payeeKey: now, payeeName: 'The Shop', categoryId: null })
+    expect(listPayeeRules(a).map((r) => [r.payeeKey, r.categoryId])).toEqual([[now, groceries]])
+    expect(listPayeeRules(b)).toEqual([])
+    for (const [ctx, r] of [
+      [a, ra],
+      [b, rb],
+    ] as const) {
+      expect(getCustomReport(ctx, r.id).spec.filter.spending!.only).toEqual([{ field: 'payee', keys: [now] }])
+      expect(ctx.q.column("SELECT summary FROM activity WHERE ledger_id = @ledger AND entity = 'custom_report'")).toEqual([
+        'Shop now filters by the payee’s new name, The Shop',
+      ])
+    }
   })
 })

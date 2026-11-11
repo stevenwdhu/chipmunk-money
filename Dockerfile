@@ -80,7 +80,7 @@ COPY --from=build /src/apps/mcp/dist ./apps/mcp/dist
 # The database works on this platform: the build stage picked the binary for it.
 RUN node -e "const D=require('/app/node_modules/better-sqlite3'); new D(':memory:').prepare('select 1').get()"
 USER node
-# meta.db, ledgers/, backups/ and secret.key. Keep this volume, and back it up.
+# chipmunk.db, backups/ and secret.key. Keep this volume, and back it up.
 VOLUME ["/data"]
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

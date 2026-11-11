@@ -1,4 +1,4 @@
-import type { DB, SQLite } from '../db/client'
+import type { DB } from '../db/client'
 import type { LedgerQuery } from '../db/scope'
 import type { LlmCategorizer } from '../ai/types'
 import type { SecretBox } from '../lib/secrets'
@@ -7,11 +7,6 @@ import type { SecretBox } from '../lib/secrets'
 export interface AppStore {
   /** Drizzle over the app-wide tables only: SQL naming a table of ledger data is refused. */
   db: DB
-  /**
-   * @deprecated Stage B converts every use to ctx.q (ledger data) or app.db (app-wide tables).
-   * The raw connection: not pin checked, and writes to ledger data are refused outside a scope.
-   */
-  sqlite: SQLite
   /** Encrypts what's secret in it (AI keys, Plaid's secret, bank access) with data/secret.key. */
   secrets: SecretBox
   /** Injectable fetch for app-wide outside services (signing in to ChatGPT, its models and requests). */
@@ -29,10 +24,6 @@ export interface AppContext {
   app: AppStore
   /** The same object as `app`, under its older name. */
   meta: AppStore
-  /** @deprecated Stage B converts every use to ctx.q. Drizzle on the one connection, writes in this ledger's scope. */
-  db: DB
-  /** @deprecated Stage B converts every use to ctx.q. The one connection, writes in this ledger's scope, reads not pin checked. */
-  sqlite: SQLite
   ledger: { id: string; name: string; slug: string }
   /** Injectable clock for tests. */
   now: () => Date

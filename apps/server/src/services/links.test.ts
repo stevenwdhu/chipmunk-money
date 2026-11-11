@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { addDays, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
+import { addTx, twinAccounts, twinLedgers } from '../test/transaction-twins'
 import type { AppContext } from './context'
 import { setLinks, setLinksTogether } from './links'
 import { byCategory, monthSummary } from './reports'
@@ -189,5 +190,41 @@ describe('paybacks', () => {
     // Only money in, each once.
     expect(() => setLinksTogether(ctx, [{ id: dinner, links: [] }])).toThrow('Only money in can pay back')
     expect(() => setLinksTogether(ctx, [{ id: jo, links: [] }, { id: jo, links: [] }])).toThrow('Set each transaction once.')
+  })
+})
+
+describe('links in two ledgers', () => {
+  it('links only within its ledger, and treats the other ledger’s transactions as missing', () => {
+    const { a, b } = twinLedgers()
+    const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
+    const dineOut = categoryId(a, 'Dine out')
+    const billA = addTx(a, accA.card, '2026-09-03', -6_000, 'Corner Cafe', { categoryId: dineOut })
+    const backA = addTx(a, accA.chequing, '2026-09-05', 3_000, 'Alex - INTERAC e-Transfer')
+    const billB = addTx(b, accB.card, '2026-09-03', -6_000, 'Corner Cafe', { categoryId: dineOut })
+    const backB = addTx(b, accB.chequing, '2026-09-05', 3_000, 'Alex - INTERAC e-Transfer')
+
+    // Its candidates are its ledger's.
+    expect(linkCandidates(a, backA, { kind: 'payback' }).map((c) => c.transaction.id)).toEqual([billA])
+    expect(linkCandidates(a, backA, { kind: 'payback', q: 'cafe' }).map((c) => c.transaction.id)).toEqual([billA])
+
+    const missing = 'Transaction not found'
+    expect(() => setLinks(a, backA, [{ kind: 'payback', transactionId: billB, amountMinor: 3_000 }])).toThrow(missing)
+    expect(() => setLinks(a, backB, [{ kind: 'payback', transactionId: billA, amountMinor: 3_000 }])).toThrow(missing)
+    expect(() => setLinksTogether(a, [{ id: backB, links: [] }])).toThrow(missing)
+
+    setLinks(a, backA, [{ kind: 'payback', transactionId: billA, amountMinor: 3_000 }])
+    setLinks(b, backB, [{ kind: 'payback', transactionId: billB, amountMinor: 1_000 }])
+    expect(getTransaction(a, backA)).toMatchObject({ categoryId: dineOut, categorySource: 'linked', links: [expect.objectContaining({ transactionId: billA, amountMinor: 3_000 })] })
+    expect(getTransaction(b, backB)).toMatchObject({ categorySource: null, links: [expect.objectContaining({ transactionId: billB, amountMinor: 1_000 })] })
+    expect(getTransaction(a, billA).links).toHaveLength(1)
+    // What's left of each bill counts its own ledger's links.
+    const again = (ctx: AppContext, acc: { chequing: number }) => addTx(ctx, acc.chequing, '2026-09-06', 500, 'Sam - INTERAC e-Transfer')
+    expect(linkCandidates(a, again(a, accA), { kind: 'payback' })[0]).toMatchObject({ leftMinor: 3_000 })
+    expect(linkCandidates(b, again(b, accB), { kind: 'payback' })[0]).toMatchObject({ leftMinor: 5_000 })
+
+    // Unlinking in A leaves B's.
+    setLinks(a, billA, [])
+    expect(getTransaction(a, backA).links).toEqual([])
+    expect(getTransaction(b, billB).links).toHaveLength(1)
   })
 })

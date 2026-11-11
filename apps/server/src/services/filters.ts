@@ -4,6 +4,8 @@ import { COUNTABLE, IS_INCOME, IS_SPENDING } from './totals'
 /**
  * Report filters (ReportFilter, in @chipmunk/shared) as SQL over `transaction_lines t`, with its category `c`
  * and the transaction each line belongs to `o` (itself, or for a refund or payback, its purchase).
+ * Each fragment pins what it reads to the ledger (`@ledger`, which the ledger handle binds), so the
+ * statement it goes in runs through ctx.q.
  * The category (and its group and labels) is the line's (a refund or payback is in its purchase's),
  * and everything else is the owner's: filtering out a purchase also filters out what's linked to it,
  * in any month or account.
@@ -38,7 +40,7 @@ export function textLike(alias: string, text: string, bind: Binder, scope?: Text
   const pattern = `%${text.replace(/[%_\\]/g, (m) => `\\${m}`)}%`
   const asCents = text.replace(/[$,\s]/g, '')
   const like = (column: string) => `${alias}.${column} LIKE ${bind(pattern)} ESCAPE '\\'`
-  const recurring = () => `${alias}.recurring_item_id IN (SELECT id FROM recurring_items WHERE title LIKE ${bind(pattern)} ESCAPE '\\')`
+  const recurring = () => `${alias}.recurring_item_id IN (SELECT id FROM recurring_items WHERE ledger_id = @ledger AND title LIKE ${bind(pattern)} ESCAPE '\\')`
   if (scope) {
     const where: Record<TextScope, () => string[]> = {
       payee: () => [like('payee'), like('payee_key')],
@@ -60,15 +62,17 @@ function anyOf(ids: Array<number | 'none'>, bind: Binder, sql: (list: string) =>
   if (ids.includes('none')) any.push(none)
   return any.join(' OR ')
 }
+/** A category_labels row of one of the ledger's categories (its own, or the shared list's when it uses that). */
+const OF_LEDGER = 'category_id IN (SELECT id FROM ledger_categories WHERE ledger_id = @ledger)'
 /** Uncategorized: a transfer isn't, though it has no category. */
 const UNCATEGORIZED = '(t.category_id IS NULL AND t.transfer_pair_id IS NULL)'
 /** Each line's owner, as `o`. */
-export const OWNER_JOIN = 'JOIN transactions o ON o.id = t.owner_id'
+export const OWNER_JOIN = 'JOIN transactions o ON o.id = t.owner_id AND o.ledger_id = t.ledger_id'
 /** A recurring item's payment: not a suggestion's, nor a dismissed one's (their payments keep the link). */
-export const RECURRING = `(SELECT id FROM recurring_items WHERE status IN ('active', 'ended'))`
+export const RECURRING = `(SELECT id FROM recurring_items WHERE ledger_id = @ledger AND status IN ('active', 'ended'))`
 /** The owner's refunds and paybacks, from money in that isn't deleted. */
 const LINKED_IN = `coalesce((SELECT sum(l.amount_minor) FROM transaction_links l JOIN transactions m ON m.id = l.money_in_id
-  WHERE l.money_out_id = o.id AND m.deleted_at IS NULL), 0)`
+  WHERE l.money_out_id = o.id AND m.ledger_id = o.ledger_id AND m.deleted_at IS NULL), 0)`
 /** What the owner comes to (negative is money out): for a purchase, less its refunds and paybacks; for money in, less what's linked to bills. */
 const NET = `(o.amount_minor - o.linked_minor + ${LINKED_IN})`
 /** Your share of the owner: what a purchase cost less its refunds and paybacks, or what came in less what's linked to bills. */
@@ -85,8 +89,8 @@ function conditionSql(c: Condition, side: FilterSide, bind: Binder): string {
       return anyOf(
         c.ids,
         bind,
-        (list) => `t.category_id IN (SELECT category_id FROM category_labels WHERE label_id IN ${list})`,
-        `(${UNCATEGORIZED} OR (t.category_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = t.category_id)))`,
+        (list) => `t.category_id IN (SELECT category_id FROM category_labels WHERE label_id IN ${list} AND ${OF_LEDGER})`,
+        `(${UNCATEGORIZED} OR (t.category_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = t.category_id AND ${OF_LEDGER})))`,
       )
     case 'tag':
       return `EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = o.id AND tt.tag_id IN ${inList(bind, c.ids)})`
@@ -188,7 +192,8 @@ export function listScope(f: ReportFilter | null | undefined, opts: { filteredOu
   else if (compiled) where.push(opts.side ? `(${compiled.counted})` : `(NOT (${COUNTABLE}) OR (${compiled.counted}))`)
   else if (!opts.side) return null
   return {
-    sql: `t.id IN (SELECT t.id FROM transaction_lines t${compiled?.join ?? ''} LEFT JOIN categories c ON c.id = t.category_id WHERE ${where.join(' AND ')})`,
+    sql: `t.id IN (SELECT t.id FROM transaction_lines t${compiled?.join ?? ''} LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+      WHERE t.ledger_id = @ledger AND ${where.join(' AND ')})`,
     params: compiled?.params ?? {},
   }
 }
