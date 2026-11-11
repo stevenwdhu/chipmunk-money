@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ChevronRight } from '@lucide/vue'
-import { comparePeriods, type PeriodSummary } from '@st/shared'
+import { comparePeriods, type PeriodSummary } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { money, percent } from '@/lib/format'

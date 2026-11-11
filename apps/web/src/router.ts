@@ -1,6 +1,6 @@
 import type { QueryClient } from '@tanstack/vue-query'
 import { createRouter, createWebHistory, type RouteLocationRaw, type RouteRecordRaw } from 'vue-router'
-import type { Ledger } from '@st/shared'
+import type { Ledger } from '@chipmunk/shared'
 import { keys } from './composables/queries'
 import { accessRefused, api, ApiError } from './lib/api'
 import { currentLedger, FROM_ANOTHER_LEDGER, lastUsedLedger, setCurrentLedger } from './lib/ledger'
@@ -137,7 +137,7 @@ export function installLedgerGuard(queryClient: QueryClient) {
     const title = to.meta.title as string | undefined
     const ledgers = queryClient.getQueryData<Ledger[]>(keys.ledgers)
     const ledger = ledgers?.find((l) => l.slug === currentLedger.value)
-    const parts = [title, to.params.ledger && ledgers && ledgers.length > 1 ? ledger?.name : undefined, 'Spending Tracker']
+    const parts = [title, to.params.ledger && ledgers && ledgers.length > 1 ? ledger?.name : undefined, 'Chipmunk']
     document.title = parts.filter(Boolean).join(' · ')
   })
 }

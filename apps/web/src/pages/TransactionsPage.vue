@@ -17,7 +17,7 @@ import {
   type FilterSide,
   type ReportFilter,
   type ReportRange,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import FilterChips from '@/components/filters/FilterChips.vue'
 import FilterPanel from '@/components/filters/FilterPanel.vue'
 import InfoTip from '@/components/InfoTip.vue'

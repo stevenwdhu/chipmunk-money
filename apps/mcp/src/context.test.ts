@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Account, Category } from '@st/shared'
+import type { Account, Category } from '@chipmunk/shared'
 import { Lookups, toMinor, ToolError } from './context'
 
 const cat = (id: number, name: string, extra: Partial<Category> = {}): Category => ({

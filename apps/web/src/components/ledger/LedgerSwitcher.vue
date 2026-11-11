@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { Check, ChevronsUpDown, Plus, Settings2 } from '@lucide/vue'
-import type { Ledger } from '@st/shared'
+import type { Ledger } from '@chipmunk/shared'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,7 +51,7 @@ function switchTo(ledger: Ledger) {
         <LedgerMark :ledger="current" :size="props.variant === 'sidebar' ? 'md' : 'sm'" />
         <template v-if="props.variant === 'sidebar'">
           <span class="min-w-0 flex-1">
-            <span class="block text-[11px] leading-tight text-muted-foreground">Spending Tracker</span>
+            <span class="block text-[11px] leading-tight text-muted-foreground">Chipmunk</span>
             <span class="block truncate text-sm leading-tight font-semibold">{{ current?.name ?? '…' }}</span>
           </span>
           <ChevronsUpDown class="size-4 shrink-0 text-muted-foreground" />

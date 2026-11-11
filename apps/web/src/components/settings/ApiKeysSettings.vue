@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { BookOpen, Check, Copy, KeyRound, Loader2, Plus, Trash2 } from '@lucide/vue'
-import type { ApiKey, ApiKeyCreated, ApiScope } from '@st/shared'
+import type { ApiKey, ApiKeyCreated, ApiScope } from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -87,7 +87,7 @@ async function copyKey() {
   copied.value = true
   toast.success('Key copied')
 }
-const example = computed(() => `curl -H "Authorization: Bearer ${created.value?.key ?? 'st_…'}" ${location.origin}/api/v1/me`)
+const example = computed(() => `curl -H "Authorization: Bearer ${created.value?.key ?? 'cm_…'}" ${location.origin}/api/v1/me`)
 
 // Revoke -------------------------------------------------------------------
 const revoking = ref<ApiKey | null>(null)

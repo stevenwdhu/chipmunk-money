@@ -12,7 +12,7 @@ import {
   type PayeeNaming,
   type PayeeRename,
   type PayeeWordingsName,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { learn } from './categorize'

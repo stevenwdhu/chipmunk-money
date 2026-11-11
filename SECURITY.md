@@ -14,7 +14,7 @@ You'll get a reply as soon as possible. Once it's fixed, the fix and the advisor
 
 ## Threat model
 
-Spending Tracker is a self-hosted app for one person or one household. It runs on a machine you control, and the people who can reach it are you and the agents you gave a key to.
+Chipmunk is a self-hosted app for one person or one household. It runs on a machine you control, and the people who can reach it are you and the agents you gave a key to.
 
 **What's sensitive**
 - Every ledger and `meta.db` in the data directory: transactions, balances, accounts, payees and notes.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
-import { copyName, describeFilter, isReportPreset, type FilterNames } from '@st/shared'
+import { copyName, describeFilter, isReportPreset, type FilterNames } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

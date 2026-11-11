@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { Ban, ChevronDown } from '@lucide/vue'
-import { formatMonthShort, UNGROUPED_COLOR, type CategoryAmount } from '@st/shared'
+import { formatMonthShort, UNGROUPED_COLOR, type CategoryAmount } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 import { Card } from '@/components/ui/card'
 import { useCategories, usePeriodSummary } from '@/composables/queries'

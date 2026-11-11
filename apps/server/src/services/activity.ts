@@ -1,6 +1,6 @@
-import type { Activity, ActivityPage } from '@st/shared'
+import type { Activity, ActivityPage } from '@chipmunk/shared'
 import type { z } from 'zod'
-import type { activityQuerySchema } from '@st/shared'
+import type { activityQuerySchema } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
 import type { AppContext } from './context'
 

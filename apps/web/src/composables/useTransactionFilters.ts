@@ -2,7 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { watchDebounced } from '@vueuse/core'
 import { toast } from 'vue-sonner'
-import { FILTER_SIDES, filterToParam, isEmptyFilter, safeParseFilter, type FilterBar, type FilterSide, type ReportFilter } from '@st/shared'
+import { FILTER_SIDES, filterToParam, isEmptyFilter, safeParseFilter, type FilterBar, type FilterSide, type ReportFilter } from '@chipmunk/shared'
 import type { TransactionFilters } from '@/composables/queries'
 import { useQueryState } from '@/composables/useQueryState'
 

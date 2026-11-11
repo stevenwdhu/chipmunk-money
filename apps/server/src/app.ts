@@ -5,7 +5,7 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { logger } from 'hono/logger'
-import { createMcpHttpHandler } from '@st/mcp'
+import { createMcpHttpHandler } from '@chipmunk/mcp'
 import { authenticate, verifyApiKey } from './api/auth'
 import { errorResponse, onError } from './api/errors'
 import { idempotency } from './api/idempotency'
@@ -164,10 +164,10 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
     }
     try {
       await finishChatgptSignIn(storage.meta, c.req.query())
-      return page('Signed in with ChatGPT', 'You can close this tab and go back to Spending Tracker.')
+      return page('Signed in with ChatGPT', 'You can close this tab and go back to Chipmunk.')
     } catch (err) {
       const message = (err instanceof Error ? err.message : String(err)).replace(/[<>&]/g, '')
-      return page('Signing in didn’t finish', `${message} Go back to Spending Tracker and try again.`)
+      return page('Signing in didn’t finish', `${message} Go back to Chipmunk and try again.`)
     }
   })
 
@@ -199,8 +199,8 @@ export function createApp(storage: Storage, opts: AppOptions = {}) {
   app.all('/mcp', uploadLimit, (c) => {
     const token = /^Bearer\s+(\S+)$/i.exec(c.req.header('authorization') ?? '')?.[1]
     if (!token || !verifyApiKey(storage.meta, token, storage.now())) {
-      c.header('WWW-Authenticate', 'Bearer realm="spending-tracker"')
-      return errorResponse(c, 401, 'Send an API key as "Authorization: Bearer st_…". Create one in App settings → API keys.')
+      c.header('WWW-Authenticate', 'Bearer realm="chipmunk"')
+      return errorResponse(c, 401, 'Send an API key as "Authorization: Bearer cm_…". Create one in App settings → API keys.')
     }
     return mcp.fetch(c.req.raw, { authInfo: { token, clientId: 'api-key', scopes: [] } })
   })

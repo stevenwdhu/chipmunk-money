@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, useTemplateRef } from 'vue'
 import { ChevronRight, EyeOff, Plus, RotateCcw } from '@lucide/vue'
-import { addRule, FILTER_LIMITS, type Condition, type ConditionField, type FilteredOut, type FilterNames, type FilterSide } from '@st/shared'
+import { addRule, FILTER_LIMITS, type Condition, type ConditionField, type FilteredOut, type FilterNames, type FilterSide } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import AddMenu, { type AddMenuItem } from './AddMenu.vue'

@@ -7,7 +7,7 @@ import { categoryTree, TOOLS, type ToolDef } from './tools'
 
 export const SERVER_VERSION = '1.0.0'
 
-const INSTRUCTIONS = `Spending Tracker keeps personal finances in ledgers (separate sets of books, e.g. "Personal" and "Family").
+const INSTRUCTIONS = `Chipmunk keeps personal finances in ledgers (separate sets of books, e.g. "Personal" and "Family").
 
 - Every tool takes an optional \`ledger\` (slug or name). Leave it out to use your default ledger; list_ledgers shows them.
 - Amounts you send are in dollars: negative is money out (spending), positive is money in. Results show both cents (\`amountMinor\`) and formatted amounts. Dates are YYYY-MM-DD in the app's time zone.
@@ -33,7 +33,7 @@ function errorText(err: unknown): string {
  */
 export function createSpendingServer(api: ApiClient, me: Me): McpServer {
   const server = new McpServer(
-    { name: 'spending-tracker', title: 'Spending Tracker', version: SERVER_VERSION },
+    { name: 'chipmunk', title: 'Chipmunk', version: SERVER_VERSION },
     { instructions: INSTRUCTIONS },
   )
 

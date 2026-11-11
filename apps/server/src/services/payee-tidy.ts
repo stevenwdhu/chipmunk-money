@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { payeeKey, payeeNamer, type PayeeTidyPreview, type PayeeTidyStatus } from '@st/shared'
+import { payeeKey, payeeNamer, type PayeeTidyPreview, type PayeeTidyStatus } from '@chipmunk/shared'
 import { askStructured } from '../ai/runner'
 import { badRequest } from '../lib/http'
 import type { MetaStore } from './context'

@@ -1,4 +1,4 @@
-import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@st/shared'
+import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
 import { ulid } from '../lib/ids'
 import type { MetaStore } from './context'

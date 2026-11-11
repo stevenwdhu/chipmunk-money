@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Ellipsis, ExternalLink, Loader2, LogIn, Plus, Trash2 } from '@lucide/vue'
-import { BANK_PROVIDER_LABELS, SYNC_INTERVALS, syncIntervalLabel, type BankAccount, type BankConnection, type BankProviderKind, type SyncResult } from '@st/shared'
+import { BANK_PROVIDER_LABELS, SYNC_INTERVALS, syncIntervalLabel, type BankAccount, type BankConnection, type BankProviderKind, type SyncResult } from '@chipmunk/shared'
 import AccountFormDialog from '@/components/AccountFormDialog.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
 import BankConnectionSection from '@/components/settings/BankConnectionSection.vue'

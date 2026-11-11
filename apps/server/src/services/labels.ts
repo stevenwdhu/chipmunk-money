@@ -1,5 +1,5 @@
 import { HTTPException } from 'hono/http-exception'
-import { CATEGORY_COLORS, type Label, type LabelCategories } from '@st/shared'
+import { CATEGORY_COLORS, type Label, type LabelCategories } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
 

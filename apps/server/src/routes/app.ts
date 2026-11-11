@@ -53,7 +53,7 @@ import {
   payeeTidyPreviewSchema,
   payeeTidyStatusSchema,
   payeeTidyUpdateSchema,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { runSlot } from '../ai/runner'
 import { actorName, canUseLedger, createApiKey, listApiKeys, requireLedger, revokeApiKey } from '../api/auth'
 import { ApiRouter, type BaseEnv } from '../api/router'

@@ -11,7 +11,7 @@ import {
   type AccountType,
   monthOf,
   monthRange,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { accounts, balanceSnapshots } from '../db/schema'
 import { notFound } from '../lib/http'
 import type { AppContext } from './context'

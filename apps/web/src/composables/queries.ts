@@ -1,6 +1,6 @@
 import { computed, shallowRef, toValue, watch, type MaybeRefOrGetter } from 'vue'
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { UNGROUPED_COLOR } from '@st/shared'
+import { UNGROUPED_COLOR } from '@chipmunk/shared'
 import type {
   Account,
   AccountCreate,
@@ -100,7 +100,7 @@ import type {
   UpcomingPayment,
   WealthsimpleConnect,
   WealthsimpleConnectResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { api } from '@/lib/api'
 import { currentLedger, lapi } from '@/lib/ledger'
 

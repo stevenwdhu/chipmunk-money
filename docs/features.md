@@ -1,6 +1,6 @@
 # Features
 
-Everything Spending Tracker does, in more detail than the README.
+Everything Chipmunk does, in more detail than the README.
 
 - **Ledgers:** separate sets of books with their own accounts, categories and reports. Switch from the top of the sidebar (or the phone header). Each ledger has its own address (`/l/family/transactions`), so tabs and devices can sit in different ledgers.
 - **Transactions:** quick add from a bottom sheet on your phone (or press <kbd>N</kbd> on desktop), transfers between accounts, tags, notes, search and filters, bulk edit, undo.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Repeat } from '@lucide/vue'
-import { formatMoney, type Transaction } from '@st/shared'
+import { formatMoney, type Transaction } from '@chipmunk/shared'
 import CategoryBadge from '@/components/CategoryBadge.vue'
 import LinkBadge from '@/components/LinkBadge.vue'
 import { billCount, netAmount } from '@/lib/links'

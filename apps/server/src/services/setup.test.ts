@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { transactionCreateSchema } from '@st/shared'
+import { transactionCreateSchema } from '@chipmunk/shared'
 import { createApp } from '../app'
 import { makeAccount, testContext, testStorage } from '../test/helpers'
 import { eraseAll, restoreBackup, setupStatus, startDemo, startEmpty } from './setup'
@@ -58,7 +58,7 @@ describe('setup', () => {
   it('rejects files that are not backups and leaves data alone', () => {
     const ctx = testContext()
     makeAccount(ctx)
-    expect(() => restoreBackup(ctx, new TextEncoder().encode('date,payee,amount\n'.repeat(20)))).toThrow(/isn't a Spending Tracker backup/)
+    expect(() => restoreBackup(ctx, new TextEncoder().encode('date,payee,amount\n'.repeat(20)))).toThrow(/isn't a Chipmunk backup/)
     expect(setupStatus(ctx).accounts).toBe(1)
   })
 

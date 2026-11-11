@@ -1,10 +1,10 @@
 # docker compose up -d, then open http://localhost:8787
-# The project name fixes the volume's name (spending-tracker_spending-data), whatever this folder is called.
-name: spending-tracker
+# The project name fixes the volume's name (chipmunk_chipmunk-data), whatever this folder is called.
+name: chipmunk
 services:
-  spending-tracker:
+  chipmunk:
     build: .
-    image: spending-tracker
+    image: chipmunk
     restart: unless-stopped
     ports:
       # Only this machine can reach it. To open it to your network, use "8787:8787", ideally behind
@@ -12,7 +12,7 @@ services:
       - "127.0.0.1:8787:8787"
     volumes:
       # meta.db, ledgers/, backups/ and secret.key. Back this volume up.
-      - spending-data:/data
+      - chipmunk-data:/data
     # Optional: your settings (AI and Plaid keys and the like); see .env.example.
     env_file:
       - path: .env
@@ -31,4 +31,4 @@ services:
       # ALLOWED_HOSTS: money.example.com
 
 volumes:
-  spending-data:
+  chipmunk-data:

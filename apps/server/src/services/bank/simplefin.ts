@@ -1,4 +1,4 @@
-import { localDateTimeInTz, todayInTz } from '@st/shared'
+import { localDateTimeInTz, todayInTz } from '@chipmunk/shared'
 import { ProviderRequestError, type BankProvider, type FetchResult, type ProviderError, type RemoteAccount } from './types'
 
 /**

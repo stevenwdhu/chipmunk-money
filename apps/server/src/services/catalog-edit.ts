@@ -1,5 +1,5 @@
 import { HTTPException } from 'hono/http-exception'
-import { unusedColor, type Category, type CategoryGroup, type CategoryList, type CategoryMergeResult, type Label } from '@st/shared'
+import { unusedColor, type Category, type CategoryGroup, type CategoryList, type CategoryMergeResult, type Label } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { readCatalog, syncLedgerCategories, touchCatalog, usesSharedList, type Catalog } from './catalog'

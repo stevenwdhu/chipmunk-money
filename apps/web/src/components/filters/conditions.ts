@@ -7,7 +7,7 @@ import {
   type ReportFilter,
   type Rule,
   type TransactionPage,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { money } from '@/lib/format'
 import { lapi } from '@/lib/ledger'
 

@@ -24,7 +24,7 @@ import {
   type MonthKey,
   type ReportFilter,
   type ReportSpec,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { errorMessage } from '@/lib/api'
 import { currentLedger } from '@/lib/ledger'
 import { useCustomReport, useCustomReportMutations, useCustomReports } from './queries'

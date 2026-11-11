@@ -1,4 +1,4 @@
-import { formatDateShort, formatMoney } from '@st/shared'
+import { formatDateShort, formatMoney } from '@chipmunk/shared'
 
 export const money = (minor: number, opts?: { signed?: boolean }) => formatMoney(minor, 'CAD', opts)
 

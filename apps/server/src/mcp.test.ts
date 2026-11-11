@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { describe, expect, it } from 'vitest'
-import type { ApiKeyCreated } from '@st/shared'
+import type { ApiKeyCreated } from '@chipmunk/shared'
 import { createApp } from './app'
 import { startDemo } from './services/setup'
 import { testStorage } from './test/helpers'
@@ -43,7 +43,7 @@ describe('MCP server', () => {
     const res = await app.request('/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     expect(res.status).toBe(401)
     expect(res.headers.get('www-authenticate')).toContain('Bearer')
-    const bad = await app.request('/mcp', { method: 'POST', headers: { authorization: 'Bearer st_nope' }, body: '{}' })
+    const bad = await app.request('/mcp', { method: 'POST', headers: { authorization: 'Bearer cm_nope' }, body: '{}' })
     expect(bad.status).toBe(401)
   })
 
@@ -66,7 +66,7 @@ describe('MCP server', () => {
       method: 'initialize',
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old-agent', version: '1' } },
     })
-    expect(init.result.serverInfo.name).toBe('spending-tracker')
+    expect(init.result.serverInfo.name).toBe('chipmunk')
     expect(init.result.instructions).toContain('ledger')
     const list = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { 'mcp-protocol-version': '2025-06-18' })
     expect(list.result.tools.map((t: Json) => t.name)).toContain('get_month_summary')

@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { EyeOff } from '@lucide/vue'
-import { pick, withSide, type CustomReport, type FilterSide, type Transaction } from '@st/shared'
+import { pick, withSide, type CustomReport, type FilterSide, type Transaction } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useCategories, useCustomReportMutations, useCustomReports } from '@/composables/queries'

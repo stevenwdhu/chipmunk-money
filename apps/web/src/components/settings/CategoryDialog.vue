@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Check, Plus } from '@lucide/vue'
-import type { Category } from '@st/shared'
+import type { Category } from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

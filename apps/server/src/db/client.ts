@@ -79,7 +79,7 @@ export function isTooOld(sqlite: Database.Database, folder = env.ledgerMigration
 function checkUpgradable(sqlite: Database.Database, folder: string, file: string) {
   if (isTooOld(sqlite, folder)) {
     sqlite.close()
-    throw new Error(`${file} is from an older version of Spending Tracker that this one can't upgrade. Upgrade it with a version from before November 2026 first.`)
+    throw new Error(`${file} is from an older version of Chipmunk that this one can't upgrade. Upgrade it with a version from before November 2026 first.`)
   }
 }
 

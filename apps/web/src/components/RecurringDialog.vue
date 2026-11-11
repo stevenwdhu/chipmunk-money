@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { X } from '@lucide/vue'
-import { CADENCES, formatMoney, parseMoney, recurringLabel, semiMonthlyPartner, type Cadence, type RecurringItem } from '@st/shared'
+import { CADENCES, formatMoney, parseMoney, recurringLabel, semiMonthlyPartner, type Cadence, type RecurringItem } from '@chipmunk/shared'
 import AccountSelect from '@/components/AccountSelect.vue'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'

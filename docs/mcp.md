@@ -1,6 +1,6 @@
 # MCP server
 
-Spending Tracker is also an [MCP](https://modelcontextprotocol.io) server, so an AI agent (Claude and others) can work with your books directly: "what did I spend on dining out last month?", "work through my review queue", "add these receipts". It works through the [REST API](api.md) with the agent's own API key. The key's access applies to everything the agent does, and everything it changes shows up in **Activity** under the key's name.
+Chipmunk is also an [MCP](https://modelcontextprotocol.io) server, so an AI agent (Claude and others) can work with your books directly: "what did I spend on dining out last month?", "work through my review queue", "add these receipts". It works through the [REST API](api.md) with the agent's own API key. The key's access applies to everything the agent does, and everything it changes shows up in **Activity** under the key's name.
 
 ## Connect an agent
 
@@ -14,28 +14,28 @@ The simplest way, with nothing to install. The endpoint is `/mcp` on the app's s
 Claude Code:
 
 ```bash
-claude mcp add --transport http spending http://localhost:8787/mcp --header "Authorization: Bearer st_…"
+claude mcp add --transport http chipmunk http://localhost:8787/mcp --header "Authorization: Bearer cm_…"
 ```
 
 Claude Agent SDK:
 
 ```ts
 mcpServers: {
-  spending: { type: 'http', url: 'http://localhost:8787/mcp', headers: { Authorization: `Bearer ${process.env.ST_API_KEY}` } },
+  chipmunk: { type: 'http', url: 'http://localhost:8787/mcp', headers: { Authorization: `Bearer ${process.env.CHIPMUNK_API_KEY}` } },
 }
 ```
 
 ### Over stdio
 
-For agents that start their tools as processes. Build it once with `pnpm build` (or `pnpm --filter @st/mcp build`), then point the agent at the bundled file. It needs a key too, and the address of the app's server (`ST_API_URL`, `http://localhost:8787` when left out):
+For agents that start their tools as processes. Build it once with `pnpm build` (or `pnpm --filter @chipmunk/mcp build`), then point the agent at the bundled file. It needs a key too, and the address of the app's server (`CHIPMUNK_API_URL`, `http://localhost:8787` when left out):
 
 ```json
 {
   "mcpServers": {
-    "spending": {
+    "chipmunk": {
       "command": "node",
-      "args": ["/path/to/spending-tracker/apps/mcp/dist/stdio.js"],
-      "env": { "ST_API_URL": "http://localhost:8787", "ST_API_KEY": "st_…" }
+      "args": ["/path/to/chipmunk-money/apps/mcp/dist/stdio.js"],
+      "env": { "CHIPMUNK_API_URL": "http://localhost:8787", "CHIPMUNK_API_KEY": "cm_…" }
     }
   }
 }

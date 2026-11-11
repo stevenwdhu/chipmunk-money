@@ -1,6 +1,14 @@
 # Changelog
 
-What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
+What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
+
+## Unreleased
+
+### Changed
+
+- **Spending Tracker is now Chipmunk**, and the project is Chipmunk Money: the repo is `stevenwdhu/chipmunk-money` and the image `ghcr.io/stevenwdhu/chipmunk-money`. Set the new image in your compose file to get this release.
+- New API keys start with `cm_`. Keys made before keep working.
+- The stdio MCP server reads `CHIPMUNK_API_URL` and `CHIPMUNK_API_KEY`, in place of `ST_API_URL` and `ST_API_KEY`.
 
 ## v0.2.3 (2026-11-10)
 

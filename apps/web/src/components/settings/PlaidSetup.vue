@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { ExternalLink, KeyRound, Loader2, Plus } from '@lucide/vue'
-import type { PlaidEnvironment } from '@st/shared'
+import type { PlaidEnvironment } from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

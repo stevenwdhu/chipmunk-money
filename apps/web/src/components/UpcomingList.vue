@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { recurringLabel, type UpcomingPayment } from '@st/shared'
+import { recurringLabel, type UpcomingPayment } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 import { relativeDay, relativeDayInline } from '@/lib/format'
 

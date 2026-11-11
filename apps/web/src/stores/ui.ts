@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 
 export interface QuickAddDefaults {
   accountId?: number

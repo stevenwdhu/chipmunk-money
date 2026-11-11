@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { addMonths, monthOf, type ISODate, type MonthKey } from '@st/shared'
+import { addMonths, monthOf, type ISODate, type MonthKey } from '@chipmunk/shared'
 import { useSettings } from './queries'
 
 function localToday(): ISODate {

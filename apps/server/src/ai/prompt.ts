@@ -1,4 +1,4 @@
-import { formatMoney } from '@st/shared'
+import { formatMoney } from '@chipmunk/shared'
 import type { LlmCategoryRequest } from './types'
 
 export const SYSTEM_PROMPT = `You categorize personal finance transactions for someone living in Canada.

@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { toast } from 'vue-sonner'
-import { COLOR_PALETTE, CUSTOM_COLORS_MAX, isHexColor } from '@st/shared'
+import { COLOR_PALETTE, CUSTOM_COLORS_MAX, isHexColor } from '@chipmunk/shared'
 import { useSettings, useUpdateSettings } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 

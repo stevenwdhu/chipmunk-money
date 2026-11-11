@@ -57,7 +57,7 @@ import {
   type TransactionPage,
   type TrendReport,
   type UpcomingPayment,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import {
   accountView,
   categoryView,

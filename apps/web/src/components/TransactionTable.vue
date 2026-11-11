@@ -14,7 +14,7 @@ import {
   type Transaction,
   type TransactionColumn,
   type TransactionListItem as Item,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import FilterOutOfReport from '@/components/FilterOutOfReport.vue'

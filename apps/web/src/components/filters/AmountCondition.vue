@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
-import { parseMoney, type FilterSide } from '@st/shared'
+import { parseMoney, type FilterSide } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'

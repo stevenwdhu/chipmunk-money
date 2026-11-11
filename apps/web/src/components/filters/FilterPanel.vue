@@ -2,7 +2,7 @@
 import { nextTick, useTemplateRef, watch } from 'vue'
 import { useEventListener } from '@vueuse/core'
 import { X } from '@lucide/vue'
-import type { FilteredOut, FilterNames, FilterSide, ReportFilter } from '@st/shared'
+import type { FilteredOut, FilterNames, FilterSide, ReportFilter } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { useIsDesktop } from '@/composables/useBreakpoint'

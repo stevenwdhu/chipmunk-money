@@ -1,5 +1,5 @@
 import { asc, eq, inArray } from 'drizzle-orm'
-import { unusedColor, type Category, type CategoryCreate, type CategoryGroup, type CategoryList, type CategoryMergeResult, type CategoryUpdate, type Tag, type TagWithCount } from '@st/shared'
+import { unusedColor, type Category, type CategoryCreate, type CategoryGroup, type CategoryList, type CategoryMergeResult, type CategoryUpdate, type Tag, type TagWithCount } from '@chipmunk/shared'
 import { categories, categoryGroups, tags, transactionTags } from '../db/schema'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest, notFound } from '../lib/http'

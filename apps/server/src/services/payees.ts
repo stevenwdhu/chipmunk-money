@@ -1,4 +1,4 @@
-import type { PayeeChoice, PayeeChoiceUpdate, PayeeRule, PayeeSearchResult } from '@st/shared'
+import type { PayeeChoice, PayeeChoiceUpdate, PayeeRule, PayeeSearchResult } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
 import { getCategory } from './categories'
 import type { AppContext } from './context'

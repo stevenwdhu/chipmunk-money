@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiErrorSchema } from '@st/shared'
+import { apiErrorSchema } from '@chipmunk/shared'
 import { pathParams, type RouteSpec } from './router'
 
 type JsonSchema = Record<string, unknown>
@@ -23,9 +23,9 @@ export const TAGS: Array<{ name: string; description: string }> = [
   { name: 'API keys', description: 'Keys for scripts and agents.' },
 ]
 
-const DESCRIPTION = `The API behind Spending Tracker. The web app uses it too, so anything you can do in the app, you can do here.
+const DESCRIPTION = `The API behind Chipmunk. The web app uses it too, so anything you can do in the app, you can do here.
 
-**Authentication.** Send an API key as \`Authorization: Bearer st_…\`. Create keys in App settings → API keys. Each key has scopes (\`read\`, \`write\`, \`admin\`; each includes the ones before it) and can be limited to some ledgers. Each operation lists the scope it needs.
+**Authentication.** Send an API key as \`Authorization: Bearer cm_…\`. Create keys in App settings → API keys. Each key has scopes (\`read\`, \`write\`, \`admin\`; each includes the ones before it) and can be limited to some ledgers. Each operation lists the scope it needs.
 
 **Conventions**
 - Money is in minor units (cents) as integers; negative is money out. Dates are \`YYYY-MM-DD\` in the app's time zone.
@@ -155,7 +155,7 @@ export function buildOpenApi(specs: RouteSpec[], opts: { version: string }) {
   const { components, resolve } = settleComponents(named)
   return resolve({
     openapi: '3.1.0',
-    info: { title: 'Spending Tracker API', version: opts.version, description: DESCRIPTION },
+    info: { title: 'Chipmunk API', version: opts.version, description: DESCRIPTION },
     servers: [{ url: '/api/v1' }],
     security: [{ apiKey: [] }],
     tags: TAGS.filter((t) => specs.some((s) => s.tag === t.name)),
@@ -163,7 +163,7 @@ export function buildOpenApi(specs: RouteSpec[], opts: { version: string }) {
     components: {
       schemas: components,
       securitySchemes: {
-        apiKey: { type: 'http', scheme: 'bearer', description: 'An API key from App settings → API keys, e.g. `st_…`' },
+        apiKey: { type: 'http', scheme: 'bearer', description: 'An API key from App settings → API keys, e.g. `cm_…`' },
       },
       parameters: {
         IdempotencyKey: {
@@ -229,7 +229,7 @@ export function docsPage(specUrl: string): { html: string; script: string } {
         url: ${JSON.stringify(specUrl)},
         showDeveloperTools: 'never',
         agent: { disabled: true },
-        mcp: { name: 'Spending Tracker', url: '/mcp', disabled: true },
+        mcp: { name: 'Chipmunk', url: '/mcp', disabled: true },
         telemetry: false,
         withDefaultFonts: false,
         showExtensions: ['x-scope'],
@@ -241,7 +241,7 @@ export function docsPage(specUrl: string): { html: string; script: string } {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Spending Tracker API</title>
+    <title>Chipmunk API</title>
   </head>
   <body>
     <div id="app"></div>

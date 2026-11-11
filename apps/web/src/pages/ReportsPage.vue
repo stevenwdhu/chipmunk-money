@@ -31,7 +31,7 @@ import {
   type ReportFilter,
   type ReportRange,
   type ReportSpec,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import GroupedBarChart from '@/components/charts/GroupedBarChart.vue'
 import StackedBarChart from '@/components/charts/StackedBarChart.vue'
 import FilterChips from '@/components/filters/FilterChips.vue'

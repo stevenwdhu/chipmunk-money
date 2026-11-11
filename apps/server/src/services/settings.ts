@@ -18,7 +18,7 @@ import {
   type PlaidPublic,
   type Settings,
   type SettingsUpdate,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { bankConnections, settings as metaSettings } from '../db/meta-schema'
 import { settings as ledgerSettings } from '../db/schema'
 import type { AppContext, MetaStore } from './context'

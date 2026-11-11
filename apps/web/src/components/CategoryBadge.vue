@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Check, HandCoins, Repeat, Sparkles, Undo2 } from '@lucide/vue'
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import PayeeChoicePopover from '@/components/PayeeChoicePopover.vue'
 import { useCategories } from '@/composables/queries'

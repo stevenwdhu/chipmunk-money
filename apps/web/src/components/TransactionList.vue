@@ -1,6 +1,6 @@
 <script setup lang="ts" generic="T extends Transaction">
 import { computed } from 'vue'
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 import TransactionListItem from '@/components/TransactionListItem.vue'
 import { cn } from '@/lib/utils'
 

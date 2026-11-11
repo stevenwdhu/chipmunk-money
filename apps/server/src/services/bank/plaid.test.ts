@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
-import type { Account, ActivityPage, BankConnection, Settings, SyncResult, TransactionPage } from '@st/shared'
+import type { Account, ActivityPage, BankConnection, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
 import { bankAccounts, bankConnections } from '../../db/meta-schema'
 import { makeAccount, testStorage } from '../../test/helpers'

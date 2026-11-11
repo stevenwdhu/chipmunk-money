@@ -78,7 +78,7 @@ jobs:
       - run: ${{ matrix.run }}
 
   # A release: after the checks pass on a version tag (v0.1.0), the image for amd64 and arm64 (Apple
-  # silicon, Raspberry Pi) on GitHub's registry as ghcr.io/<owner>/spending-tracker:0.1.0, :0.1 and :latest.
+  # silicon, Raspberry Pi) on GitHub's registry as ghcr.io/<owner>/chipmunk-money:0.1.0, :0.1 and :latest.
   # The image is built only here: pushes to main and pull requests only run the checks.
   # docs/releasing.md says how a release is made.
   publish:

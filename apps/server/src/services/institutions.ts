@@ -1,5 +1,5 @@
 import { HTTPException } from 'hono/http-exception'
-import type { Institution } from '@st/shared'
+import type { Institution } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
 

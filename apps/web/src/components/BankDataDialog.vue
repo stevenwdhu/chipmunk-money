@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Loader2 } from '@lucide/vue'
-import { BANK_PROVIDER_LABELS, type Transaction } from '@st/shared'
+import { BANK_PROVIDER_LABELS, type Transaction } from '@chipmunk/shared'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useBankData, useSettings } from '@/composables/queries'
 import { dateTime } from '@/lib/format'

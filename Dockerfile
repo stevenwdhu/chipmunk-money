@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Spending Tracker: one Node process serving the API, the MCP endpoint and the built web app.
-#   docker build -t spending-tracker .
-#   docker run -d -p 127.0.0.1:8787:8787 -v spending-data:/data spending-tracker
+# Chipmunk: one Node process serving the API, the MCP endpoint and the built web app.
+#   docker build -t chipmunk .
+#   docker run -d -p 127.0.0.1:8787:8787 -v chipmunk-data:/data chipmunk
 # Or `docker compose up -d` with compose.yaml.
 
 ARG NODE_VERSION=24
@@ -64,7 +64,7 @@ RUN set -eu; \
 # ---- runtime ------------------------------------------------------------------------------------
 FROM node:${NODE_VERSION}-slim AS runtime
 # CI's publish job adds org.opencontainers.image.source and the version labels.
-LABEL org.opencontainers.image.title="Spending Tracker" \
+LABEL org.opencontainers.image.title="Chipmunk" \
       org.opencontainers.image.description="Self-hosted spending, accounts and net worth tracker: web app, REST API and MCP server in one container"
 ENV NODE_ENV=production \
     DATA_DIR=/data \

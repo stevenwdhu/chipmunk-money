@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { EyeOff, Undo2 } from '@lucide/vue'
-import { describeRule, pick, putBack, sideOf, withSide, type FilteredOut, type FilterNames, type FilterSide, type ReportPurchases } from '@st/shared'
+import { describeRule, pick, putBack, sideOf, withSide, type FilteredOut, type FilterNames, type FilterSide, type ReportPurchases } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'

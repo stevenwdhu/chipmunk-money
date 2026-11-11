@@ -20,7 +20,7 @@ import {
   type TrendReport,
   chartColor,
   UNGROUPED_COLOR,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { balancesAt } from './accounts'
 import { listLabels } from './labels'
 import type { AppContext } from './context'

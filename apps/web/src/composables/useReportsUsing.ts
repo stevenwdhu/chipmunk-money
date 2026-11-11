@@ -1,5 +1,5 @@
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
-import { filterRefs } from '@st/shared'
+import { filterRefs } from '@chipmunk/shared'
 import { useCustomReports } from './queries'
 
 /**

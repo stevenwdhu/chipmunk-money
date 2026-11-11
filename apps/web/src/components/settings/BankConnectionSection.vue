@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
 import { AlertTriangle, Ellipsis, ExternalLink, History, Landmark, Link2, Loader2, LogIn, Pencil, RefreshCw, Trash2 } from '@lucide/vue'
-import { formatMoney, type BankAccount, type BankConnection } from '@st/shared'
+import { formatMoney, type BankAccount, type BankConnection } from '@chipmunk/shared'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'

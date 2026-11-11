@@ -1,5 +1,5 @@
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
-import { filterRefs, recurringLabel, withSavedNames, type FilterNames, type RefNames, type ReportFilter } from '@st/shared'
+import { filterRefs, recurringLabel, withSavedNames, type FilterNames, type RefNames, type ReportFilter } from '@chipmunk/shared'
 import { useAccounts, useCategories, usePayeeSearch, useRecurring, useTags } from './queries'
 
 /**

@@ -16,7 +16,7 @@ import {
   type BankProviderKind,
   type LinkableBankAccount,
   type SwitchResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import InstitutionPicker, { type InstitutionChoice } from '@/components/InstitutionPicker.vue'
 import SwitchReviewDialog from '@/components/settings/SwitchReviewDialog.vue'

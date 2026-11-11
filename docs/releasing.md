@@ -1,6 +1,6 @@
 # Releasing
 
-A release is a version of Spending Tracker that people run: a Git tag, a GitHub release with its notes, and Docker images. Commits to `main` aren't releases. CI runs the checks on them, but builds and publishes no image. A release is made when the maintainer decides it's time, not on every push.
+A release is a version of Chipmunk that people run: a Git tag, a GitHub release with its notes, and Docker images. Commits to `main` aren't releases. CI runs the checks on them, but builds and publishes no image. A release is made when the maintainer decides it's time, not on every push.
 
 ## Version numbers
 
@@ -19,7 +19,7 @@ Versions follow [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`, 
 
 ## Docker images
 
-Each release is published as `ghcr.io/stevenwdhu/spending-tracker` with three tags, for amd64 and arm64:
+Each release is published as `ghcr.io/stevenwdhu/chipmunk-money` with three tags, for amd64 and arm64:
 
 | Tag | Moves to | Use it to |
 |---|---|---|

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Loader2 } from '@lucide/vue'
-import type { RecurringItem } from '@st/shared'
+import type { RecurringItem } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 import RecurringPaymentPicker from '@/components/RecurringPaymentPicker.vue'
 import { useAccounts, useRecurringPayments } from '@/composables/queries'

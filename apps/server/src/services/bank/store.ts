@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
-import { addDays, type ISODate } from '@st/shared'
+import { addDays, type ISODate } from '@chipmunk/shared'
 import type { RemoteTransaction } from './types'
 
 /**

@@ -31,8 +31,8 @@ export default defineConfig({
       registerType: 'prompt',
       includeAssets: ['favicon.svg', 'favicon.ico', 'apple-touch-icon-180x180.png'],
       manifest: {
-        name: 'Spending Tracker',
-        short_name: 'Spending',
+        name: 'Chipmunk',
+        short_name: 'Chipmunk',
         description: 'Track your spending, accounts and net worth.',
         lang: 'en-CA',
         start_url: '/',

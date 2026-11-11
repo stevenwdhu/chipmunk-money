@@ -7,12 +7,12 @@ Everything the web app does goes through this API, so anything you can do in the
 - **Base URL:** `/api/v1`. Ledger data lives under `/api/v1/ledgers/{ledger}/…`, where `{ledger}` is the ledger's slug from the app's address (`personal` in `/l/personal/transactions`) or its id.
 
 ```bash
-curl -H "Authorization: Bearer $ST_API_KEY" http://localhost:8787/api/v1/ledgers/personal/reports/summary
+curl -H "Authorization: Bearer $CHIPMUNK_API_KEY" http://localhost:8787/api/v1/ledgers/personal/reports/summary
 ```
 
 ## Keys
 
-Create a key for each script or agent in **App settings → API keys**, and send it as `Authorization: Bearer st_…`. The key is shown once, and only a hash of it is stored.
+Create a key for each script or agent in **App settings → API keys**, and send it as `Authorization: Bearer cm_…`. The key is shown once, and only a hash of it is stored.
 
 | Access | Scopes | What it can do |
 |---|---|---|
@@ -75,7 +75,7 @@ Add a transaction, safe to retry:
 
 ```bash
 curl -X POST http://localhost:8787/api/v1/ledgers/personal/transactions \
-  -H "Authorization: Bearer $ST_API_KEY" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CHIPMUNK_API_KEY" -H "Content-Type: application/json" \
   -H "Idempotency-Key: receipt-2026-11-10-001" \
   -d '{"accountId": 2, "date": "2026-11-10", "amountMinor": -1299, "payee": "Corner Bakery", "externalId": "receipt-001"}'
 ```
@@ -85,7 +85,7 @@ Leave out `categoryId` and the app suggests one from your history (or AI). A sug
 Page through this month's uncategorized transactions:
 
 ```bash
-curl -G http://localhost:8787/api/v1/ledgers/personal/transactions -H "Authorization: Bearer $ST_API_KEY" \
+curl -G http://localhost:8787/api/v1/ledgers/personal/transactions -H "Authorization: Bearer $CHIPMUNK_API_KEY" \
   --data-urlencode "from=2026-11-01" --data-urlencode "categoryId=none" --data-urlencode "limit=100"
 # then again with --data-urlencode "cursor=<nextCursor from the last page>"
 ```
@@ -94,7 +94,7 @@ See what a bulk change would do before doing it:
 
 ```bash
 curl -X POST "http://localhost:8787/api/v1/ledgers/personal/transactions/bulk?dryRun=true" \
-  -H "Authorization: Bearer $ST_API_KEY" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CHIPMUNK_API_KEY" -H "Content-Type: application/json" \
   -d '{"ids": [101, 102, 103], "categoryId": 7}'
 ```
 
@@ -102,10 +102,10 @@ Add an instalment plan's down payment, which the app didn't link because its amo
 
 ```bash
 # Payments you could add, its payees' first
-curl http://localhost:8787/api/v1/ledgers/personal/recurring/15/payment-candidates -H "Authorization: Bearer $ST_API_KEY"
+curl http://localhost:8787/api/v1/ledgers/personal/recurring/15/payment-candidates -H "Authorization: Bearer $CHIPMUNK_API_KEY"
 # Add one: it counts as a payment, and the plan's usual amount stays
 curl -X POST http://localhost:8787/api/v1/ledgers/personal/recurring/15/add-payment \
-  -H "Authorization: Bearer $ST_API_KEY" -H "Content-Type: application/json" -d '{"transactionId": 684}'
+  -H "Authorization: Bearer $CHIPMUNK_API_KEY" -H "Content-Type: application/json" -d '{"transactionId": 684}'
 ```
 
 ## Endpoints

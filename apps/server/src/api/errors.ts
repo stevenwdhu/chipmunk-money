@@ -1,7 +1,7 @@
 import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import type { ApiErrorBody, ErrorCode } from '@st/shared'
+import type { ApiErrorBody, ErrorCode } from '@chipmunk/shared'
 import { ValidationError } from '../lib/http'
 
 function codeFor(status: number): ErrorCode {

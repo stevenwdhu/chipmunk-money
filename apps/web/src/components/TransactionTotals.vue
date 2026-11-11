@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 
 /**

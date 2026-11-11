@@ -1,4 +1,4 @@
-import type { ApiScope } from '@st/shared'
+import type { ApiScope } from '@chipmunk/shared'
 
 /** `fetch`, or anything shaped like it (the main server passes Hono's in-process `app.request`). */
 export type FetchLike = (url: string, init?: RequestInit) => Response | Promise<Response>
@@ -55,7 +55,7 @@ export function createApiClient(opts: { fetch: FetchLike; baseUrl?: string; apiK
         body: body === undefined ? undefined : JSON.stringify(body),
       })
     } catch (err) {
-      throw new ApiError(`Can't reach Spending Tracker at ${base || 'this server'}: ${err instanceof Error ? err.message : err}`, 0)
+      throw new ApiError(`Can't reach Chipmunk at ${base || 'this server'}: ${err instanceof Error ? err.message : err}`, 0)
     }
     if (res.status === 204) return { status: 204, data: undefined as T }
     const text = await res.text()

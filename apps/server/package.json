@@ -1,5 +1,5 @@
 {
-  "name": "@st/server",
+  "name": "@chipmunk/server",
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
@@ -16,8 +16,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
     "@hono/node-server": "^2.1.6",
-    "@st/mcp": "workspace:*",
-    "@st/shared": "workspace:*",
+    "@chipmunk/mcp": "workspace:*",
+    "@chipmunk/shared": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.4",
     "fflate": "^0.8.3",

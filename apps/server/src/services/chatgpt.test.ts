@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import type { ChatgptStatus } from '@st/shared'
+import type { ChatgptStatus } from '@chipmunk/shared'
 import { createApp } from '../app'
 import { testStorage } from '../test/helpers'
 
@@ -120,7 +120,7 @@ describe('signing in with ChatGPT', () => {
     const p = url.searchParams
     expect(Object.fromEntries(p)).toMatchObject({
       client_id: 'dynamic_agent_client',
-      agent_name_hint: 'Spending Tracker',
+      agent_name_hint: 'Chipmunk',
       response_type: 'code',
       redirect_uri: 'http://127.0.0.1:8787/auth/callback',
       scope: 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct',

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { describeFilter, EVERYTHING, resolveRange, type FilterNames, type ReportFilter, type ReportRange } from '@st/shared'
+import { describeFilter, EVERYTHING, resolveRange, type FilterNames, type ReportFilter, type ReportRange } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

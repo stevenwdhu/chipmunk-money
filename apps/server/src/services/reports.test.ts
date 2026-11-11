@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { transactionCreateSchema } from '@st/shared'
+import { transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { accountHistory, listAccounts, setBalance } from './accounts'
 import { getCategory, listCategories, updateCategory } from './categories'

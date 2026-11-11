@@ -3,7 +3,7 @@ import { isIP } from 'node:net'
 import { desc, eq } from 'drizzle-orm'
 import type { Context, MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import type { ApiKey, ApiKeyCreate, ApiKeyCreated, ApiScope } from '@st/shared'
+import type { ApiKey, ApiKeyCreate, ApiKeyCreated, ApiScope } from '@chipmunk/shared'
 import { apiKeys } from '../db/meta-schema'
 import { ulid } from '../lib/ids'
 import type { MetaStore } from '../services/context'
@@ -87,7 +87,7 @@ export function createApiKey(
   input: Omit<ApiKeyCreate, 'ledgers'> & { ledgers?: string[] | null },
   now: Date,
 ): ApiKeyCreated {
-  const key = `st_${randomToken()}`
+  const key = `cm_${randomToken()}`
   const ledgers = input.ledgers?.length ? [...new Set(input.ledgers.map((l) => registry.get(l).id))] : null
   const row: ApiKeyRow = {
     id: ulid(now.getTime()),

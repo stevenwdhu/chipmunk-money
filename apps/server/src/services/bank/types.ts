@@ -1,4 +1,4 @@
-import type { ISODate } from '@st/shared'
+import type { ISODate } from '@chipmunk/shared'
 
 /** What every bank-data provider returns, in the app's terms (cents, local dates). */
 export interface RemoteTransaction {

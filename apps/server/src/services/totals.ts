@@ -1,4 +1,4 @@
-import type { ISODate } from '@st/shared'
+import type { ISODate } from '@chipmunk/shared'
 import type { AppContext } from './context'
 
 /** Transactions that count toward totals: not transfers, and not in a category marked "exclude from totals". */

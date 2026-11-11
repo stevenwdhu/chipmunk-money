@@ -1,4 +1,4 @@
-import type { AccountType } from '@st/shared'
+import type { AccountType } from '@chipmunk/shared'
 
 /** Matching a bank's account to yours: by the bank's name, and by what kind of account it looks like. */
 

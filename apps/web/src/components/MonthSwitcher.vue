@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight } from '@lucide/vue'
-import { formatMonth, formatMonthShort } from '@st/shared'
+import { formatMonth, formatMonthShort } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useTransactionSpan } from '@/composables/queries'

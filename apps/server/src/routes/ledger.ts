@@ -108,7 +108,7 @@ import {
   payeeSearchQuerySchema,
   payeeSearchResultSchema,
   reportPurchasesSchema,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import { actorName, requireLedger, type Actor } from '../api/auth'
@@ -1629,7 +1629,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       // serialize() gives a consistent copy of the whole database in one call.
       const bytes = c.var.ctx.sqlite.serialize()
       c.header('Content-Type', 'application/vnd.sqlite3')
-      c.header('Content-Disposition', `attachment; filename="spending-tracker-${c.var.ctx.ledger.slug}-${today(c.var.ctx)}.db"`)
+      c.header('Content-Disposition', `attachment; filename="chipmunk-${c.var.ctx.ledger.slug}-${today(c.var.ctx)}.db"`)
       return c.body(new Uint8Array(bytes))
     },
   )

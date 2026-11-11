@@ -1,4 +1,4 @@
-import { localDateTimeInTz, type PlaidEnvironment } from '@st/shared'
+import { localDateTimeInTz, type PlaidEnvironment } from '@chipmunk/shared'
 import { decimalToMinor, sanitize } from './simplefin'
 import { ProviderRequestError, type PlaidChanges, type PlaidProvider, type PlaidTransaction, type RemoteAccount, type RemoteTransaction } from './types'
 
@@ -145,7 +145,7 @@ export function createPlaid(opts: {
 
     async createLinkToken({ userId, accessToken }) {
       const r = await call<{ link_token: string; expiration: string }>('/link/token/create', {
-        client_name: 'Spending Tracker',
+        client_name: 'Chipmunk',
         user: { client_user_id: userId },
         language: 'en',
         country_codes: COUNTRIES,

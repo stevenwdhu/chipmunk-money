@@ -9,7 +9,7 @@ Setting up, the demo data and how to contribute are in [CONTRIBUTING.md](../CONT
 | `pnpm dev` | API (tsx watch) and web (Vite) together |
 | `pnpm build` | Production build: the web app, the stdio MCP bundle and the server bundle (`apps/server/dist/index.mjs`) |
 | `pnpm start` | One server for the app and the API, from the bundle `pnpm build` made |
-| `pnpm mcp:stdio` | Run the MCP server over stdio from source (`ST_API_URL`, `ST_API_KEY`) |
+| `pnpm mcp:stdio` | Run the MCP server over stdio from source (`CHIPMUNK_API_URL`, `CHIPMUNK_API_KEY`) |
 | `pnpm test` | Vitest: shared utilities, the server (services, API, security, scopes, idempotency, AI fallback) and MCP (with a real MCP client) |
 | `pnpm typecheck` | `tsc` for shared, MCP and server, `vue-tsc` for web |
 | `pnpm seed:demo [--force] [--ledger <slug>]` | Load sample data into the default (or named) ledger of `DATA_DIR`. It refuses a ledger that has data (accounts, transactions, recurring items, reports or tags) unless you pass `--force`, which first saves that ledger in `backups/` and then replaces all of those. Use a separate `DATA_DIR` for it (see [CONTRIBUTING.md](../CONTRIBUTING.md)) |

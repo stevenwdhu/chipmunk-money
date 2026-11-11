@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CATEGORY_GROUPS, type ApiKeyCreated, type Category, type CategoryList } from '@st/shared'
+import { DEFAULT_CATEGORY_GROUPS, type ApiKeyCreated, type Category, type CategoryList } from '@chipmunk/shared'
 import { createApp } from '../app'
 import { makeAccount, testStorage } from '../test/helpers'
 import { createTransaction, getTransaction } from './transactions'
-import { transactionCreateSchema } from '@st/shared'
+import { transactionCreateSchema } from '@chipmunk/shared'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -199,7 +199,7 @@ describe('the shared category list', () => {
     expect((await api('GET', `/ledgers/family/custom-reports/${untouched.id}`)).body).toEqual(untouched)
     const logged = (await api('GET', '/ledgers/family/activity?entity=custom_report')).body.items
     expect(logged.map((a: Json) => [a.actor, a.summary])).toEqual([
-      ['Spending Tracker', 'Outdoors filters by Sports & fitness in place of Kayak, Uncategorized in place of Junk and a deleted category, and no longer by Junk'],
+      ['Chipmunk', 'Outdoors filters by Sports & fitness in place of Kayak, Uncategorized in place of Junk and a deleted category, and no longer by Junk'],
       ['web', 'Added the custom report Phones'],
       ['web', 'Added the custom report Outdoors'],
     ])

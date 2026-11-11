@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { AlertTriangle, Check, ChevronDown, Plus } from '@lucide/vue'
-import { filterCount, rangeOf, resolveRange, type CustomReport } from '@st/shared'
+import { filterCount, rangeOf, resolveRange, type CustomReport } from '@chipmunk/shared'
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import {
   DropdownMenu,

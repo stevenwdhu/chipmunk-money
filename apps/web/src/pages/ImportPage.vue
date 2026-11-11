@@ -17,7 +17,7 @@ import {
   type DateFormat,
   type ImportPreviewRow,
   type ImportResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import AccountSelect from '@/components/AccountSelect.vue'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import EmptyState from '@/components/EmptyState.vue'

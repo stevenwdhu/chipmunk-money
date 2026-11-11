@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { serve } from '@hono/node-server'
-import { PAYEE_RULES_VERSION } from '@st/shared'
+import { PAYEE_RULES_VERSION } from '@chipmunk/shared'
 import { createApp } from './app'
 import { env } from './env'
 import { startBankSync, startJobs } from './jobs'
@@ -35,7 +35,7 @@ const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (
     .map((l) => l.name)
     .join(', ')
   console.log(
-    `Spending Tracker API on http://localhost:${info.port} · data ${env.dataDir} · ledgers: ${ledgers} · tz ${effectiveTimezone(storage.meta)}`,
+    `Chipmunk API on http://localhost:${info.port} · data ${env.dataDir} · ledgers: ${ledgers} · tz ${effectiveTimezone(storage.meta)}`,
   )
 })
 

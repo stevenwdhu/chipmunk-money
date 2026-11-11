@@ -1,4 +1,4 @@
-import { formatMoney, type Transaction } from '@st/shared'
+import { formatMoney, type Transaction } from '@chipmunk/shared'
 import { titleOf } from '@/lib/payee'
 
 /**

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type HTMLAttributes } from 'vue'
-import type { ReportSpec } from '@st/shared'
+import type { ReportSpec } from '@chipmunk/shared'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { cn } from '@/lib/utils'

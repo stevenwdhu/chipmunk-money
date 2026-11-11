@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHART_COLORS, DEFAULT_CATEGORY_GROUPS, transactionCreateSchema, UNGROUPED_COLOR } from '@st/shared'
+import { CHART_COLORS, DEFAULT_CATEGORY_GROUPS, transactionCreateSchema, UNGROUPED_COLOR } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { createGroup, getCategory, listCategories, updateCategory, updateGroup } from './categories'
 import { byCategory, trend } from './reports'

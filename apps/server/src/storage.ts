@@ -3,8 +3,8 @@ import path from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { zipSync } from 'fflate'
 import { HTTPException } from 'hono/http-exception'
-import type { Ledger, LedgerUpdate } from '@st/shared'
-import { CATEGORY_COLORS } from '@st/shared'
+import type { Ledger, LedgerUpdate } from '@chipmunk/shared'
+import { CATEGORY_COLORS } from '@chipmunk/shared'
 import type { LlmCategorizer } from './ai/types'
 import { openLedgerDb, openMetaDb, snapshotDb, type DB, type SQLite } from './db/client'
 import { ledgers } from './db/meta-schema'
@@ -220,14 +220,14 @@ export function fullBackup(storage: Storage): { bytes: Uint8Array; fileName: str
   const files: Record<string, Uint8Array> = { 'meta.db': storage.meta.sqlite.serialize() }
   for (const row of rows) files[`ledgers/${row.file}`] = storage.registry.serialize(row.id)
   const manifest = {
-    app: 'spending-tracker',
+    app: 'chipmunk',
     createdAt: storage.now().toISOString(),
     ledgers: rows.map((r) => ({ id: r.id, name: r.name, slug: r.slug, file: `ledgers/${r.file}` })),
     restore: 'Stop the server, then unzip into the data directory (meta.db and ledgers/ side by side).',
   }
   files['manifest.json'] = new TextEncoder().encode(JSON.stringify(manifest, null, 2))
   const date = today({ meta: storage.meta, now: storage.now })
-  return { bytes: zipSync(files, { level: 6 }), fileName: `spending-tracker-full-${date}.zip` }
+  return { bytes: zipSync(files, { level: 6 }), fileName: `chipmunk-full-${date}.zip` }
 }
 
 /** Opens meta.db and the ledger registry, creating a first ledger if needed. */

@@ -1,4 +1,4 @@
-import { addDays, daysBetween, payeeSimilarity, type BankPayload, type BankProviderKind, type ISODate } from '@st/shared'
+import { addDays, daysBetween, payeeSimilarity, type BankPayload, type BankProviderKind, type ISODate } from '@chipmunk/shared'
 import { historySuggestion } from '../categorize'
 import { notFound } from '../../lib/http'
 import type { AppContext } from '../context'

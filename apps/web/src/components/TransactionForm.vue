@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, wa
 import { watchDebounced } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 import { Loader2, Sparkles, Trash2 } from '@lucide/vue'
-import { formatMoney, parseMoney, recurringLabel, type CategorySuggestion, type Transaction } from '@st/shared'
+import { formatMoney, parseMoney, recurringLabel, type CategorySuggestion, type Transaction } from '@chipmunk/shared'
 import FilterOutOfReport from '@/components/FilterOutOfReport.vue'
 import AccountSelect from '@/components/AccountSelect.vue'
 import BankDataDialog from '@/components/BankDataDialog.vue'

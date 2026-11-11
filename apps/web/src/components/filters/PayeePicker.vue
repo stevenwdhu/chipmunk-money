@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { refDebounced } from '@vueuse/core'
 import { Check, ChevronsUpDown, Loader2, Search } from '@lucide/vue'
-import type { FilterNames } from '@st/shared'
+import type { FilterNames } from '@chipmunk/shared'
 import { ListboxContent, ListboxFilter, ListboxGroup, ListboxGroupLabel, ListboxItem, ListboxRoot } from 'reka-ui'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'

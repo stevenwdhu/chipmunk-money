@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { transactionCreateSchema } from '@st/shared'
+import { transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { mergeCategory, setCategoryEnabled } from './categories'
 import { aiSuggestion, suggestCategory } from './categorize'
@@ -214,7 +214,7 @@ describe('payee name rules', () => {
     })
     expect(getCustomReport(ctx, other.id)).toEqual(other)
     expect(ctx.sqlite.prepare("SELECT actor, entity_id AS id, summary FROM activity WHERE entity = 'custom_report'").all()).toEqual([
-      { actor: 'Spending Tracker', id: String(report.id), summary: 'Treats now filters by the payees’ new names, Nbx*Snackbox, Tst-Corner Cafe' },
+      { actor: 'Chipmunk', id: String(report.id), summary: 'Treats now filters by the payees’ new names, Nbx*Snackbox, Tst-Corner Cafe' },
     ])
   })
 

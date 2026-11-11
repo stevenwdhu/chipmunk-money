@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { chartColor, UNGROUPED_COLOR, type CategoryAmount } from '@st/shared'
+import { chartColor, UNGROUPED_COLOR, type CategoryAmount } from '@chipmunk/shared'
 import { money, percent } from '@/lib/format'
 import RowActions from './RowActions.vue'
 

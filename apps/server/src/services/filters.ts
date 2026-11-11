@@ -1,8 +1,8 @@
-import { isEmptyFilter, isEmptySide, type Condition, type FilterSide, type FilterSideFilter, type ReportFilter, type TextScope } from '@st/shared'
+import { isEmptyFilter, isEmptySide, type Condition, type FilterSide, type FilterSideFilter, type ReportFilter, type TextScope } from '@chipmunk/shared'
 import { COUNTABLE, IS_INCOME, IS_SPENDING } from './totals'
 
 /**
- * Report filters (ReportFilter, in @st/shared) as SQL over `transaction_lines t`, with its category `c`
+ * Report filters (ReportFilter, in @chipmunk/shared) as SQL over `transaction_lines t`, with its category `c`
  * and the transaction each line belongs to `o` (itself, or for a refund or payback, its purchase).
  * The category (and its group and labels) is the line's (a refund or payback is in its purchase's),
  * and everything else is the owner's: filtering out a purchase also filters out what's linked to it,

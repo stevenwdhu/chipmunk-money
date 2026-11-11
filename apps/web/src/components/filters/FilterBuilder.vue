@@ -14,7 +14,7 @@ import {
   type FilterSide,
   type FilterSideFilter,
   type ReportFilter,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { errorMessage } from '@/lib/api'

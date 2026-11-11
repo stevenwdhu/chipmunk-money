@@ -18,7 +18,7 @@ import {
   type RefNames,
   type ReportSpec,
   withSavedNames,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
 import { notFound, parseWith } from '../lib/http'
 import { recordActivity } from './activity'
@@ -36,7 +36,7 @@ import { payeeNameOf } from './payee-namer'
 export const CUSTOM_REPORTS_MAX = 50
 
 /** Who the activity log says changed a report when the app rewrote its filter. */
-const APP = { name: 'Spending Tracker', apiKeyId: null }
+const APP = { name: 'Chipmunk', apiKeyId: null }
 
 interface Row {
   id: number

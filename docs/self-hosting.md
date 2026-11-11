@@ -1,24 +1,24 @@
 # Self-hosting
 
-Spending Tracker is one server: the web app, the API and the MCP endpoint. Run it in Docker (the easiest) or from source with Node.js. Either way, read [Security](security.md) before anyone but you can reach it.
+Chipmunk is one server: the web app, the API and the MCP endpoint. Run it in Docker (the easiest) or from source with Node.js. Either way, read [Security](security.md) before anyone but you can reach it.
 
 ## Docker
 
-The quickest start is the prebuilt image. Each release is published as `ghcr.io/stevenwdhu/spending-tracker` for amd64 and arm64 (Apple silicon and Raspberry Pi too): `:latest` is the newest release, `:0.4` its newest fixes for one minor version, and `:0.4.2` that exact release (see [Releasing](releasing.md)). Save this as `compose.yaml` in a folder of its own:
+The quickest start is the prebuilt image. Each release is published as `ghcr.io/stevenwdhu/chipmunk-money` for amd64 and arm64 (Apple silicon and Raspberry Pi too): `:latest` is the newest release, `:0.4` its newest fixes for one minor version, and `:0.4.2` that exact release (see [Releasing](releasing.md)). Save this as `compose.yaml` in a folder of its own:
 
 ```yaml
 services:
-  spending-tracker:
-    image: ghcr.io/stevenwdhu/spending-tracker:latest
+  chipmunk:
+    image: ghcr.io/stevenwdhu/chipmunk-money:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"   # only this machine: see Security before opening it up
     volumes:
-      - spending-data:/data     # your ledgers, backups and secret.key
+      - chipmunk-data:/data     # your ledgers, backups and secret.key
     environment:
       TZ: America/Toronto       # your time zone, for "today" and the daily jobs
 volumes:
-  spending-data:
+  chipmunk-data:
 ```
 
 Then `docker compose up -d`, open http://localhost:8787, and update with `docker compose pull && docker compose up -d`.
@@ -28,14 +28,14 @@ Then `docker compose up -d`, open http://localhost:8787, and update with `docker
 The repo's own `compose.yaml` builds the image from source:
 
 ```bash
-git clone https://github.com/stevenwdhu/spending-tracker.git
-cd spending-tracker
+git clone https://github.com/stevenwdhu/chipmunk-money.git
+cd chipmunk-money
 docker compose up -d
 ```
 
 Then open http://localhost:8787. It builds the image the first time, and runs one container with the app, the API and the MCP endpoint.
 
-- **Your data** lives in the `spending-data` volume, mounted at `/data`. Removing the container keeps it, `docker compose down -v` deletes it.
+- **Your data** lives in the `chipmunk-data` volume, mounted at `/data`. Removing the container keeps it, `docker compose down -v` deletes it.
 - **The port** is published on `127.0.0.1:8787` only, so only this machine can reach it. Put a proxy in front of it (see [Security](security.md)), or change the line in `compose.yaml` to `"8787:8787"` to open it to your network.
 - **Time zone:** set `TZ` for "today" and the daily jobs, e.g. `TZ=America/Toronto docker compose up -d`, or put it in `.env`. It defaults to UTC. App settings → General can also set one, and that wins.
 - **Settings:** copy `.env.example` to `.env` for AI or Plaid keys and the like. Compose passes it to the container. `DATA_DIR`, `API_PORT` and `HOST` in it are ignored there, as compose sets those for the image.
@@ -44,7 +44,7 @@ Then open http://localhost:8787. It builds the image the first time, and runs on
 
   ```bash
   docker compose stop
-  docker run --rm -v spending-tracker_spending-data:/data -v "$PWD":/backup busybox tar czf /backup/spending-data.tgz -C /data .
+  docker run --rm -v chipmunk_chipmunk-data:/data -v "$PWD":/backup busybox tar czf /backup/chipmunk-data.tgz -C /data .
   docker compose start
   ```
 

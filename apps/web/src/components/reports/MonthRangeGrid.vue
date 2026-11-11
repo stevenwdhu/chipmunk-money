@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ChevronLeft, ChevronRight } from '@lucide/vue'
-import { addMonths, FIXED_RANGE_MAX_MONTHS, formatMonthShort, monthOf, type MonthKey, type ReportRange } from '@st/shared'
+import { addMonths, FIXED_RANGE_MAX_MONTHS, formatMonthShort, monthOf, type MonthKey, type ReportRange } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { useTransactionSpan } from '@/composables/queries'
 import { useToday } from '@/composables/useToday'

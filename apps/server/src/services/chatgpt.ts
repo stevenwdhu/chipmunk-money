@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto'
-import type { ChatgptModel, ChatgptStatus } from '@st/shared'
+import type { ChatgptModel, ChatgptStatus } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
 import type { MetaStore } from './context'
 import { getAppSetting, setAppSetting } from './settings'
@@ -25,7 +25,7 @@ export const CHATGPT_API = 'https://api.openai.com/v1'
 const SCOPES = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'
 /** The scope that lets requests use the ChatGPT plan. */
 const PLAN_SCOPE = 'chatgpt.tokens.use.direct'
-const APP_NAME = 'Spending Tracker'
+const APP_NAME = 'Chipmunk'
 export const USAGE_URL = 'https://chatgpt.com/settings/usage'
 /** A sign-in that isn't finished in this long is dropped. */
 const PENDING_MS = 15 * 60_000

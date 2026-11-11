@@ -1,7 +1,7 @@
 import { Hono, type Context, type Env } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { z } from 'zod'
-import type { ApiScope } from '@st/shared'
+import type { ApiScope } from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
 import { body as readBody, parseWith } from '../lib/http'
 import { requireScope, type Actor } from './auth'

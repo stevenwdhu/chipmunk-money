@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { ArrowLeftRight, Loader2, Plus } from '@lucide/vue'
-import { BANK_PROVIDER_LABELS, formatMoney, type Account, type BankAccount, type BankConnection, type SwitchResult } from '@st/shared'
+import { BANK_PROVIDER_LABELS, formatMoney, type Account, type BankAccount, type BankConnection, type SwitchResult } from '@chipmunk/shared'
 import SwitchReviewDialog from '@/components/settings/SwitchReviewDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

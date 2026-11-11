@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
-import { transactionCreateSchema, type ApiKeyCreated } from '@st/shared'
+import { transactionCreateSchema, type ApiKeyCreated } from '@chipmunk/shared'
 import Anthropic from '@anthropic-ai/sdk'
 import { describeError } from './ai/runner'
 import { createApp, UPLOAD_LIMIT, type AppOptions } from './app'
@@ -138,7 +138,7 @@ describe('who may call the API without a key', () => {
     expect((await send('/api/v1/me', { headers: { ...basic, 'sec-fetch-site': 'cross-site' } })).status).toBe(401)
     // A Bearer value that isn't a key is still refused, from the page too.
     expect((await send('/api/v1/me', { headers: { authorization: 'Bearer', ...SAME_ORIGIN } })).status).toBe(401)
-    expect((await send('/api/v1/me', { headers: { authorization: 'Bearer st_nope', ...SAME_ORIGIN } })).status).toBe(401)
+    expect((await send('/api/v1/me', { headers: { authorization: 'Bearer cm_nope', ...SAME_ORIGIN } })).status).toBe(401)
   })
 
   it('leaves MCP to API keys', async () => {

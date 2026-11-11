@@ -1,10 +1,10 @@
 # Security
 
-Spending Tracker holds your whole financial life, and the access to your banks. There's no login yet, so the server decides who's allowed in like this.
+Chipmunk holds your whole financial life, and the access to your banks. There's no login yet, so the server decides who's allowed in like this.
 
 **Who can use it.** Only two things get an answer:
 - **The app's own web page,** in a browser. The server checks the browser's `Sec-Fetch-Site` header (or `Origin` and `Referer` on plain HTTP over your network) to tell its own page from anything else. Other websites you visit can't call it, and a plain curl or script without a key gets 401.
-- **A valid API key,** sent as `Authorization: Bearer st_…`. Scripts, agents and MCP use these. See [docs/api.md](api.md).
+- **A valid API key,** sent as `Authorization: Bearer cm_…`. Scripts, agents and MCP use these. See [docs/api.md](api.md).
 
 Anyone who can open the web page is treated as you. The header check stops other websites, not programs: something on your network can fake those headers. So who can reach the port is what really protects it.
 
@@ -21,6 +21,6 @@ Anyone who can open the web page is treated as you. The header check stops other
 
 **API keys.** Give each script or agent its own key with the least access it needs. Only a hash is stored. A key limited to some ledgers can't touch anything app-wide (API keys, changing settings, bank connections, payees across ledgers, the full backup, which ledger the app opens). It only sees and links bank accounts already syncing into its ledgers, and can't restore a backup that would add categories to the shared list.
 
-**Backups and `secret.key`.** Your data directory (`data/` from source, the `spending-data` volume in Docker) holds every ledger and `meta.db`. `secret.key` in it encrypts the access to your banks (SimpleFIN, Plaid and Wealthsimple), your Plaid secret, the ChatGPT sign-in and your AI keys. Backups leave `secret.key` out on purpose, so keep a copy of it somewhere safe and private, apart from the backups. Without it, the app works but you have to enter those keys and connect your banks again. New installs create the data directory readable only by its owner (0700, files 0600).
+**Backups and `secret.key`.** Your data directory (`data/` from source, the `chipmunk-data` volume in Docker) holds every ledger and `meta.db`. `secret.key` in it encrypts the access to your banks (SimpleFIN, Plaid and Wealthsimple), your Plaid secret, the ChatGPT sign-in and your AI keys. Backups leave `secret.key` out on purpose, so keep a copy of it somewhere safe and private, apart from the backups. Without it, the app works but you have to enter those keys and connect your banks again. New installs create the data directory readable only by its owner (0700, files 0600).
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md).

@@ -16,9 +16,9 @@ import {
   type Transaction,
   type TransactionPage,
   type TransactionSpan,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { z } from 'zod'
-import type { bulkUpdateSchema, transactionCreateSchema, transactionQuerySchema, transactionUpdateSchema } from '@st/shared'
+import type { bulkUpdateSchema, transactionCreateSchema, transactionQuerySchema, transactionUpdateSchema } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest, notFound } from '../lib/http'
 import { getAccount } from './accounts'

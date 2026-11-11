@@ -2,7 +2,7 @@
 import { computed, ref, watch, type Component } from 'vue'
 import { toast } from 'vue-sonner'
 import { ArrowLeftRight, ChevronDown, HandCoins, PencilLine, Repeat, Undo2 } from '@lucide/vue'
-import { formatMoney, recurringLabel, type LinkedTransaction, type Transaction } from '@st/shared'
+import { formatMoney, recurringLabel, type LinkedTransaction, type Transaction } from '@chipmunk/shared'
 import PaybackDialog from '@/components/PaybackDialog.vue'
 import { Button } from '@/components/ui/button'
 import { useAccounts, useLinkedTransactions, useRecurring, useTransaction, useTransactionMutations } from '@/composables/queries'

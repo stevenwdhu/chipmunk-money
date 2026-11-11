@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { ArrowRight, ChevronDown, ChevronUp, Pencil, Plus, X } from '@lucide/vue'
-import type { PayeeNameRule } from '@st/shared'
+import type { PayeeNameRule } from '@chipmunk/shared'
 import PayeeNameRuleDialog from '@/components/settings/PayeeNameRuleDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'

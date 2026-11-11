@@ -10,7 +10,7 @@ import {
   type FilterNames,
   type FilterSide,
   type ReportFilter,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { cn } from '@/lib/utils'
 import { figure, wholeMoney } from './conditions'
 

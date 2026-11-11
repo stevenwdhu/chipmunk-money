@@ -1,7 +1,7 @@
 import { useQueryClient } from '@tanstack/vue-query'
 import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 import { keys } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { lapi } from '@/lib/ledger'

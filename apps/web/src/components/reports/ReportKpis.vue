@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { isEmptyFilter, sideOf, type PeriodSummary, type ReportFilter, type ReportSpec } from '@st/shared'
+import { isEmptyFilter, sideOf, type PeriodSummary, type ReportFilter, type ReportSpec } from '@chipmunk/shared'
 import { money, percent } from '@/lib/format'
 import KpiCard from './KpiCard.vue'
 

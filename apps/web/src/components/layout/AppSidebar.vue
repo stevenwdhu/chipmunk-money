@@ -2,7 +2,7 @@
 import { computed, ref, useTemplateRef, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { SIDEBAR_WIDTH, statementBalance } from '@st/shared'
+import { SIDEBAR_WIDTH, statementBalance } from '@chipmunk/shared'
 import { VueDraggable } from 'vue-draggable-plus'
 import LedgerSwitcher from '@/components/ledger/LedgerSwitcher.vue'
 import { useAccounts, useCustomReportMutations, useCustomReports, useGroupedAccounts, useSettings, useUpdateSettings } from '@/composables/queries'

@@ -1,4 +1,4 @@
-import { formatMoney, type LinkKind, type TransactionLink, type TransactionLinksSet } from '@st/shared'
+import { formatMoney, type LinkKind, type TransactionLink, type TransactionLinksSet } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
 

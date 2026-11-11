@@ -42,7 +42,7 @@ useEventListener(document, 'click', (event) => {
   <TooltipProvider :delay-duration="150">
     <AppStatus />
     <main v-if="accessRefused" class="grid min-h-dvh place-items-center">
-      <EmptyState :icon="ShieldAlert" title="Spending Tracker won’t open here" :description="accessRefused">
+      <EmptyState :icon="ShieldAlert" title="Chipmunk won’t open here" :description="accessRefused">
         <Button variant="outline" @click="reload">Try again</Button>
       </EmptyState>
     </main>

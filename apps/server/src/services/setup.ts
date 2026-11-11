@@ -5,7 +5,7 @@ import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
 import { HTTPException } from 'hono/http-exception'
-import type { SetupStatus } from '@st/shared'
+import type { SetupStatus } from '@chipmunk/shared'
 import { appTables, isTooOld, lastAppliedMigration, shippedMigrations, snapshotDb } from '../db/client'
 import { loadDemo } from '../db/seed-demo'
 import { env } from '../env'
@@ -59,7 +59,7 @@ export function startDemo(ctx: AppContext) {
  */
 export function restoreBackup(ctx: AppContext, bytes: Uint8Array, opts: { addCategories: boolean } = { addCategories: true }) {
   if (bytes.byteLength < 100 || Buffer.from(bytes.subarray(0, 16)).toString('latin1') !== SQLITE_HEADER) {
-    badRequest("That file isn't a Spending Tracker backup. Choose the .db file from Settings → Data → Download backup.")
+    badRequest("That file isn't a Chipmunk backup. Choose the .db file from Settings → Data → Download backup.")
   }
 
   const dir = mkdtempSync(path.join(tmpdir(), 'st-restore-'))
@@ -71,13 +71,13 @@ export function restoreBackup(ctx: AppContext, bytes: Uint8Array, opts: { addCat
     try {
       const tables = appTables(src)
       if (!tables.includes('accounts') || !tables.includes('transactions')) {
-        badRequest("That database isn't a Spending Tracker backup.")
+        badRequest("That database isn't a Chipmunk backup.")
       }
       if ((lastAppliedMigration(src) ?? 0) > shippedMigrations().last) {
-        badRequest('This backup comes from a newer version of Spending Tracker. Update the app, then try again.')
+        badRequest('This backup comes from a newer version of Chipmunk. Update the app, then try again.')
       }
       if (isTooOld(src)) {
-        badRequest("This backup comes from an older version of Spending Tracker that this one can't upgrade. Restore it with a version from before November 2026 first.")
+        badRequest("This backup comes from an older version of Chipmunk that this one can't upgrade. Restore it with a version from before November 2026 first.")
       }
       // Bring older backups up to the current schema before copying.
       migrate(drizzle(src), { migrationsFolder: env.ledgerMigrations })

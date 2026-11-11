@@ -1,4 +1,4 @@
-import { localDateTimeInTz, todayInTz } from '@st/shared'
+import { localDateTimeInTz, todayInTz } from '@chipmunk/shared'
 import { decimalToMinor, sanitize } from './simplefin'
 import { ProviderRequestError, type FetchOptions, type FetchResult, type RemoteAccount, type RemoteTransaction } from './types'
 

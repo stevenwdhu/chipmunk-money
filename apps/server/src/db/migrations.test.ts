@@ -102,18 +102,18 @@ describe('ledger migrations', () => {
   it('refuse a ledger or backup from before the squash that missed some migrations', () => {
     const file = tempFile('ledger.db')
     ranOldMigrations(file, env.ledgerMigrations, shippedMigrations().first - 1000)
-    expect(() => openLedgerDb(file)).toThrow("is from an older version of Spending Tracker that this one can't upgrade")
+    expect(() => openLedgerDb(file)).toThrow("is from an older version of Chipmunk that this one can't upgrade")
 
     const ctx = testContext()
     expect(() => restoreBackup(ctx, new Uint8Array(readFileSync(file)))).toThrow(
-      "This backup comes from an older version of Spending Tracker that this one can't upgrade. Restore it with a version from before November 2026 first.",
+      "This backup comes from an older version of Chipmunk that this one can't upgrade. Restore it with a version from before November 2026 first.",
     )
   })
 
   it('refuse an app-wide database from before the squash that missed some migrations', () => {
     const file = tempFile('meta.db')
     ranOldMigrations(file, env.metaMigrations, shippedMigrations(env.metaMigrations).first - 1000)
-    expect(() => openMetaDb(file)).toThrow("is from an older version of Spending Tracker that this one can't upgrade")
+    expect(() => openMetaDb(file)).toThrow("is from an older version of Chipmunk that this one can't upgrade")
     const ok = tempFile('meta.db')
     ranOldMigrations(ok, env.metaMigrations, shippedMigrations(env.metaMigrations).first)
     openMetaDb(ok).sqlite.close()

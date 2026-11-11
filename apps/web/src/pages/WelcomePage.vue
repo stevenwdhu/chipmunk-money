@@ -91,7 +91,7 @@ function onDrop(e: DragEvent) {
         <span class="grid size-12 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
           <Wallet class="size-6" />
         </span>
-        <h1 class="text-2xl font-semibold text-balance md:text-3xl">Welcome to Spending Tracker</h1>
+        <h1 class="text-2xl font-semibold text-balance md:text-3xl">Welcome to Chipmunk</h1>
         <p class="max-w-lg text-balance text-muted-foreground">
           Your spending lives in ledgers: separate sets of books, like “Personal” and “Family”. Name your first one, then
           choose how to start. Your data stays on this server.

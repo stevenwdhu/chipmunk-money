@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { addDays, daysBetween, payeeKey, payeeSimilarity, type BankProviderKind, type ISODate, type SwitchResult } from '@st/shared'
-import type { accountBankSwitchSchema } from '@st/shared'
+import { addDays, daysBetween, payeeKey, payeeSimilarity, type BankProviderKind, type ISODate, type SwitchResult } from '@chipmunk/shared'
+import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import type { z } from 'zod'
 import { historySuggestion } from '../categorize'
 import type { AppContext } from '../context'

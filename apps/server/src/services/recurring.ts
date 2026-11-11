@@ -14,10 +14,10 @@ import {
   type RecurringItem,
   type RecurringStatus,
   type UpcomingPayment,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { z } from 'zod'
-import type { recurringCreateSchema, recurringUpdateSchema } from '@st/shared'
-import { payeeSimilarity } from '@st/shared'
+import type { recurringCreateSchema, recurringUpdateSchema } from '@chipmunk/shared'
+import { payeeSimilarity } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
 import { payeeKeyOf, payeeNameOf } from './payee-namer'

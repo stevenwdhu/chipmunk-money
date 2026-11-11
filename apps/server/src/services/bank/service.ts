@@ -19,9 +19,9 @@ import {
   type SwitchResult,
   type WealthsimpleConnect,
   type WealthsimpleConnectResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { z } from 'zod'
-import type { accountBankSwitchSchema } from '@st/shared'
+import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../../ai/runner'
 import { bankAccounts, bankConnections } from '../../db/meta-schema'
 import { badRequest, notFound } from '../../lib/http'

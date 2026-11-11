@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import type { ApiScope } from '@st/shared'
-import type { ToolDef } from '@st/mcp'
+import type { ApiScope } from '@chipmunk/shared'
+import type { ToolDef } from '@chipmunk/mcp'
 import { TAGS } from './api/openapi'
 import type { RouteSpec } from './api/router'
 

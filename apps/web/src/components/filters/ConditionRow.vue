@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, useTemplateRef, watch } from 'vue'
 import { X } from '@lucide/vue'
-import type { Condition, ConditionField, FilterNames, FilterSide, TextScope } from '@st/shared'
+import type { Condition, ConditionField, FilterNames, FilterSide, TextScope } from '@chipmunk/shared'
 import CategoryFilter from '@/components/CategoryFilter.vue'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Check, ChevronDown, ChevronLeft } from '@lucide/vue'
-import { REPORT_PRESETS, resolveRange, type ReportRange, type ResolvedRange } from '@st/shared'
+import { REPORT_PRESETS, resolveRange, type ReportRange, type ResolvedRange } from '@chipmunk/shared'
 import SegmentedToggle from '@/components/SegmentedToggle.vue'
 import { Button } from '@/components/ui/button'
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'

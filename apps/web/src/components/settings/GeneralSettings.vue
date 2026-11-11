@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { ExternalLink, Monitor, Moon, Sun } from '@lucide/vue'
-import { formatDateLong, type Settings } from '@st/shared'
+import { formatDateLong, type Settings } from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -47,7 +47,7 @@ async function setDetection(patch: Partial<Settings['recurringDetection']>) {
 // This copy's version. Run with `pnpm dev`, it's the code since that release, not the release itself.
 const version = __APP_VERSION__
 const dev = import.meta.env.DEV
-const releaseUrl = `https://github.com/stevenwdhu/spending-tracker/releases/tag/v${version}`
+const releaseUrl = `https://github.com/stevenwdhu/chipmunk-money/releases/tag/v${version}`
 
 const themes = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -151,7 +151,7 @@ const themes = [
       <CardHeader>
         <CardTitle>About</CardTitle>
         <CardDescription>
-          Spending Tracker <span class="tabular font-medium text-foreground">v{{ version }}</span><template v-if="dev">, in development</template>
+          Chipmunk <span class="tabular font-medium text-foreground">v{{ version }}</span><template v-if="dev">, in development</template>
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-2">
@@ -159,7 +159,7 @@ const themes = [
           <a :href="releaseUrl" target="_blank" rel="noopener"><ExternalLink />What’s new in v{{ version }}</a>
         </Button>
         <Button as-child variant="outline" size="sm">
-          <a href="https://github.com/stevenwdhu/spending-tracker/releases" target="_blank" rel="noopener"><ExternalLink />All releases</a>
+          <a href="https://github.com/stevenwdhu/chipmunk-money/releases" target="_blank" rel="noopener"><ExternalLink />All releases</a>
         </Button>
       </CardContent>
     </Card>

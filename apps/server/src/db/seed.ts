@@ -1,4 +1,4 @@
-import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@st/shared'
+import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@chipmunk/shared'
 import { categories, categoryGroups, categoryLabels, labels } from './schema'
 import type { DB } from './client'
 

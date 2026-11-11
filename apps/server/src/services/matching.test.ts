@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { importCommitSchema, transactionCreateSchema } from '@st/shared'
+import { importCommitSchema, transactionCreateSchema } from '@chipmunk/shared'
 import type { LlmCategoryRequest } from '../ai/types'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import type { AppContext } from './context'

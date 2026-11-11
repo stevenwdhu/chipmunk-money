@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Trash2 } from '@lucide/vue'
-import { unusedColor, type Label as CategoryLabel } from '@st/shared'
+import { unusedColor, type Label as CategoryLabel } from '@chipmunk/shared'
 import ColorPicker from '@/components/ColorPicker.vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

@@ -11,7 +11,7 @@ import {
   type Settings,
   type TagWithCount,
   type Transaction,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { ApiClient, Me } from './api'
 
 /** A problem the agent can fix (unknown name, missing argument). Shown to it as the tool's error. */

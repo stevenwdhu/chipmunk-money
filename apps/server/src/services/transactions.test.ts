@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { recurringCreateSchema, transactionCreateSchema } from '@st/shared'
+import { recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { getAccount, setBalance } from './accounts'
 import { deleteGroup, getCategory, getGroup, listCategories, mergeCategory } from './categories'

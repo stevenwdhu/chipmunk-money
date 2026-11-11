@@ -2,7 +2,7 @@
  * ~13 months of realistic sample data (CAD) for development and demos. Loaded from the welcome
  * screen, or from the command line with `pnpm seed:demo` (seed-demo-cli.ts).
  */
-import { addDays, addMonthsToDate, monthOf, recurringCreateSchema, transactionCreateSchema, type TransactionCreate } from '@st/shared'
+import { addDays, addMonthsToDate, monthOf, recurringCreateSchema, transactionCreateSchema, type TransactionCreate } from '@chipmunk/shared'
 import { createAccount, setBalance } from '../services/accounts'
 import { historySuggestion } from '../services/categorize'
 import type { AppContext } from '../services/context'

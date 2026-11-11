@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { payeeKey } from '@st/shared'
+import { payeeKey } from '@chipmunk/shared'
 import { planSwitch, type SwitchLocal } from './switching'
 import type { RemoteTransaction } from './types'
 

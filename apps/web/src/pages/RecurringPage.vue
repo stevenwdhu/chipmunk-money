@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { AlertTriangle, ChevronRight, Eye, EyeOff, Pencil, Plus, Radar, Repeat, TrendingUp, X } from '@lucide/vue'
-import { CADENCES, formatDateShort, recurringLabel as label, type RecurringItem } from '@st/shared'
+import { CADENCES, formatDateShort, recurringLabel as label, type RecurringItem } from '@chipmunk/shared'
 import CategoryBadge from '@/components/CategoryBadge.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'

@@ -2,13 +2,13 @@
 
 <img src="apps/web/public/favicon.svg" width="72" alt="">
 
-# Spending Tracker
+# Chipmunk Money
 
 **Your money, on your own computer.** A spending tracker that syncs your banks, learns your categories,<br>and lets your AI assistant read your books, without your data leaving home.
 
 [Get started](#get-started) · [Features](#features) · [Docs](#documentation) · [Security](docs/security.md)
 
-[![CI](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/stevenwdhu/spending-tracker/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/stevenwdhu/chipmunk-money/actions/workflows/ci.yml/badge.svg)](https://github.com/stevenwdhu/chipmunk-money/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
@@ -17,7 +17,7 @@
   <img src="docs/images/hero-light.webp" alt="The Overview page on a desktop, with the same page on a phone in front of it: this month's spending, income and net worth, a review banner, recent transactions and spending by category">
 </picture>
 
-Spending Tracker is a personal finance app you host yourself, inspired by [Lunch Money](https://lunchmoney.app). It brings in your transactions from your banks or a CSV, suggests a category for each one from how you've filed things before, and shows where the money went: by month, by category, by payee. Bills, subscriptions and instalment plans are found for you, so you know what's coming.
+Chipmunk is a personal finance app you host yourself, inspired by [Lunch Money](https://lunchmoney.app). It brings in your transactions from your banks or a CSV, suggests a category for each one from how you've filed things before, and shows where the money went: by month, by category, by payee. Bills, subscriptions and instalment plans are found for you, so you know what's coming.
 
 It runs as one small server, in Docker or with Node.js, on a home server, a NAS or the laptop you're reading this on. Each set of books is a single SQLite file you own. It works on your phone too, as an app you add to your home screen.
 
@@ -99,17 +99,17 @@ With Docker, save this as `compose.yaml` in a folder of its own:
 
 ```yaml
 services:
-  spending-tracker:
-    image: ghcr.io/stevenwdhu/spending-tracker:latest
+  chipmunk:
+    image: ghcr.io/stevenwdhu/chipmunk-money:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
-      - spending-data:/data
+      - chipmunk-data:/data
     environment:
       TZ: America/Toronto
 volumes:
-  spending-data:
+  chipmunk-data:
 ```
 
 ```bash
@@ -122,7 +122,7 @@ Open http://localhost:8787 and choose how to begin:
 - **Start from scratch** opens the app with your first account.
 - **Restore a backup** brings back a ledger you saved before.
 
-`:latest` is the newest release. To take only fixes, use a minor version like `:0.2`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `spending-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
+`:latest` is the newest release. To take only fixes, use a minor version like `:0.2`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `chipmunk-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
 
 Running from source, building the image yourself, using it from your phone and backups: [docs/self-hosting.md](docs/self-hosting.md).
 
@@ -137,7 +137,7 @@ Connect Claude, or any agent that speaks [MCP](https://modelcontextprotocol.io),
 > *Is any bill late, or charging more than it used to?*
 
 ```bash
-claude mcp add --transport http spending http://localhost:8787/mcp --header "Authorization: Bearer st_…"
+claude mcp add --transport http chipmunk http://localhost:8787/mcp --header "Authorization: Bearer cm_…"
 ```
 
 The agent works through the app's API with a key you create for it, *Read only* if you just want answers, and everything it changes shows up in **Activity** under that key's name. [docs/mcp.md](docs/mcp.md) has the setup and every tool.

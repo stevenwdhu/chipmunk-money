@@ -6,9 +6,9 @@ import {
   type ImportBatch,
   type ImportPreviewRow,
   type ImportResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import type { z } from 'zod'
-import type { importCommitSchema, importPreviewSchema } from '@st/shared'
+import type { importCommitSchema, importPreviewSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../ai/runner'
 import { importBatches } from '../db/schema'
 import { badRequest, notFound } from '../lib/http'

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue'
 import { EyeOff, Pencil } from '@lucide/vue'
-import { describeRule, FILTER_LIMITS, type Condition, type ConditionField, type FilterNames, type FilterSide } from '@st/shared'
+import { describeRule, FILTER_LIMITS, type Condition, type ConditionField, type FilterNames, type FilterSide } from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import AddMenu from './AddMenu.vue'

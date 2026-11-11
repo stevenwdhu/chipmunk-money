@@ -21,4 +21,4 @@ For development only:
 |---|---|---|
 | `PORT` | `5173` | Port for the Vite dev server |
 | `VITE_ALLOWED_HOSTS` | — | More host names the Vite dev server answers to, comma-separated (it always allows localhost, `.localhost`, `.local`, `.ts.net` and IP addresses). Read from your shell, not from `.env` |
-| `ST_API_URL` / `ST_API_KEY` | `http://localhost:8787` / — | Where the stdio MCP server finds the API, and the key it uses. See [MCP](mcp.md) |
+| `CHIPMUNK_API_URL` / `CHIPMUNK_API_KEY` | `http://localhost:8787` / — | Where the stdio MCP server finds the API, and the key it uses. See [MCP](mcp.md) |

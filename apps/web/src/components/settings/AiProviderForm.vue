@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { CheckCircle2, ExternalLink, KeyRound, Loader2, LogOut, XCircle } from '@lucide/vue'
-import { AI_PROVIDERS, aiProviderInfo, type AiKind, type AiProviderPublic } from '@st/shared'
+import { AI_PROVIDERS, aiProviderInfo, type AiKind, type AiProviderPublic } from '@chipmunk/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'

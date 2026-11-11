@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm'
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 // Type-only import keeps this file loadable by drizzle-kit without resolving workspace sources.
-import type { ApiScope, BankProviderKind } from '@st/shared'
+import type { ApiScope, BankProviderKind } from '@chipmunk/shared'
 
 const now = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
 

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { TOOLS } from '@st/mcp'
+import { TOOLS } from '@chipmunk/mcp'
 import { createApi } from './app'
 import { apiReference, mcpReference, withReference } from './docs'
 import { openStorage } from './storage'

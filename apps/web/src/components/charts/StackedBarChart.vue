@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, useId } from 'vue'
 import { useElementSize } from '@vueuse/core'
-import { formatMoneyCompact } from '@st/shared'
+import { formatMoneyCompact } from '@chipmunk/shared'
 import { money } from '@/lib/format'
 import { niceTicks } from '@/lib/chart'
 

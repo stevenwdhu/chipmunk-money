@@ -1,4 +1,4 @@
-import { payeeNamer, type PayeeNameRuleSpec, type PayeeNaming } from '@st/shared'
+import { payeeNamer, type PayeeNameRuleSpec, type PayeeNaming } from '@chipmunk/shared'
 import type { AppContext, MetaStore } from './context'
 import { getAppSetting } from './settings'
 

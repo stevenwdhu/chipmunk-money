@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { TEXT_SCOPES, type TextScope } from '@st/shared'
+import { TEXT_SCOPES, type TextScope } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { cn } from '@/lib/utils'
 

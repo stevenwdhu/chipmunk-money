@@ -3,7 +3,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { ArrowDownRight, ArrowUpRight, CalendarClock, FileInput, Plus, Sparkles, Wallet } from '@lucide/vue'
-import { formatMonth, formatMonthShort, addMonths, monthRange, type CategoryAmount, type Transaction } from '@st/shared'
+import { formatMonth, formatMonthShort, addMonths, monthRange, type CategoryAmount, type Transaction } from '@chipmunk/shared'
 import CategoryBars from '@/components/CategoryBars.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
@@ -113,7 +113,7 @@ function showCategory(c: CategoryAmount) {
     <Card v-if="accounts.isSuccess.value && !hasAccounts">
       <EmptyState
         :icon="Wallet"
-        title="Welcome to Spending Tracker"
+        title="Welcome to Chipmunk"
         description="Start by adding the accounts you spend from: chequing, credit cards, cash. You can also import a CSV export from your bank."
       >
         <Button as-child><RouterLink :to="{ name: 'accounts', query: { new: '1' } }"><Plus />Add an account</RouterLink></Button>

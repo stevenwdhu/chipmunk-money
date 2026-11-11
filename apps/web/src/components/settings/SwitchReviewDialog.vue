@@ -9,7 +9,7 @@ import {
   type BankAccount,
   type LinkPreview,
   type SwitchResult,
-} from '@st/shared'
+} from '@chipmunk/shared'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {

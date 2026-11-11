@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ChevronLeft, EyeOff } from '@lucide/vue'
-import type { FilterSide, Transaction } from '@st/shared'
+import type { FilterSide, Transaction } from '@chipmunk/shared'
 import InfoTip from '@/components/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'

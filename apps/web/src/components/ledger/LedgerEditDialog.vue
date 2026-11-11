@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
-import type { Ledger } from '@st/shared'
+import type { Ledger } from '@chipmunk/shared'
 import ColorPicker from '@/components/ColorPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
 import { Button } from '@/components/ui/button'

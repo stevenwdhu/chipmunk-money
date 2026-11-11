@@ -1,4 +1,4 @@
-import { addDays, daysBetween, payeeSimilarity, type CategorySource } from '@st/shared'
+import { addDays, daysBetween, payeeSimilarity, type CategorySource } from '@chipmunk/shared'
 import type { AppContext } from './context'
 import { releaseTransactionLinks } from './links'
 import { today } from './settings'

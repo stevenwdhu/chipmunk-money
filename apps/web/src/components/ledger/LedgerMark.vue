@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Ledger } from '@st/shared'
+import type { Ledger } from '@chipmunk/shared'
 
 /** A ledger's colour square with its initial. */
 withDefaults(defineProps<{ ledger?: Pick<Ledger, 'name' | 'color'> | null; size?: 'sm' | 'md' }>(), { size: 'md' })

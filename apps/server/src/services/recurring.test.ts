@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addDays, addMonthsToDate, recurringCreateSchema, transactionCreateSchema } from '@st/shared'
+import { addDays, addMonthsToDate, recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import type { AppContext } from './context'
 import {

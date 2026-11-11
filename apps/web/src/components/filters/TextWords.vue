@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { X } from '@lucide/vue'
-import { FILTER_LIMITS } from '@st/shared'
+import { FILTER_LIMITS } from '@chipmunk/shared'
 import { cn } from '@/lib/utils'
 
 /** Words to match, as the search box matches them. Enter (or leaving the field) adds one, and Backspace takes the last off. */

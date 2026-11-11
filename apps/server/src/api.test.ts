@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ApiKeyCreated, BulkResult, Transaction } from '@st/shared'
+import type { ApiKeyCreated, BulkResult, Transaction } from '@chipmunk/shared'
 import { createApi, createApp, type AppOptions } from './app'
 import { openApiPath } from './api/openapi'
 import { setAppSetting } from './services/settings'
@@ -161,7 +161,7 @@ describe('API keys and scopes', () => {
     const web = { 'tailscale-user-login': 'me@example.com' }
     const res = await call('POST', '/api-keys', { name: 'Agent', scopes: ['write'] }, web)
     const created = res.body as ApiKeyCreated
-    expect(created.key).toMatch(/^st_[0-9A-Za-z]{43}$/)
+    expect(created.key).toMatch(/^cm_[0-9A-Za-z]{43}$/)
     expect(created.scopes).toEqual(['read', 'write'])
     const auth = { authorization: `Bearer ${created.key}` }
     expect((await call('GET', '/me', undefined, auth)).body).toMatchObject({ actor: 'Agent', kind: 'key', defaultLedger: 'personal' })
@@ -170,7 +170,7 @@ describe('API keys and scopes', () => {
     expect(listed[0]).toMatchObject({ name: 'Agent', prefix: created.key.slice(0, 9), lastUsedAt: expect.any(String) })
     expect(JSON.stringify(listed)).not.toContain(created.key)
 
-    expect((await call('GET', '/me', undefined, { authorization: 'Bearer st_nope' })).status).toBe(401)
+    expect((await call('GET', '/me', undefined, { authorization: 'Bearer cm_nope' })).status).toBe(401)
     expect((await call('GET', '/me', undefined, { authorization: created.key })).status).toBe(401)
 
     expect((await call('DELETE', `/api-keys/${created.id}`, undefined, web)).status).toBe(204)

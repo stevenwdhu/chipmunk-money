@@ -17,7 +17,7 @@ const { needRefresh, updateServiceWorker } = useRegisterSW({
 })
 watch(needRefresh, (v) => {
   if (!v) return
-  toast('A new version of Spending Tracker is ready', {
+  toast('A new version of Chipmunk is ready', {
     duration: Infinity,
     action: { label: 'Reload', onClick: () => updateServiceWorker(true) },
   })

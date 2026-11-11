@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
-import { aiProviderInfo } from '@st/shared'
+import { aiProviderInfo } from '@chipmunk/shared'
 import { aiCalls } from '../db/schema'
 import type { AppContext } from '../services/context'
 import { aiConfig, type AiSlot, type StoredAiConfig } from '../services/settings'

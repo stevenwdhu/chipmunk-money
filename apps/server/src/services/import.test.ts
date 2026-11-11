@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { importCommitSchema, importPreviewSchema, transactionCreateSchema } from '@st/shared'
+import { importCommitSchema, importPreviewSchema, transactionCreateSchema } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { suggestCategory } from './categorize'
 import { commitImport, previewImport, recategorize, undoBatch, type Recategorized } from './import'

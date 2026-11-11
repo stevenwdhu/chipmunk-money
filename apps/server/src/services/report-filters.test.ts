@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filterSchema, recurringCreateSchema, transactionCreateSchema, type ReportFilterInput } from '@st/shared'
+import { filterSchema, recurringCreateSchema, transactionCreateSchema, type ReportFilterInput } from '@chipmunk/shared'
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import type { AppContext } from './context'
 import { setLinks } from './links'

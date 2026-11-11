@@ -1,4 +1,4 @@
-import { payeeSimilarity, type CategorySuggestion } from '@st/shared'
+import { payeeSimilarity, type CategorySuggestion } from '@chipmunk/shared'
 import { aiEnabled, configuredCategorizer } from '../ai/runner'
 import type { LlmCategoryRequest } from '../ai/types'
 import type { AppContext } from './context'

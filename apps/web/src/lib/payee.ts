@@ -1,4 +1,4 @@
-import type { Transaction } from '@st/shared'
+import type { Transaction } from '@chipmunk/shared'
 
 type Named = Pick<Transaction, 'payee' | 'payeeName' | 'payeeNameRule' | 'name'>
 
