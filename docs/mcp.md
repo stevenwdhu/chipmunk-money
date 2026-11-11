@@ -494,6 +494,7 @@ No arguments.
 | `secondDay` | number | optional | Semi-monthly: the other day of the month (31 for the last day); nextDate gives the first. |
 | `payments` | number | optional | An instalment plan: how many payments it has in all, like 4 for Pay in 4. |
 | `paidSoFar` | number | optional | An instalment plan: how many are paid already, including ones from before the ledger’s history. |
+| `fullPrice` | number | optional | An instalment plan: the total of all its payments in dollars, as the lender shows it, interest included. Its last payment is what’s left of it. Negative like its amount. |
 
 #### `save_custom_report`
 

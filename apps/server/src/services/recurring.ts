@@ -105,6 +105,7 @@ interface ItemRow {
   second_day: number | null
   total_payments: number | null
   paid_before: number
+  full_price_minor: number | null
   occurrences: number
   paid_amount: number
   last_seen: string | null
@@ -156,6 +157,20 @@ function suggestedEvidence(ctx: AppContext, r: ItemRow): Pick<ItemRow, 'occurren
   return { occurrences: mine.length, paid_amount: mine.reduce((n, t) => n + t.amount, 0), last_seen: mine[0]?.date ?? null, last_amount: mine[0]?.amount ?? null }
 }
 
+/**
+ * A plan's last payment, from its full price: what's left of it after the payments made (the linked ones
+ * at what they were, ones from before your history at its amount) and the others to come at its amount.
+ * Null without a full price, without payments to go, or when what's left isn't a payment (the full price
+ * is less than its payments add up to).
+ */
+export function lastPaymentOf(p: { fullPrice: number | null; total: number | null; linked: number; paidAmount: number; paidBefore: number; expected: number }): number | null {
+  if (p.fullPrice === null || p.total === null) return null
+  const remaining = p.total - p.linked - p.paidBefore
+  if (remaining < 1) return null
+  const last = p.fullPrice - p.paidAmount - p.paidBefore * p.expected - (remaining - 1) * p.expected
+  return last !== 0 && Math.sign(last) === Math.sign(p.expected) ? last : null
+}
+
 function toDTO(ctx: AppContext, row: ItemRow, todayDate: ISODate): RecurringItem {
   const r = row.status === 'suggested' ? { ...row, ...suggestedEvidence(ctx, row) } : row
   const info = cadenceInfo(r.cadence)
@@ -170,6 +185,15 @@ function toDTO(ctx: AppContext, row: ItemRow, todayDate: ISODate): RecurringItem
     r.last_amount !== null && remaining !== 0 && amountWithin(r.last_amount, r.expected_amount_minor, r.amount_tolerance_pct)
       ? r.last_amount
       : r.expected_amount_minor
+  const lastPayment = lastPaymentOf({
+    fullPrice: r.full_price_minor,
+    total: r.total_payments,
+    linked: r.occurrences,
+    paidAmount: r.paid_amount,
+    paidBefore: r.paid_before,
+    expected,
+  })
+  const remainingAmount = remaining === null ? null : lastPayment !== null ? (remaining - 1) * expected + lastPayment : remaining * expected
   const alerts: RecurringAlert[] = []
   if (r.status === 'active') {
     if (daysBetween(r.next_due_date, todayDate) > matchWindow(r.cadence)) alerts.push('missing')
@@ -201,13 +225,15 @@ function toDTO(ctx: AppContext, row: ItemRow, todayDate: ISODate): RecurringItem
     totalPayments: r.total_payments,
     paidPayments: paid,
     remainingPayments: remaining,
-    remainingAmountMinor: remaining === null ? null : remaining * expected,
-    totalAmountMinor: remaining === null ? null : r.paid_amount + (r.paid_before + remaining) * expected,
+    remainingAmountMinor: remainingAmount,
+    totalAmountMinor: remainingAmount === null ? null : r.paid_amount + r.paid_before * expected + remainingAmount,
     endDate: remaining === null ? null : remaining > 0 ? lastDue : r.last_seen,
+    fullPriceMinor: r.full_price_minor,
+    lastPaymentMinor: lastPayment,
     instalmentService: isInstalmentService(r.payee_key),
     stopped: r.status === 'suggested' && (remaining === 0 || (r.last_seen !== null && !stillGoing(r.cadence, r.last_seen, todayDate))),
     otherPayees: (JSON.parse(r.other_payees) as string[]).sort(),
-    possiblePayment: r.status === 'active' ? possiblePayment(ctx, r) : null,
+    possiblePayment: r.status === 'active' ? possiblePayment(ctx, r, todayDate) : null,
   }
 }
 
@@ -217,12 +243,16 @@ const SIMILAR_PAYEE = 0.5
 /**
  * An unlinked payment that may be the item's, and the due date it would be for. Near its next due date:
  * from a similar payee within its price variation (the bank started sending "PayHub" for "PayHub Tax"), or
- * from its own payee at a new amount (a price change, or a plan's last payment: any amount up to half as
- * much again, as it's often what's left of the price). Otherwise, for a due date in its history without
- * a payment (newest first): its own payees' payment within half a period, within the price variation of
- * its nearest payment (one that came early or late, outside the date's window). The closest amount, then date.
+ * from its own payee at a new amount (a price change). A plan's, also after its next due date's window
+ * (it doesn't take a late payment without asking), and for its last payment at what's left of its full
+ * price, or without one any amount up to half as much again (`role` last). Then a plan's first payment
+ * that's missing (`role` first): its own payee's, in the period before its first one, at exactly what
+ * makes its payments add up to its full price (a down payment). Otherwise, for a due date in its history
+ * without a payment (newest first): its own payees' payment within half a period, within the price
+ * variation of its nearest payment (one that came early or late, outside the date's window). The
+ * closest amount, then date.
  */
-function possiblePayment(ctx: AppContext, r: ItemRow): RecurringItem['possiblePayment'] {
+function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): RecurringItem['possiblePayment'] {
   const keys = [r.payee_key, ...(JSON.parse(r.other_keys) as string[])]
   const window = matchWindow(r.cadence)
   const unlinked = (from: ISODate, to: ISODate) =>
@@ -234,35 +264,73 @@ function possiblePayment(ctx: AppContext, r: ItemRow): RecurringItem['possiblePa
            AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE item_id = ?)`,
       )
       .all(from, to, r.account_id, r.account_id, r.id) as Array<{ id: number; date: string; payee: string; payeeKey: string; amount: number }>
-  const offer = (t: { id: number; date: string; payee: string; amount: number }, dueDate: ISODate, newAmount: boolean) => ({
+  const offer = (t: { id: number; date: string; payee: string; amount: number }, dueDate: ISODate, newAmount: boolean, role: 'first' | 'last' | null = null) => ({
     transactionId: t.id,
     date: t.date,
     payee: t.payee,
     amountMinor: t.amount,
     newAmount,
+    role,
     dueDate,
   })
   const closest = <T extends { amount: number; date: string }>(rows: T[], amount: number, due: ISODate) =>
     rows.sort((a, b) => Math.abs(a.amount - amount) - Math.abs(b.amount - amount) || Math.abs(daysBetween(a.date, due)) - Math.abs(daysBetween(b.date, due)))[0]
 
   const within = (t: { amount: number }) => amountWithin(t.amount, r.expected_amount_minor, r.amount_tolerance_pct)
-  // A plan's last payment is often what's left of its price: any amount up to half as much again.
-  const last = r.total_payments !== null && r.total_payments - r.occurrences - r.paid_before === 1
-  const maybeNew = (t: { amount: number }) =>
-    last
-      ? Math.sign(t.amount) === Math.sign(r.expected_amount_minor) && Math.abs(t.amount) <= Math.abs(r.expected_amount_minor) * 1.5
-      : amountWithin(t.amount, r.expected_amount_minor, SAME_ITEM_PCT)
+  const plan = r.total_payments !== null
+  const remaining = plan ? r.total_payments! - r.occurrences - r.paid_before : null
+  const lastPayment = lastPaymentOf({
+    fullPrice: r.full_price_minor,
+    total: r.total_payments,
+    linked: r.occurrences,
+    paidAmount: r.paid_amount,
+    paidBefore: r.paid_before,
+    expected: r.expected_amount_minor,
+  })
+  // A plan's last payment is often what's left of its price: its full price says what, or else any amount up to half as much again.
+  const isLast = remaining === 1
+  const lastLike = (t: { amount: number }) =>
+    Math.sign(t.amount) === Math.sign(r.expected_amount_minor) &&
+    (Math.abs(t.amount) <= Math.abs(r.expected_amount_minor) * 1.5 || (lastPayment !== null && amountWithin(t.amount, lastPayment, r.amount_tolerance_pct)))
+  const maybeNew = (t: { amount: number }) => (isLast ? lastLike(t) : amountWithin(t.amount, r.expected_amount_minor, SAME_ITEM_PCT))
+  // A plan's payment after its due date's window: asked about, not linked on its own.
+  const late = (t: { date: string }) => plan && t.date > addDays(r.next_due_date, window)
+  const until = plan && todayDate > addDays(r.next_due_date, window) ? todayDate : addDays(r.next_due_date, window)
   const next = closest(
-    unlinked(addDays(r.next_due_date, -window), addDays(r.next_due_date, window)).filter((t) =>
+    unlinked(addDays(r.next_due_date, -window), until).filter((t) =>
       keys.includes(t.payeeKey)
-        ? // Its own payee's, beyond the variation (but not wildly): maybe a new price, or a plan's last payment.
-          !within(t) && maybeNew(t)
+        ? // Its own payee's, beyond the variation (but not wildly): maybe a new price, or a plan's last payment. Or a plan's late one.
+          (!within(t) && maybeNew(t)) || (late(t) && within(t))
         : keys.some((k) => payeeSimilarity(k, t.payeeKey) >= SIMILAR_PAYEE) && within(t),
     ),
-    r.expected_amount_minor,
+    isLast && lastPayment !== null ? lastPayment : r.expected_amount_minor,
     r.next_due_date,
   )
-  if (next) return offer(next, r.next_due_date, !within(next))
+  if (next) {
+    const role = isLast && !within(next) ? 'last' : null
+    return offer(next, r.next_due_date, !within(next) && !role, role)
+  }
+
+  // A plan's first payment, missing before its others: one that makes its payments add up to its full price,
+  // to the cent (a down payment), only while they don't (what's left isn't its amount).
+  const schedule = { cadence: r.cadence, anchorDate: r.anchor_date, secondDay: r.second_day, nextDueDate: r.next_due_date }
+  if (lastPayment !== null && r.paid_before === 0 && !amountWithin(lastPayment, r.expected_amount_minor, r.amount_tolerance_pct)) {
+    const first = ctx.sqlite
+      .prepare(
+        `SELECT t.date, d.due_date AS due, coalesce(d.one_off, 0) AS oneOff FROM transactions t
+         LEFT JOIN recurring_payment_dues d ON d.item_id = t.recurring_item_id AND d.transaction_id = t.id
+         WHERE t.recurring_item_id = ? AND t.deleted_at IS NULL ORDER BY t.date, t.id LIMIT 1`,
+      )
+      .get(r.id) as { date: string; due: string | null; oneOff: number } | undefined
+    if (first && !first.oneOff) {
+      const period = Math.ceil(cadenceInfo(r.cadence).days)
+      const found = unlinked(addDays(first.date, -(period + window)), first.date)
+        .filter((t) => keys.includes(t.payeeKey) && Math.abs(t.amount - lastPayment) <= 1)
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))[0]
+      const firstDue = first.due ?? duesCovering(schedule, first.date, first.date, window).at(-1)!
+      if (found) return offer(found, stepDue(schedule, firstDue, -1), false, 'first')
+    }
+  }
 
   // A gap in its history: a due date between its first and latest payments that has none.
   const paid = ctx.sqlite
@@ -273,8 +341,7 @@ function possiblePayment(ctx: AppContext, r: ItemRow): RecurringItem['possiblePa
     )
     .all(r.id) as Array<{ date: string; amount: number; due: string | null; oneOff: number }>
   if (paid.length < 2) return null
-  const item = { cadence: r.cadence, anchorDate: r.anchor_date, secondDay: r.second_day, nextDueDate: r.next_due_date }
-  const dues = duesCovering(item, paid[0]!.date, paid[paid.length - 1]!.date, window)
+  const dues = duesCovering(schedule, paid[0]!.date, paid[paid.length - 1]!.date, window)
   const periodOf = (date: string) => dues.find((d) => addDays(d, -window) <= date)
   const covered = new Set(paid.map((t) => t.due ?? periodOf(t.date)))
   const half = Math.floor(cadenceInfo(r.cadence).days / 2)
@@ -321,10 +388,12 @@ export function linkPossiblePayment(ctx: AppContext, itemId: number, txId: numbe
   const item = getRecurring(ctx, itemId)
   const tx = paymentToLink(ctx, txId)
   const stored = ctx.sqlite.prepare('SELECT expected_amount_minor FROM recurring_items WHERE id = ?').pluck().get(itemId) as number
+  const row = ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.id = ?`).get(itemId) as ItemRow
+  const offered = item.status === 'active' ? possiblePayment(ctx, row, today(ctx)) : null
+  // A plan's first or last payment it asked about, or its last at another amount: at its own amount.
+  if (offered?.transactionId === txId && offered.role) return addPayment(ctx, itemId, txId)
   if (item.remainingPayments === 1 && !amountWithin(tx.amount, stored, item.amountTolerancePct)) return addPayment(ctx, itemId, txId)
   // The due date it's for: the one it was offered for, or the one whose window it's in.
-  const row = ctx.sqlite.prepare(`${ITEM_SQL} WHERE r.id = ?`).get(itemId) as ItemRow
-  const offered = item.status === 'active' ? possiblePayment(ctx, row) : null
   const window = matchWindow(item.cadence)
   const due = offered?.transactionId === txId ? offered.dueDate : duesCovering(item, tx.date, tx.date, window).at(-1)!
   ctx.sqlite.transaction(() => {
@@ -461,9 +530,12 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
 
   const items = ctx.sqlite
     .prepare(
-      `SELECT id, payee_key AS payeeKey, cadence, anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate,
-         expected_amount_minor AS expected, amount_tolerance_pct AS tolerance, category_id AS categoryId
-       FROM recurring_items
+      `SELECT r.id, payee_key AS payeeKey, cadence, anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate,
+         expected_amount_minor AS expected, amount_tolerance_pct AS tolerance, category_id AS categoryId, total_payments AS total,
+         paid_before AS paidBefore, full_price_minor AS fullPrice,
+         (SELECT count(*) FROM transactions t WHERE t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS linked,
+         (SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.recurring_item_id = r.id AND t.deleted_at IS NULL) AS paidAmount
+       FROM recurring_items r
        WHERE status = 'active' AND (payee_key = @key OR id IN (SELECT item_id FROM recurring_payees WHERE payee_key = @key))
          AND (account_id IS NULL OR account_id = @account)`,
     )
@@ -477,16 +549,31 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
     nextDueDate: string
     expected: number
     categoryId: number | null
+    total: number | null
+    paidBefore: number
+    fullPrice: number | null
+    linked: number
+    paidAmount: number
   }>
 
-  // With several items from one payee (iCloud and Apple Music, say), the closest amount first.
-  items.sort((a, b) => Math.abs(tx.amount - a.expected) - Math.abs(tx.amount - b.expected))
+  // What each expects next: its amount, and a plan with one payment to go also what's left of its full price.
+  const expecting = new Map(
+    items.map((i) => {
+      const last = i.total !== null && i.total - i.linked - i.paidBefore === 1 ? lastPaymentOf({ ...i }) : null
+      return [i.id, last === null ? [i.expected] : [i.expected, last]] as const
+    }),
+  )
+  const gapTo = (item: (typeof items)[number]) => Math.min(...expecting.get(item.id)!.map((e) => Math.abs(tx.amount - e)))
+  // With several items from one payee (iCloud and Apple Music, two Klarna plans), the closest amount first.
+  items.sort((a, b) => gapTo(a) - gapTo(b))
   for (const item of items) {
     const window = matchWindow(item.cadence)
-    // Early payments within the window, or any later payment (a late or missed-then-paid bill).
+    // Early payments within the window, or any later payment (a late or missed-then-paid bill). A plan's
+    // much later than its due date is asked about instead (`possiblePayment`): it may be another plan's.
     if (daysBetween(tx.date, item.nextDueDate) > window) continue
+    if (item.total !== null && daysBetween(item.nextDueDate, tx.date) > window) continue
     // Further off is a new amount, to ask about (`possiblePayment`).
-    if (!amountWithin(tx.amount, item.expected, item.tolerance)) continue
+    if (!expecting.get(item.id)!.some((e) => amountWithin(tx.amount, e, item.tolerance))) continue
 
     let next = item.nextDueDate
     while (daysBetween(tx.date, next) <= window) next = stepDue(item, next)
@@ -521,10 +608,12 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
     .prepare(
       `SELECT payee_key AS payeeKey, account_id AS accountId, expected_amount_minor AS expected, cadence, status,
          anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate, amount_tolerance_pct AS tolerance, total_payments AS total,
-         paid_before AS paidBefore
+         paid_before AS paidBefore, full_price_minor AS fullPrice
        FROM recurring_items WHERE id = ?`,
     )
-    .get(itemId) as (KnownItem & { accountId: number | null; tolerance: number; paidBefore: number; status: RecurringStatus }) | undefined
+    .get(itemId) as
+    | (KnownItem & { accountId: number | null; tolerance: number; paidBefore: number; fullPrice: number | null; status: RecurringStatus })
+    | undefined
   if (!item || (item.status !== 'active' && item.status !== 'ended')) return 0
   const others = ctx.sqlite
     .prepare(`SELECT expected_amount_minor FROM recurring_items WHERE payee_key = ? AND status = 'active' AND id <> ?`)
@@ -591,6 +680,18 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
       if (item.total === null && amountWithin(best.amount, ref, item.tolerance)) amount = best.amount
     }
     matching.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id))
+
+    // A plan with a full price and one payment to go: its last is what's left of the price, in the period
+    // after its latest payment's.
+    const newest = matching[matching.length - 1]
+    if (newest && item.total !== null && item.fullPrice !== null && item.paidBefore + matching.length === item.total - 1) {
+      const last = item.fullPrice - matching.reduce((n, t) => n + t.amount, 0) - item.paidBefore * item.expected
+      const due = stepDue(item, pinned.get(newest.id) ?? periodOf(newest.date)!)
+      const found = (taken.has(due) ? [] : (byDue.get(due) ?? []))
+        .filter((t) => !pinned.has(t.id) && Math.sign(last) === Math.sign(item.expected) && amountWithin(t.amount, last, item.tolerance))
+        .sort((a, b) => gap(a, last) - gap(b, last) || a.id - b.id)[0]
+      if (found) matching.push(found)
+    }
   }
   if (item.total !== null) matching = matching.slice(-Math.max(0, item.total - item.paidBefore))
   const wanted = new Set(matching.map((t) => t.id))
@@ -765,6 +866,13 @@ function settleInstalments(ctx: AppContext, id: number, reopen = false) {
   else if (reopen && paid < row.total && row.status === 'ended') ctx.sqlite.prepare("UPDATE recurring_items SET status = 'active' WHERE id = ?").run(id)
 }
 
+/** A full price is a plan's, the same way as its amount (money out or in). */
+function checkFullPrice(fullPrice: number | null | undefined, plan: { total: number | null; expected: number }) {
+  if (fullPrice == null) return
+  if (plan.total === null) badRequest('Only an instalment plan has a full price. Say how many payments it has.')
+  if (Math.sign(fullPrice) !== Math.sign(plan.expected)) badRequest(`The full price is money ${plan.expected < 0 ? 'out' : 'in'}, like its payments.`)
+}
+
 /** The account and category an item is given exist (an archived one is fine: it's the item's already). */
 function checkReferences(ctx: AppContext, input: { accountId?: number | null; categoryId?: number | null }) {
   if (input.accountId != null && !ctx.sqlite.prepare('SELECT 1 FROM accounts WHERE id = ?').get(input.accountId)) badRequest('That account does not exist')
@@ -775,13 +883,14 @@ function checkReferences(ctx: AppContext, input: { accountId?: number | null; ca
 
 export function createRecurring(ctx: AppContext, input: CreateInput): RecurringItem {
   checkReferences(ctx, input)
+  checkFullPrice(input.fullPriceMinor, { total: input.totalPayments, expected: input.expectedAmountMinor })
   const payeeKey = payeeKeyOf(ctx, input.payee)
   const id = Number(
     ctx.sqlite
       .prepare(
         `INSERT INTO recurring_items (name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
-           cadence, anchor_date, second_day, next_due_date, status, origin, total_payments)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', ?)`,
+           cadence, anchor_date, second_day, next_due_date, status, origin, total_payments, full_price_minor)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', ?, ?)`,
       )
       .run(
         input.payee,
@@ -796,6 +905,7 @@ export function createRecurring(ctx: AppContext, input: CreateInput): RecurringI
         input.cadence === 'semimonthly' ? (input.secondDay ?? semiMonthlyPartner(Number(input.anchorDate.slice(8, 10)))) : null,
         input.anchorDate,
         input.totalPayments,
+        input.totalPayments === null ? null : (input.fullPriceMinor ?? null),
       ).lastInsertRowid,
   )
   relink(ctx, id)
@@ -809,6 +919,11 @@ export function createRecurring(ctx: AppContext, input: CreateInput): RecurringI
 export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput): RecurringItem {
   const before = getRecurring(ctx, id)
   checkReferences(ctx, input)
+  const stored = ctx.sqlite.prepare('SELECT expected_amount_minor FROM recurring_items WHERE id = ?').pluck().get(id) as number
+  checkFullPrice(input.fullPriceMinor, {
+    total: input.totalPayments !== undefined ? input.totalPayments : before.totalPayments,
+    expected: input.expectedAmountMinor ?? stored,
+  })
   const cols: Record<string, string> = {
     name: 'title',
     payee: 'name',
@@ -820,6 +935,7 @@ export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput)
     nextDueDate: 'next_due_date',
     status: 'status',
     totalPayments: 'total_payments',
+    fullPriceMinor: 'full_price_minor',
     secondDay: 'second_day',
   }
   const sets: string[] = []
@@ -837,7 +953,8 @@ export function updateRecurring(ctx: AppContext, id: number, input: UpdateInput)
     sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
     ctx.sqlite.prepare(`UPDATE recurring_items SET ${sets.join(', ')} WHERE id = @id`).run(params)
   }
-  if (input.totalPayments === null) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = 0 WHERE id = ?').run(id)
+  // No longer a plan: no payments from before your history, and no full price.
+  if (input.totalPayments === null) ctx.sqlite.prepare('UPDATE recurring_items SET paid_before = 0, full_price_minor = NULL WHERE id = ?').run(id)
   if (input.otherPayees) setOtherPayees(ctx, id, before.payeeKey, input.otherPayees)
   settleSecondDay(ctx, id, before)
   // Every change: its payments again from what it is now. The amount follows the latest payment when
@@ -1281,7 +1398,8 @@ export function upcomingPayments(ctx: AppContext, days = 30): UpcomingPayment[] 
         name: item.name,
         payee: item.payee,
         dueDate: due,
-        amountMinor: item.expectedAmountMinor,
+        // A plan's last payment: what's left of its full price, when it has one.
+        amountMinor: i === left - 1 && item.lastPaymentMinor !== null ? item.lastPaymentMinor : item.expectedAmountMinor,
         categoryId: item.categoryId,
         accountId: item.accountId,
         overdue: due < todayDate,

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { X } from '@lucide/vue'
-import { CADENCES, parseMoney, recurringLabel, semiMonthlyPartner, type Cadence, type RecurringItem } from '@st/shared'
+import { CADENCES, formatMoney, parseMoney, recurringLabel, semiMonthlyPartner, type Cadence, type RecurringItem } from '@st/shared'
 import AccountSelect from '@/components/AccountSelect.vue'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
@@ -39,6 +39,8 @@ const kind = ref<Kind>('bill')
 const income = computed(() => kind.value === 'income')
 const totalPayments = ref('')
 const paidPayments = ref('')
+/** A plan's full price (optional): its last payment is what's left of it. */
+const fullPrice = ref('')
 const amount = ref('')
 const cadence = ref<Cadence>('monthly')
 /** Semi-monthly's other day of the month ("31": the last day); the next due date gives the first. */
@@ -72,6 +74,7 @@ watch(open, (v) => {
   kind.value = (it?.expectedAmountMinor ?? -1) > 0 ? 'income' : it?.totalPayments || it?.instalmentService ? 'plan' : 'bill'
   totalPayments.value = it?.totalPayments ? String(it.totalPayments) : it?.instalmentService && it.cadence === 'biweekly' ? '4' : ''
   paidPayments.value = it ? String(it.paidPayments) : '0'
+  fullPrice.value = it?.fullPriceMinor ? (Math.abs(it.fullPriceMinor) / 100).toFixed(2) : ''
   amount.value = it ? (Math.abs(it.expectedAmountMinor) / 100).toFixed(2) : ''
   cadence.value = it?.cadence ?? 'monthly'
   due.value = it?.nextDueDate ?? today.value
@@ -92,6 +95,23 @@ async function stop() {
     error.value = errorMessage(err)
   }
 }
+
+/**
+ * What the full price makes the last payment, as you type (the server works it out for good): what's left
+ * after what's paid (its payments as they were, while Paid so far is as the app counted it, or else at the
+ * usual amount) and the others to come at the usual amount. Null until there's enough to say.
+ */
+const lastPayment = computed(() => {
+  const full = parseMoney(fullPrice.value)
+  const usual = parseMoney(amount.value)
+  const total = Number(totalPayments.value)
+  const paid = Number(paidPayments.value || 0)
+  if (!full || !usual || !Number.isInteger(total) || total < 2 || !Number.isInteger(paid) || paid >= total) return null
+  const it = props.item
+  const counted = it && it.paidPayments === paid && it.totalAmountMinor !== null && it.remainingAmountMinor !== null
+  const paidAmount = counted ? Math.abs(it.totalAmountMinor! - it.remainingAmountMinor!) : paid * Math.abs(usual)
+  return Math.abs(full) - paidAmount - (total - paid - 1) * Math.abs(usual)
+})
 
 /** An item you stopped tracking (not a plan that's paid off). */
 const stopped = computed(() => props.item?.status === 'ended' && props.item.remainingPayments !== 0)
@@ -143,7 +163,10 @@ async function submit() {
   const paid = Number(paidPayments.value || 0)
   if (plan && (!Number.isInteger(total) || total < 2)) return (error.value = 'Enter how many payments the plan has, like 4 or 12')
   if (plan && (!Number.isInteger(paid) || paid < 0 || paid > total)) return (error.value = `Paid so far is a number from 0 to ${total}`)
-  const payments = plan ? { totalPayments: total, paidPayments: paid } : { totalPayments: null }
+  const full = fullPrice.value.trim() ? parseMoney(fullPrice.value) : null
+  if (plan && fullPrice.value.trim() && !full) return (error.value = 'The full price is an amount like 399.00, or leave it empty')
+  const fullPriceMinor = full ? Math.sign(expectedAmountMinor) * Math.abs(full) : null
+  const payments = plan ? { totalPayments: total, paidPayments: paid, fullPriceMinor } : { totalPayments: null }
   try {
     if (props.item) {
       const saved = await m.update.mutateAsync({
@@ -267,6 +290,19 @@ async function submit() {
               Paid so far
             </FieldLabel>
             <Input id="rec-paid" v-model="paidPayments" inputmode="numeric" placeholder="0" class="tabular" />
+          </div>
+          <div class="col-span-2 grid min-w-0 gap-1.5">
+            <FieldLabel
+              html-for="rec-full"
+              hint="The total of all its payments, as Klarna or Affirm shows it, interest included. Its last payment is what’s left of it, so a last payment of another amount is expected. Leave it empty when every payment is the same."
+            >
+              Full price <span class="font-normal text-muted-foreground">(optional)</span>
+            </FieldLabel>
+            <Input id="rec-full" v-model="fullPrice" inputmode="decimal" placeholder="399.00" class="tabular" />
+            <p v-if="lastPayment !== null && lastPayment > 0" class="text-xs text-muted-foreground">
+              Its last payment: <span class="tabular">{{ formatMoney(lastPayment) }}</span>
+            </p>
+            <p v-else-if="lastPayment !== null" class="text-xs text-warning">That’s less than its payments add up to.</p>
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3">

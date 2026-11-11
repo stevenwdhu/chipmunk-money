@@ -1107,9 +1107,16 @@ export const TOOLS: ToolDef[] = [
           lastSeenDate: z.string().nullable(),
           alerts: z.array(z.string()),
           instalments: z
-            .object({ paid: z.number(), total: z.number(), left: z.string(), endDate: z.string().nullable() })
+            .object({
+              paid: z.number(),
+              total: z.number(),
+              left: z.string(),
+              endDate: z.string().nullable(),
+              fullPrice: z.string().nullable().describe('The total of its payments, when it was given.'),
+              lastPayment: z.string().nullable().describe('Its last payment, what’s left of the full price, when that’s known.'),
+            })
             .nullable()
-            .describe('An instalment plan: payments made of its total, what’s left to pay, and when the last one is due.'),
+            .describe('An instalment plan: payments made of its total, what’s left to pay, when the last one is due, and its full price and last payment.'),
         }),
       ),
     }),
@@ -1138,19 +1145,28 @@ export const TOOLS: ToolDef[] = [
           amount: money(r.possiblePayment.amountMinor),
           date: r.possiblePayment.date,
           newAmount: r.possiblePayment.newAmount,
+          role: r.possiblePayment.role,
           dueDate: r.possiblePayment.dueDate,
         },
         instalments:
           r.totalPayments === null
             ? null
-            : { paid: r.paidPayments, total: r.totalPayments, left: money(r.remainingAmountMinor ?? 0), fullPrice: money(r.totalAmountMinor ?? 0), endDate: r.endDate },
+            : {
+                paid: r.paidPayments,
+                total: r.totalPayments,
+                left: money(r.remainingAmountMinor ?? 0),
+                endDate: r.endDate,
+                fullPrice: money(r.fullPriceMinor ?? r.totalAmountMinor ?? 0),
+                lastPayment: r.lastPaymentMinor === null ? null : money(r.lastPaymentMinor),
+              },
       }))
-      const plan = (p: (typeof items)[number]['instalments']) => (p ? ` · ${p.paid} of ${p.total} paid, ${p.left} left of ${p.fullPrice}, ends ${p.endDate}` : '')
+      const plan = (p: (typeof items)[number]['instalments']) =>
+        p ? ` · ${p.paid} of ${p.total} paid, ${p.left} left of ${p.fullPrice}${p.lastPayment ? `, last payment ${p.lastPayment}` : ''}, ends ${p.endDate}` : ''
       const text = items.length
         ? items
             .map(
               (r) =>
-                `#${r.id} ${r.payee}${r.otherPayees.length ? ` (also ${r.otherPayees.join(', ')})` : ''}${r.name ? ` (${r.name})` : ''} ${r.amount} ${r.cadence}, next ${r.nextDueDate} · ${r.status}${plan(r.instalments)}${r.alerts.length ? ` · ${r.alerts.join(', ')}` : ''}${r.possiblePayment ? ` · possible payment from ${r.possiblePayment.payee}: ${r.possiblePayment.amount} on ${r.possiblePayment.date} for ${r.possiblePayment.dueDate}${r.possiblePayment.newAmount ? ', a new amount' : ''} (to confirm in the app)` : ''}`,
+                `#${r.id} ${r.payee}${r.otherPayees.length ? ` (also ${r.otherPayees.join(', ')})` : ''}${r.name ? ` (${r.name})` : ''} ${r.amount} ${r.cadence}, next ${r.nextDueDate} · ${r.status}${plan(r.instalments)}${r.alerts.length ? ` · ${r.alerts.join(', ')}` : ''}${r.possiblePayment ? ` · possible payment from ${r.possiblePayment.payee}: ${r.possiblePayment.amount} on ${r.possiblePayment.date} for ${r.possiblePayment.dueDate}${r.possiblePayment.role ? `, its ${r.possiblePayment.role} payment` : r.possiblePayment.newAmount ? ', a new amount' : ''} (to confirm in the app)` : ''}`,
             )
             .join('\n')
         : 'No recurring payments.'
@@ -1290,6 +1306,10 @@ export const TOOLS: ToolDef[] = [
       secondDay: z.number().int().min(1).max(31).optional().describe('Semi-monthly: the other day of the month (31 for the last day); nextDate gives the first.'),
       payments: z.number().int().min(2).max(600).optional().describe('An instalment plan: how many payments it has in all, like 4 for Pay in 4.'),
       paidSoFar: z.number().int().min(0).max(600).optional().describe('An instalment plan: how many are paid already, including ones from before the ledger’s history.'),
+      fullPrice: z
+        .number()
+        .optional()
+        .describe('An instalment plan: the total of all its payments in dollars, as the lender shows it, interest included. Its last payment is what’s left of it. Negative like its amount.'),
     }),
     output: z.object({ ledger: z.string(), id: z.number(), payee: z.string(), name: z.string().nullable(), nextDueDate: z.string() }),
     annotations: WRITE,
@@ -1304,7 +1324,7 @@ export const TOOLS: ToolDef[] = [
         anchorDate: args.nextDate,
         categoryId: args.category === undefined ? null : lk.category(args.category),
         accountId: args.account === undefined ? null : lk.account(args.account).id,
-        ...(args.payments ? { totalPayments: args.payments, paidPayments: args.paidSoFar } : {}),
+        ...(args.payments ? { totalPayments: args.payments, paidPayments: args.paidSoFar, ...(args.fullPrice !== undefined ? { fullPriceMinor: toMinor(args.fullPrice) } : {}) } : {}),
         ...(args.secondDay ? { secondDay: args.secondDay } : {}),
       })
       const plan = r.totalPayments ? `, ${r.paidPayments} of ${r.totalPayments} paid` : ''

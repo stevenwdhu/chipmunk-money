@@ -79,12 +79,12 @@ const upcomingTotal = computed(() => (upcoming.data.value ?? []).filter((u) => u
 
 const cadenceLabel = (c: string) => CADENCES.find((x) => x.value === c)?.label ?? c
 const paidOff = (i: RecurringItem) => i.remainingPayments === 0
-/** A plan with one payment to go: one at another amount is its remainder, not a new price. */
-const lastOfPlan = (i: RecurringItem) => i.remainingPayments === 1
 const progress = (i: RecurringItem) => (i.totalPayments ? Math.min(100, (i.paidPayments / i.totalPayments) * 100) : 0)
-/** "3 of 4 paid · ends Jun 5". */
-const planText = (i: RecurringItem) =>
-  `${i.paidPayments} of ${i.totalPayments} paid${i.endDate ? ` · ${i.remainingPayments ? 'ends' : 'ended'} ${shortDate(i.endDate, today.value)}` : ''}`
+/** "3 of 4 paid · last $43.21 · ends Jun 5" (its last payment when its full price makes it another amount). */
+const planText = (i: RecurringItem) => {
+  const last = i.lastPaymentMinor !== null && i.lastPaymentMinor !== i.expectedAmountMinor ? ` · last ${money(Math.abs(i.lastPaymentMinor))}` : ''
+  return `${i.paidPayments} of ${i.totalPayments} paid${last}${i.endDate ? ` · ${i.remainingPayments ? 'ends' : 'ended'} ${shortDate(i.endDate, today.value)}` : ''}`
+}
 
 /** Rows unfolded to show their payments. */
 const unfolded = ref(new Set<number>())
@@ -230,8 +230,11 @@ async function detect() {
                           Is <span class="font-medium">{{ item.possiblePayment.payee }}</span>’s
                           <span class="tabular">{{ money(Math.abs(item.possiblePayment.amountMinor)) }}</span> on {{ shortDate(item.possiblePayment.date, today) }} its
                           {{ shortDate(item.possiblePayment.dueDate, today) }} payment?
-                          <span v-if="item.possiblePayment.newAmount && lastOfPlan(item)" class="text-muted-foreground">
+                          <span v-if="item.possiblePayment.role === 'last'" class="text-muted-foreground">
                             Its last payment, at its own amount. The plan ends.
+                          </span>
+                          <span v-else-if="item.possiblePayment.role === 'first'" class="text-muted-foreground">
+                            Its first payment, at its own amount, like a down payment. With it, its payments add up to its full price.
                           </span>
                           <span v-else-if="item.possiblePayment.newAmount" class="text-muted-foreground">
                             It’d be its amount from now on, instead of <span class="tabular">{{ money(Math.abs(item.expectedAmountMinor)) }}</span>.

@@ -518,6 +518,12 @@ const paidPayments = z
   .max(600)
   .describe('An instalment plan: how many are paid so far, counting ones from before your history. The app counts the ones it links itself.')
 
+const fullPrice = minor
+  .nullable()
+  .describe(
+    'An instalment plan: the total of all its payments, as the lender shows it, interest included (negative for money out, like its amount). Its last payment is what’s left of it, so a last payment of another amount is expected and matched. Null: every payment is its amount.',
+  )
+
 const secondDay = z
   .number()
   .int()
@@ -539,6 +545,7 @@ export const recurringCreateSchema = z.object({
   anchorDate: isoDate,
   totalPayments: totalPayments.default(null),
   paidPayments: paidPayments.optional(),
+  fullPriceMinor: fullPrice.optional(),
   secondDay: secondDay.optional(),
 })
 export type RecurringCreate = z.input<typeof recurringCreateSchema>
@@ -555,6 +562,7 @@ export const recurringUpdateSchema = z.object({
   status: z.enum(['suggested', 'active', 'dismissed', 'ended']).optional(),
   totalPayments: totalPayments.optional(),
   paidPayments: paidPayments.optional(),
+  fullPriceMinor: fullPrice.optional(),
   secondDay: secondDay.optional(),
   otherPayees: z.array(z.string().trim().min(1).max(200)).max(20).optional().describe('More payees its payments come from, besides its own. Replaces the list.'),
 })

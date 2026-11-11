@@ -159,6 +159,11 @@ export const recurringItems = sqliteTable(
     totalPayments: integer('total_payments'),
     /** Payments made before the ones linked to it (from before your history). */
     paidBefore: integer('paid_before').notNull().default(0),
+    /**
+     * An instalment plan: the total of all its payments, as the lender shows it (signed like its amount).
+     * Its last payment is what's left of it. Null: every payment is its amount.
+     */
+    fullPriceMinor: integer('full_price_minor'),
     ...timestamps,
   },
   (t) => [index('recurring_payee').on(t.payeeKey), index('recurring_status').on(t.status)],

@@ -437,7 +437,7 @@ describe('payments from another payee', () => {
     const other = await add('PayHub', -4579, '2026-09-24')
     // Another bill through PayHub close to the amount, but in August, which already has its payment.
     const utilities = await add('PayHub', -31_950, '2026-08-25')
-    expect(getRecurring(ctx, item.id).possiblePayment).toEqual({ transactionId: paid.id, date: '2026-09-22', payee: 'PayHub', amountMinor: -31_044, newAmount: false, dueDate: '2026-09-20' })
+    expect(getRecurring(ctx, item.id).possiblePayment).toEqual({ transactionId: paid.id, date: '2026-09-22', payee: 'PayHub', amountMinor: -31_044, newAmount: false, role: null, dueDate: '2026-09-20' })
 
     const linked = linkPossiblePayment(ctx, item.id, paid.id)
     expect(linked).toMatchObject({ otherPayees: ['PayHub'], nextDueDate: '2026-10-20', alerts: [], possiblePayment: null, occurrences: 5 })
@@ -620,7 +620,7 @@ describe('payments added at their own amount', () => {
     // $43.21 is too far from $100 to be linked: it's asked about, as its last payment, and can be added.
     const last = await add(ctx, acc, '2026-10-15', -4321)
     expect(getTransaction(ctx, last.id).recurringItemId).toBeNull()
-    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: true })
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: false, role: 'last' })
     expect(addPayment(ctx, item.id, last.id)).toMatchObject({
       status: 'ended',
       paidPayments: 5,
@@ -640,7 +640,7 @@ describe('payments added at their own amount', () => {
     const { ctx, acc, down, item } = await plan(testContext())
     addPayment(ctx, item.id, down.id)
     const last = await add(ctx, acc, '2026-10-15', -7000)
-    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: true })
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: last.id, newAmount: false, role: 'last' })
     expect(linkPossiblePayment(ctx, item.id, last.id)).toMatchObject({ status: 'ended', paidPayments: 5, expectedAmountMinor: -10_000, totalAmountMinor: -67_000 })
   })
 
@@ -714,6 +714,88 @@ describe('payments added at their own amount', () => {
     expect(recurringPaymentCandidates(ctx, item.id, { q: 'sofa store' })).toMatchObject([{ transaction: { id: old.id }, likely: false }])
     updateRecurring(ctx, item.id, { status: 'suggested' })
     expect(() => addPayment(ctx, item.id, old.id)).toThrow(/Confirm it first/)
+  })
+})
+
+describe('a plan’s full price', () => {
+  const pay = (ctx: AppContext, accountId: number, payee: string, amountMinor: number, date: string) =>
+    createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false })
+  const plan = (ctx: AppContext, input: Record<string, unknown>) =>
+    createRecurring(ctx, recurringCreateSchema.parse({ cadence: 'biweekly', amountTolerancePct: 10, ...input }))
+
+  it('predicts the last payment from what’s left of it, for what’s left and what’s coming up', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const d of ['2026-09-08', '2026-09-22']) await pay(ctx, acc, 'KLARNA*SONOS', -9975, d)
+    const item = plan(ctx, { payee: 'KLARNA*SONOS', expectedAmountMinor: -9975, anchorDate: '2026-09-08', totalPayments: 4, fullPriceMinor: -39_901 })
+    expect(item).toMatchObject({ paidPayments: 2, fullPriceMinor: -39_901, lastPaymentMinor: -9976, remainingAmountMinor: -19_951, totalAmountMinor: -39_901 })
+    expect(upcomingPayments(ctx, 30).map((u) => [u.dueDate, u.amountMinor, u.paymentNumber])).toEqual([
+      ['2026-10-06', -9975, 3],
+      ['2026-10-20', -9976, 4],
+    ])
+  })
+
+  it('gives two plans from one payee each their own payment, the last one by what’s left of its price', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const d of ['2026-09-01', '2026-09-15']) {
+      await pay(ctx, acc, 'KLARNA', -9875, d)
+      await pay(ctx, acc, 'KLARNA', -4980, d)
+    }
+    // A ends with $50.00, what's left of its price. B's usual $49.80 is closer to that than A's $98.75.
+    const a = plan(ctx, { payee: 'KLARNA', name: 'Speaker', expectedAmountMinor: -9875, anchorDate: '2026-09-01', totalPayments: 3, fullPriceMinor: -24_750 })
+    const b = plan(ctx, { payee: 'KLARNA', name: 'Lamp', expectedAmountMinor: -4980, anchorDate: '2026-09-01', totalPayments: 4 })
+    expect(a.lastPaymentMinor).toBe(-5000)
+    const final = await pay(ctx, acc, 'KLARNA', -5000, '2026-09-29')
+    const lamp = await pay(ctx, acc, 'KLARNA', -4980, '2026-09-29')
+    expect(getTransaction(ctx, final.id).recurringItemId).toBe(a.id)
+    expect(getTransaction(ctx, lamp.id).recurringItemId).toBe(b.id)
+    expect(getRecurring(ctx, a.id)).toMatchObject({ status: 'ended', paidPayments: 3, totalAmountMinor: -24_750 })
+    expect(getRecurring(ctx, b.id)).toMatchObject({ status: 'active', paidPayments: 3 })
+    // Worked out again, each keeps its own.
+    expect(updateRecurring(ctx, a.id, { name: 'Speakers' })).toMatchObject({ status: 'ended', paidPayments: 3 })
+    expect(updateRecurring(ctx, b.id, { name: 'Lamps' })).toMatchObject({ status: 'active', paidPayments: 3 })
+    expect(getTransaction(ctx, final.id).recurringItemId).toBe(a.id)
+  })
+
+  it('asks about a plan’s payment much later than its due date instead of taking it', async () => {
+    const ctx = testContext({ now: '2026-10-20T18:00:00Z' })
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const d of ['2026-07-01', '2026-08-01', '2026-09-01']) await pay(ctx, acc, 'AFFIRM', -12_500, d)
+    const item = plan(ctx, { payee: 'AFFIRM', expectedAmountMinor: -12_500, cadence: 'monthly', anchorDate: '2026-07-01', totalPayments: 6 })
+    const late = await pay(ctx, acc, 'AFFIRM', -12_500, '2026-10-15')
+    expect(getTransaction(ctx, late.id).recurringItemId).toBeNull()
+    expect(getRecurring(ctx, item.id).possiblePayment).toMatchObject({ transactionId: late.id, newAmount: false, role: null, dueDate: '2026-10-01' })
+    expect(linkPossiblePayment(ctx, item.id, late.id)).toMatchObject({ paidPayments: 4, expectedAmountMinor: -12_500 })
+  })
+
+  it('offers a missing first payment only when it makes the payments add up to the full price', async () => {
+    const ctx = testContext()
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const first = await pay(ctx, acc, 'KLARNA*TENT', -3500, '2026-08-10')
+    await pay(ctx, acc, 'KLARNA*TENT', -4712, '2026-08-17')
+    for (const d of ['2026-08-24', '2026-09-07', '2026-09-21']) await pay(ctx, acc, 'KLARNA*TENT', -2500, d)
+    const bare = { payee: 'KLARNA*TENT', expectedAmountMinor: -2500, anchorDate: '2026-08-24', totalPayments: 4 }
+    // Without a full price nothing says one is missing.
+    const item = plan(ctx, bare)
+    expect(item).toMatchObject({ paidPayments: 3, possiblePayment: null })
+    // With it, only the $35.00 makes $110.00: not the $47.12 from the same payee.
+    expect(updateRecurring(ctx, item.id, { fullPriceMinor: -11_000 })).toMatchObject({
+      lastPaymentMinor: -3500,
+      possiblePayment: { transactionId: first.id, role: 'first', newAmount: false },
+    })
+    expect(linkPossiblePayment(ctx, item.id, first.id)).toMatchObject({ status: 'ended', paidPayments: 4, expectedAmountMinor: -2500, totalAmountMinor: -11_000 })
+  })
+
+  it('is only a plan’s, and money out like its payments', () => {
+    const ctx = testContext()
+    const bill = { payee: 'Hydro', expectedAmountMinor: -8000, cadence: 'monthly', anchorDate: '2026-10-01' }
+    expect(() => createRecurring(ctx, recurringCreateSchema.parse({ ...bill, fullPriceMinor: -96_000 }))).toThrow('Only an instalment plan has a full price')
+    expect(() => createRecurring(ctx, recurringCreateSchema.parse({ ...bill, totalPayments: 12, fullPriceMinor: 96_000 }))).toThrow('money out')
+    const item = createRecurring(ctx, recurringCreateSchema.parse({ ...bill, totalPayments: 12, fullPriceMinor: -96_001 }))
+    expect(item).toMatchObject({ fullPriceMinor: -96_001, lastPaymentMinor: -8001 })
+    // No longer a plan: no full price either.
+    expect(updateRecurring(ctx, item.id, { totalPayments: null })).toMatchObject({ fullPriceMinor: null, lastPaymentMinor: null })
   })
 })
 

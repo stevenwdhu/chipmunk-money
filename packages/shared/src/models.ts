@@ -645,9 +645,15 @@ export const recurringItemSchema = z
     totalPayments: z.number().int().nullable().describe('An instalment plan: how many payments it has. Null for bills, subscriptions and income, which have no end.'),
     paidPayments: z.number().int().describe('Payments made: the linked ones (for a suggestion, the ones found), plus any from before your history.'),
     remainingPayments: z.number().int().nullable().describe('An instalment plan: payments still to make.'),
-    remainingAmountMinor: minor.nullable().describe('An instalment plan: what’s left to pay, at the usual amount.'),
-    totalAmountMinor: minor.nullable().describe('An instalment plan: its full price. What’s been paid, plus what’s left at the usual amount (payments from before your history count at the usual amount too).'),
+    remainingAmountMinor: minor.nullable().describe('An instalment plan: what’s left to pay, its last payment as `lastPaymentMinor` when it has a full price and the others at its amount.'),
+    totalAmountMinor: minor.nullable().describe('An instalment plan: its full price. What’s been paid, plus what’s left (`remainingAmountMinor`). Payments from before your history count at the usual amount.'),
     endDate: date.nullable().describe('An instalment plan: when the last payment is due (or was made).'),
+    fullPriceMinor: minor.nullable().describe('An instalment plan: the total of all its payments, as you gave it. Null: every payment is its amount.'),
+    lastPaymentMinor: minor
+      .nullable()
+      .describe(
+        'An instalment plan with a full price and payments to go: its last payment, what’s left of the full price after the payments made and the others to come at its amount. Null without a full price, once it’s paid off, or when the full price is less than its payments add up to.',
+      ),
     instalmentService: z.boolean().describe('The payee is a buy-now-pay-later service (Klarna, Affirm…), so it’s likely an instalment plan.'),
     stopped: z.boolean().describe('A suggestion whose payments have stopped (or a plan that’s paid off): confirming it keeps it in Ended, its payments linked.'),
     otherPayees: z
@@ -659,7 +665,13 @@ export const recurringItemSchema = z
         date,
         payee: z.string(),
         amountMinor: minor,
-        newAmount: z.boolean().describe('From its own payee, beyond its price variation: linking it makes this the item’s amount from its due date on. Except an instalment plan’s last payment (any amount up to 1.5 times its own), which is linked at its own amount and ends the plan.'),
+        newAmount: z.boolean().describe('From its own payee, beyond its price variation: linking it makes this the item’s amount from its due date on. Not for a `role` payment.'),
+        role: z
+          .enum(['first', 'last'])
+          .nullable()
+          .describe(
+            'An instalment plan’s `first` payment (one missing before its others, at exactly what makes its payments add up to its full price, like a down payment) or its `last` (what’s left of its price). Linking it adds it at its own amount: the plan’s amount stays.',
+          ),
         dueDate: date.describe('The due date it would be the payment for: its next one, or one in its history that has none (it came early or late).'),
       })
       .nullable()

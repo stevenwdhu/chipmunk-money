@@ -15,6 +15,13 @@
       "when": 1794350004809,
       "tag": "0001_recurring_one_off",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794356474119,
+      "tag": "0002_recurring_full_price",
+      "breakpoints": true
     }
   ]
 }
