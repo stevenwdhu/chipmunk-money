@@ -122,7 +122,7 @@ Open http://localhost:8787 and choose how to begin:
 - **Start from scratch** opens the app with your first account.
 - **Restore a backup** brings back a ledger you saved before.
 
-`:latest` is the newest release. To take only fixes, use a minor version like `:0.1`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `spending-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
+`:latest` is the newest release. To take only fixes, use a minor version like `:0.2`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `spending-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
 
 Running from source, building the image yourself, using it from your phone and backups: [docs/self-hosting.md](docs/self-hosting.md).
 

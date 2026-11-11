@@ -2,7 +2,7 @@
 
 What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
 
-## Unreleased
+## 0.2.0 (2026-11-10)
 
 ### Added
 
@@ -20,7 +20,7 @@ What changed in each release of Spending Tracker. Versions follow [Semantic Vers
 ### Fixed
 
 - A plan whose last payment was a little smaller lost its earlier payments the next time it was edited, or when the Scan found it paid off and you confirmed it.
-- The Scan no longer suggests a coffee you buy at one price most weekdays as a weekly or semi-monthly payment.
+- The Scan no longer suggests a coffee you buy at one price most weekdays as a weekly, biweekly or semi-monthly payment.
 - Creating a recurring item with an account or category that doesn't exist is a clear error, not a server error.
 
 ## 0.1.0 (2026-11-09)
