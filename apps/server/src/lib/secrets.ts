@@ -3,7 +3,18 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import path from 'node:path'
 
 /**
- * Encrypts secrets kept in meta.db (bank access) with AES-256-GCM. The key lives in its own file,
+ * A sealed secret that this secret.key can't open: it was sealed with another key (the database was
+ * copied or restored without its own secret.key, or the file was replaced). Not a corrupt database.
+ */
+export class WrongSecretKeyError extends Error {
+  constructor() {
+    super('This was saved with a different secret.key, so it can’t be read. Put the original secret.key back in the data folder, or enter it again.')
+    this.name = 'WrongSecretKeyError'
+  }
+}
+
+/**
+ * Encrypts secrets kept in chipmunk.db (bank access, AI provider keys) with AES-256-GCM. The key lives in its own file,
  * `data/secret.key`, which backups leave out, so a copied database or full-backup zip can't be used
  * to reach your bank data on its own.
  */
@@ -45,7 +56,12 @@ export class SecretBox {
     if (version !== 'v1' || !iv || !tag || !data) throw new Error('Unrecognized secret format')
     const decipher = createDecipheriv('aes-256-gcm', this.key, Buffer.from(iv, 'base64'))
     decipher.setAuthTag(Buffer.from(tag, 'base64'))
-    return Buffer.concat([decipher.update(Buffer.from(data, 'base64')), decipher.final()]).toString('utf8')
+    try {
+      return Buffer.concat([decipher.update(Buffer.from(data, 'base64')), decipher.final()]).toString('utf8')
+    } catch {
+      // OpenSSL only says "bad decrypt": the tag doesn't match, which with an intact value means another key.
+      throw new WrongSecretKeyError()
+    }
   }
 }
 

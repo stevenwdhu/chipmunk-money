@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Account, ActivityPage, ApiKeyCreated, BankConnection, Institution, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
 import { bankConnections } from '../../db/schema'
@@ -166,6 +166,25 @@ describe('bank connections', () => {
     expect(again.body.error.message).toMatch(/already used/)
     const http = await api('POST', '/bank/connections', { setupToken: Buffer.from('http://bridge.test/simplefin/claim/X').toString('base64') })
     expect(http.body.error.message).toMatch(/HTTPS/)
+  })
+
+  it('says the saved access needs the original secret.key when another key sealed it', async () => {
+    const { connect, storage, sync, api } = await setup()
+    const conn = await connect()
+    const other = new SecretBox(Buffer.alloc(32, 7)).seal('https://u:p@bridge.test/simplefin')
+    storage.app.db.update(bankConnections).set({ secret: other }).run()
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const result = await sync(conn.id)
+      expect(result.error).toMatch(/different secret\.key/)
+      const listed = (await api('GET', '/bank/connections')).body as BankConnection[]
+      expect(listed[0]!.status).toBe('error')
+      expect(listed[0]!.errors[0]!.message).toMatch(/^Can’t read this connection’s saved sign-in: it was saved with a different secret\.key\./)
+      expect(listed[0]!.errors[0]!.message).not.toMatch(/decrypt/)
+      expect(error.mock.calls.flat().join(' ')).not.toMatch(/decrypt/)
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('syncs transactions into a linked account without duplicates, keeping your edits', async () => {

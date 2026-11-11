@@ -26,6 +26,7 @@ import { aiEnabled } from '../../ai/runner'
 import { bankAccounts, bankConnections, bankTransactions } from '../../db/schema'
 import { badRequest, notFound } from '../../lib/http'
 import { ulid } from '../../lib/ids'
+import { WrongSecretKeyError } from '../../lib/secrets'
 import type { Storage } from '../../storage'
 import * as accounts from '../accounts'
 import { recordActivity } from '../activity'
@@ -94,6 +95,9 @@ const firstDate = (ctx: AppContext, accountId: number) =>
 /** Who the activity log says made a change. */
 const actor = (provider: BankProviderKind) => ({ name: { simplefin: 'SimpleFIN sync', plaid: 'Plaid sync', wealthsimple: 'Wealthsimple sync' }[provider], apiKeyId: null })
 /** Plaid's error code for a bank that wants you to sign in again. */
+/** The saved access was sealed with another secret.key (see WrongSecretKeyError). */
+const WRONG_KEY =
+  'Can’t read this connection’s saved sign-in: it was saved with a different secret.key. Put the original secret.key back in the data folder, or remove this connection and connect the bank again.'
 const SIGN_IN_AGAIN = 'ITEM_LOGIN_REQUIRED'
 /** How long a switch's review keeps its connections from syncing on their own, unless it ends first. */
 const REVIEW_HOLD_MS = 15 * 60_000
@@ -307,6 +311,7 @@ export class BankService {
       return await this.plaid.createLinkToken({ userId: this.plaidUserId(), accessToken: row ? this.storage.secrets.open(row.secret) : undefined })
     } catch (err) {
       if (err instanceof ProviderRequestError) badRequest(err.message)
+      if (err instanceof WrongSecretKeyError) badRequest(WRONG_KEY)
       throw err
     }
   }
@@ -760,15 +765,23 @@ export class BankService {
     }
   }
 
-  private recordFailure(row: ConnectionRow, err: unknown) {
+  /** Keeps a failed sync on the connection (what Bank sync shows) and returns its message. */
+  private recordFailure(row: ConnectionRow, err: unknown): string {
     if (err instanceof HTTPException && err.status === 429) throw err
-    const message = err instanceof Error ? err.message : String(err)
+    const message =
+      err instanceof WrongSecretKeyError
+        ? WRONG_KEY
+        : err instanceof Error
+          ? err.message
+          : String(err)
     // Keep the provider's code (say, Plaid's ITEM_LOGIN_REQUIRED, which offers Reconnect).
     const code = (err instanceof ProviderRequestError && err.code) || 'gen.'
     const patch = { status: 'error' as const, errors: [{ code, message }], lastAttemptAt: this.now().toISOString() }
     this.db.update(bankConnections).set(patch).where(eq(bankConnections.id, row.id)).run()
     Object.assign(row, patch)
-    if (!(err instanceof ProviderRequestError)) console.error('[bank] sync failed', err)
+    if (err instanceof WrongSecretKeyError) console.error(`[bank] sync failed: ${message}`)
+    else if (!(err instanceof ProviderRequestError)) console.error('[bank] sync failed', err)
+    return message
   }
 
   /**
@@ -855,8 +868,7 @@ export class BankService {
         changesFor: (acct, remote) => ({ transactions: remote.transactions, scope: { from: this.fromFor(acct, today, full), to: today, floor: acct.syncFrom } }),
       }
     } catch (err) {
-      this.recordFailure(row, err)
-      return { error: err instanceof Error ? err.message : String(err) }
+      return { error: this.recordFailure(row, err) }
     }
   }
 
@@ -893,8 +905,7 @@ export class BankService {
         changesFor: (acct, remote) => ({ transactions: remote.transactions, scope: { from: this.fromFor(acct, today, full, maxDays), to: today, floor: acct.syncFrom } }),
       }
     } catch (err) {
-      this.recordFailure(row, err)
-      return { error: err instanceof Error ? err.message : String(err) }
+      return { error: this.recordFailure(row, err) }
     }
   }
 
@@ -922,8 +933,7 @@ export class BankService {
         }),
       }
     } catch (err) {
-      this.recordFailure(row, err)
-      return { error: err instanceof Error ? err.message : String(err) }
+      return { error: this.recordFailure(row, err) }
     }
   }
 

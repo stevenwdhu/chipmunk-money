@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { snapshotDb } from './db/client'
 import { startBankSync, startJobs } from './jobs'
-import { countUnreadable, SecretBox } from './lib/secrets'
+import { countUnreadable, SecretBox, WrongSecretKeyError } from './lib/secrets'
 import { createPlaid } from './services/bank/plaid'
 import type { BankService } from './services/bank/service'
 import { createSimpleFin } from './services/bank/simplefin'
@@ -66,6 +66,12 @@ describe('secret key', () => {
     ]
     expect(countUnreadable(current, stored)).toBe(2)
     expect(countUnreadable(old, stored)).toBe(1)
+  })
+
+  it('says a secret sealed with another key was saved with a different secret.key', () => {
+    const sealed = new SecretBox(Buffer.alloc(32, 1)).seal('bank access')
+    expect(() => new SecretBox(Buffer.alloc(32, 2)).open(sealed)).toThrow(WrongSecretKeyError)
+    expect(() => new SecretBox(Buffer.alloc(32, 2)).open(sealed)).toThrow(/different secret\.key/)
   })
 })
 
