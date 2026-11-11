@@ -16,11 +16,20 @@ export { checkPinned, LedgerScopeError } from './pins'
  * - Write guards: TEMP triggers on every table with ledger data abort a write to a row outside the
  *   write scope, which the handle sets to its ledger around each call. Outside a handle the scope
  *   is empty, so a raw write to ledger data aborts too. They fire for rows changed by the content
- *   triggers and by foreign key actions as well.
+ *   triggers and by foreign key actions as well. A move's scope (ledgerMove) is the one that
+ *   spans two ledgers, and it lets through only a transaction changing from one to the other.
  * better-sqlite3 is synchronous, so nothing else runs on the connection while a scope is set.
  */
 
-type ScopeValue = 'all' | ReadonlySet<string> | null
+/** A move's write scope: only a transaction of `from` becoming one of `to` (moveRows in move-rows.ts). */
+interface MoveScope {
+  readonly from: string
+  readonly to: string
+}
+
+type ScopeValue = 'all' | ReadonlySet<string> | MoveScope | null
+
+const isMove = (scope: ScopeValue): scope is MoveScope => !!scope && scope !== 'all' && 'from' in scope
 
 interface Prepared {
   stmt: Database.Statement
@@ -46,6 +55,9 @@ function stateOf(sqlite: SQLite): ConnectionState {
 
 const OUTSIDE = "SELECT RAISE(ABORT, 'write outside the ledger scope')"
 
+/** The one table whose rows change ledger: a transaction moving between ledgers that have its account. */
+const MOVES = 'transactions'
+
 /**
  * Adds the write guards to a connection, after its migrations: the functions they call, and a TEMP
  * trigger per table and change (TEMP, so they live on this connection only and aren't in the file).
@@ -60,10 +72,19 @@ export function installWriteGuards(sqlite: SQLite) {
   sqlite.function('chipmunk_in_scope', { deterministic: false }, (ledgerId: unknown) => {
     const scope = state.scope
     if (scope === 'all') return 1
-    if (!scope || ledgerId === null) return 0
+    if (!scope || isMove(scope) || ledgerId === null) return 0
     return scope.has(String(ledgerId)) ? 1 : 0
   })
-  sqlite.function('chipmunk_scope_open', { deterministic: false }, () => (state.scope === 'all' || (state.scope?.size ?? 0) > 0 ? 1 : 0))
+  sqlite.function('chipmunk_scope_open', { deterministic: false }, () => {
+    const scope = state.scope
+    return scope === 'all' || (!!scope && !isMove(scope) && scope.size > 0) ? 1 : 0
+  })
+  // Whether a row's change of ledger is the move in scope: from its `from` to its `to`, nothing else.
+  sqlite.function('chipmunk_moving', { deterministic: false }, (oldLedger: unknown, newLedger: unknown) => {
+    const scope = state.scope
+    if (!isMove(scope)) return 0
+    return oldLedger === scope.from && newLedger === scope.to ? 1 : 0
+  })
 
   const triggers: string[] = []
   const trigger = (table: string, event: 'INSERT' | 'UPDATE' | 'DELETE', when: string) =>
@@ -73,7 +94,8 @@ export function installWriteGuards(sqlite: SQLite) {
       // A row with no ledger in a table that needs one: its NOT NULL says so more plainly.
       const required = t.kind === 'ledger' && t.name !== 'ai_calls'
       trigger(t.name, 'INSERT', required ? 'NEW.ledger_id IS NOT NULL AND NOT chipmunk_in_scope(NEW.ledger_id)' : 'NOT chipmunk_in_scope(NEW.ledger_id)')
-      trigger(t.name, 'UPDATE', 'NOT chipmunk_in_scope(OLD.ledger_id) OR NOT chipmunk_in_scope(NEW.ledger_id)')
+      const outside = 'NOT chipmunk_in_scope(OLD.ledger_id) OR NOT chipmunk_in_scope(NEW.ledger_id)'
+      trigger(t.name, 'UPDATE', t.name === MOVES ? `NOT chipmunk_moving(OLD.ledger_id, NEW.ledger_id) AND (${outside})` : outside)
       trigger(t.name, 'DELETE', 'NOT chipmunk_in_scope(OLD.ledger_id)')
     } else if (t.kind === 'child') {
       // In the ledger of its parent rows. A parent that's gone (being deleted, or not inserted yet)
@@ -115,6 +137,17 @@ function withScope<T>(sqlite: SQLite, scope: ScopeValue, fn: () => T): T {
  */
 export function ledgerMaintenance<T>(sqlite: SQLite, ledgerId: string, fn: () => T): T {
   return withScope(sqlite, new Set([ledgerId]), fn)
+}
+
+/**
+ * Runs fn with one kind of write allowed: a transaction of ledger `from` becoming one of ledger `to`
+ * (an UPDATE whose old ledger is `from` and new ledger is `to`). Nothing else of either ledger, or
+ * of any other, can be written in it: no insert or delete, no update within one ledger or the other
+ * way, and no child row. For moveRows (move-rows.ts), the one place a transaction changes ledger.
+ */
+export function ledgerMove<T>(sqlite: SQLite, move: { from: string; to: string }, fn: () => T): T {
+  if (move.from === move.to) throw new Error('A move is between two ledgers')
+  return withScope(sqlite, { from: move.from, to: move.to }, fn)
 }
 
 type Row = Record<string, unknown>

@@ -15,6 +15,13 @@
       "when": 1794436168471,
       "tag": "0001_shared_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794439692383,
+      "tag": "0002_move_transactions",
+      "breakpoints": true
     }
   ]
 }

@@ -280,7 +280,8 @@ describe('guard triggers', () => {
   it('keep rows in their ledger', () => {
     const w = world()
     expect(() => w.run("UPDATE tags SET ledger_id = 'B' WHERE id = ?", w.a.tag)).toThrow('rows stay in their ledger')
-    expect(() => w.run("UPDATE transactions SET ledger_id = 'B' WHERE id = ?", w.a.purchase)).toThrow(/rows stay in their ledger|cross-ledger/)
+    // A transaction moves only to a ledger that has its account (move-rows.test.ts has the rest).
+    expect(() => w.run("UPDATE transactions SET ledger_id = 'B' WHERE id = ?", w.a.purchase)).toThrow('a transaction moves only to a ledger that has its account')
   })
 
   it("don't let a stray delete of a ledger take its data", () => {

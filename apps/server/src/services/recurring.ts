@@ -506,6 +506,54 @@ export function notItsPayment(ctx: AppContext, itemId: number, txId: number): Re
   return getRecurring(ctx, itemId)
 }
 
+/** An item that lost payments to a move, for recalculateRecurring once they're gone (detachPayments). */
+export interface DetachedItem {
+  itemId: number
+  /** Its plan was paid off before: recalculateRecurring's `wasPaidOff`. */
+  wasPaidOff: boolean
+  /** Its payments among the transactions, taken off it. */
+  payments: number[]
+}
+
+/**
+ * Takes these transactions off the ledger's recurring items as they leave the ledger (a move), as
+ * notItsPayment takes one off: one among a plan's payments from before your history counts as paid
+ * before again, their dues go, and a payment is unlinked (and loses its item's category). Their
+ * not-payment records go too: nothing of an item may stay attached to a row another ledger holds.
+ * Returns each item they were payments of or had dues for. Recalculate those once the rows are
+ * gone: until then the item would take them back.
+ */
+export function detachPayments(ctx: AppContext, txIds: number[]): DetachedItem[] {
+  const txs = JSON.stringify(txIds)
+  const linked = ctx.q.all<{ id: number; itemId: number }>(
+    `SELECT id, recurring_item_id AS itemId FROM transactions
+     WHERE ledger_id = @ledger AND recurring_item_id IS NOT NULL AND id IN (SELECT value FROM json_each(@txs))`,
+    { txs },
+  )
+  const dues = ctx.q.all<{ itemId: number; txId: number }>(
+    `SELECT d.item_id AS itemId, d.transaction_id AS txId FROM recurring_payment_dues d JOIN transactions t ON t.id = d.transaction_id
+     WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(@txs))`,
+    { txs },
+  )
+  const items = [...new Set([...linked.map((r) => r.itemId), ...dues.map((d) => d.itemId)])].map(
+    (itemId): DetachedItem => ({ itemId, wasPaidOff: paidOff(ctx, itemId), payments: linked.filter((r) => r.itemId === itemId).map((r) => r.id) }),
+  )
+  const theirs = 'transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(@txs)))'
+  ctx.q.transaction(() => {
+    for (const { itemId } of items) {
+      giveBackPaidBefore(
+        ctx,
+        itemId,
+        dues.filter((d) => d.itemId === itemId).map((d) => d.txId),
+      )
+    }
+    ctx.q.run(`DELETE FROM recurring_payment_dues WHERE ${theirs}`, { txs })
+    for (const r of linked) unlinkPayment(ctx, r.itemId, r.id)
+    ctx.q.run(`DELETE FROM recurring_not_payments WHERE ${theirs}`, { txs })
+  })
+  return items
+}
+
 /**
  * Added payments taken off (or deleted) that were among a plan's payments from before your history:
  * they count as paid before again.

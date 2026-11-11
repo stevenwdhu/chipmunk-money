@@ -1,5 +1,6 @@
 import type { AccountType, ISODate } from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
+import { crossLedgerReferences, moveRows, type RowsMove } from '../db/move-rows'
 import { allLedgers, type UnscopedQuery } from '../db/scope'
 
 /**
@@ -10,6 +11,8 @@ import { allLedgers, type UnscopedQuery } from '../db/scope'
  *
  * A service reaches these through ctx.accountWide, bound to the connection (accountWideOn). To add a
  * read, add a function to READS: it takes the unscoped handle first, and is bound like the others.
+ * Beside them is the one write that spans two ledgers, a move's UPDATE (moveRows in
+ * db/move-rows.ts), which runs in its own two-ledger scope, not with every ledger in scope.
  */
 
 /** A ledger that has the account: its home, or one it's shared with. */
@@ -139,6 +142,14 @@ const READS = {
     return db.pluck('SELECT 1 FROM account_ledgers m WHERE m.account_id = ? LIMIT 1', accountId) !== undefined
   },
 
+  /**
+   * What refers across ledgers from or to the rows these ledgers hold, by what it is, with how
+   * many: empty when nothing does (crossLedgerReferences). A move checks its two ledgers with it.
+   */
+  crossings(db: UnscopedQuery, ledgerIds: readonly string[]): Record<string, number> {
+    return crossLedgerReferences(db, ledgerIds)
+  },
+
   /** The shared accounts a ledger has, as their home or as a ledger they're shared with. */
   sharedAccounts(db: UnscopedQuery, ledgerId: string): number[] {
     return db.column<number>(
@@ -151,14 +162,21 @@ const READS = {
 
 type Bound<F> = F extends (db: UnscopedQuery, ...args: infer A) => infer R ? (...args: A) => R : never
 
-/** This module's reads, bound to one connection (ctx.accountWide). It holds no connection of its own to hand out. */
-export type AccountWide = { readonly [K in keyof typeof READS]: Bound<(typeof READS)[K]> }
+/**
+ * This module's reads, bound to one connection (ctx.accountWide), and the move's UPDATE. It holds
+ * no connection of its own to hand out.
+ */
+export type AccountWide = { readonly [K in keyof typeof READS]: Bound<(typeof READS)[K]> } & {
+  /** Moves transactions from one ledger to another that has their account (moveRows): the move's one UPDATE. Returns how many moved. */
+  readonly moveRows: (move: RowsMove) => number
+}
 
-/** The reads of READS on this connection, each run with every ledger in scope. */
+/** The reads of READS on this connection, each run with every ledger in scope, and the move's UPDATE in its own scope. */
 export function accountWideOn(sqlite: SQLite): AccountWide {
   const bound: Record<string, unknown> = {}
   for (const [name, read] of Object.entries(READS) as Array<[string, (db: UnscopedQuery, ...args: unknown[]) => unknown]>) {
     bound[name] = (...args: unknown[]) => everyLedger(sqlite, (db) => read(db, ...args))
   }
+  bound.moveRows = (move: RowsMove) => moveRows(sqlite, move)
   return Object.freeze(bound) as AccountWide
 }

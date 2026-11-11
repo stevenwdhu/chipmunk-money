@@ -509,7 +509,35 @@ function setTags(ctx: AppContext, txId: number, names: string[]) {
   for (const tagId of ids) ctx.q.run('INSERT OR IGNORE INTO transaction_tags (transaction_id, tag_id) VALUES (?, ?)', txId, tagId)
 }
 
-function transferCategoryId(ctx: AppContext, targetType?: string): number | null {
+/**
+ * "Not a transfer": a transfer's two sides are no longer paired, and each keeps its category, now as
+ * yours. With `reject`, the pair is remembered as not one (transfer_rejections), so matching never
+ * pairs them again. Returns the other side's id, or null when it isn't a transfer.
+ */
+export function unpairTransfer(ctx: AppContext, id: number, opts: { reject: boolean }): number | null {
+  const row = ctx.q.get<{ amount: number; pairId: number | null }>(
+    'SELECT amount_minor AS amount, transfer_pair_id AS pairId FROM transactions WHERE ledger_id = @ledger AND id = ?',
+    id,
+  )
+  if (!row?.pairId) return null
+  ctx.q.run(
+    `UPDATE transactions SET transfer_pair_id = NULL, needs_review = 0,
+       category_source = CASE WHEN category_id IS NULL THEN NULL ELSE 'user' END WHERE ledger_id = @ledger AND id IN (?, ?)`,
+    id,
+    row.pairId,
+  )
+  if (opts.reject) {
+    const [inId, outId] = row.amount > 0 ? [id, row.pairId] : [row.pairId, id]
+    ctx.q.run('INSERT OR IGNORE INTO transfer_rejections (in_id, out_id) VALUES (?, ?)', inId, outId)
+  }
+  return row.pairId
+}
+
+/**
+ * The ledger's category for money moving between accounts, left out of totals: "Credit card
+ * payment" for a payment onto a credit card (`targetType` credit), else its first such category.
+ */
+export function transferCategoryId(ctx: AppContext, targetType?: string): number | null {
   const name = targetType === 'credit' ? 'Credit card payment' : 'Transfer'
   return (
     ctx.q.pluck<number>('SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1 AND archived_at IS NULL AND name = ?', name) ??
@@ -709,16 +737,7 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
       ctx.q.run(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id AND ledger_id = @ledger`, params)
     }
     if (input.tags !== undefined) setTags(ctx, id, input.tags)
-    if (unlinksTransfer) {
-      ctx.q.run(
-        `UPDATE transactions SET transfer_pair_id = NULL, needs_review = 0,
-           category_source = CASE WHEN category_id IS NULL THEN NULL ELSE 'user' END WHERE ledger_id = @ledger AND id IN (?, ?)`,
-        id,
-        row.transfer_pair_id,
-      )
-      const [inId, outId] = row.amount_minor > 0 ? [id, row.transfer_pair_id] : [row.transfer_pair_id, id]
-      ctx.q.run('INSERT OR IGNORE INTO transfer_rejections (in_id, out_id) VALUES (?, ?)', inId, outId)
-    }
+    if (unlinksTransfer) unpairTransfer(ctx, id, { reject: true })
     // Keep both sides of a transfer you entered in step.
     else if (mirrored) {
       const pairSets: string[] = []

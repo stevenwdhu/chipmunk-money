@@ -522,6 +522,11 @@ export const transactions = sqliteTable(
     /** When you corrected a synced transaction's amount or date; from then on syncs leave those alone. */
     correctedAt: text('corrected_at'),
     deletedAt: text('deleted_at'),
+    /**
+     * When a sync deleted it because the bank no longer has it; cleared when it's restored. A row
+     * deleted with this unset was deleted by a person.
+     */
+    removedAt: text('removed_at'),
     ...timestamps,
   },
   (t) => [
@@ -542,6 +547,10 @@ export const transactions = sqliteTable(
     index('tx_import_batch')
       .on(t.importBatchId)
       .where(sql`${t.importBatchId} IS NOT NULL`),
+    // What points at a row as its transfer's other side: a move checks there's nothing left.
+    index('tx_transfer_pair')
+      .on(t.transferPairId)
+      .where(sql`${t.transferPairId} IS NOT NULL`),
     // Card-wide on purpose: the bank's id is unique on the account whatever ledger holds the row.
     uniqueIndex('tx_external_id')
       .on(t.accountId, t.externalId)

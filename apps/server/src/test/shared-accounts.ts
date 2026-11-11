@@ -1,5 +1,8 @@
 import { expect } from 'vitest'
 import { addMonths, monthOf, monthRange, transactionQuerySchema, type ISODate } from '@chipmunk/shared'
+import type { LlmCategorizer } from '../ai/types'
+import { crossLedgerReferences } from '../db/move-rows'
+import { UnscopedQuery } from '../db/scope'
 import { balancesAt, getAccount } from '../services/accounts'
 import type { ActivityActor } from '../services/activity'
 import type { AppContext } from '../services/context'
@@ -33,10 +36,10 @@ export interface SharedWorld {
 /**
  * Three ledgers, Personal, Family and Trip, and Personal's credit card Visa (at TD, opening balance
  * `opening`) shared with the ledgers in `shareWith` (Family by default). Trip has the card only
- * when it's listed, so it is also the ledger that doesn't share.
+ * when it's listed, so it is also the ledger that doesn't share. With `llm`, AI categorizes.
  */
-export function sharedWorld(opts: { shareWith?: Other[]; opening?: number; now?: string } = {}): SharedWorld {
-  const storage = testStorage({ now: opts.now })
+export function sharedWorld(opts: { shareWith?: Other[]; opening?: number; now?: string; llm?: LlmCategorizer } = {}): SharedWorld {
+  const storage = testStorage({ now: opts.now, llm: opts.llm })
   const personal = storage.registry.defaultContext()
   const family = testLedger(storage, 'Family')
   const trip = testLedger(storage, 'Trip')
@@ -160,4 +163,14 @@ export function expectPartsSumToAccount(storage: Storage, accountId: number, opt
   })
 
   return { parts: Object.fromEntries(ledgers.map((l, i) => [l.slug, parts[i]!])), totalMinor: total() }
+}
+
+/**
+ * Nothing in the whole database refers across ledgers (crossLedgerReferences): a transaction's
+ * account, category, recurring item, import batch and transfer pair, links, rejected pairs, tags,
+ * dues and not-payments, and bank payloads, which point only at rows the home holds. What every
+ * move, home change and stop sharing must leave.
+ */
+export function expectNoCrossLedgerReferences(storage: Storage) {
+  expect(crossLedgerReferences(new UnscopedQuery(storage.sqlite)), 'references across ledgers').toEqual({})
 }

@@ -29,7 +29,7 @@ export interface AppContext {
   /**
    * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
    * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, never
-   * another ledger's rows.
+   * another ledger's rows. And the move's UPDATE (moveRows), the one write that spans two ledgers.
    */
   accountWide: AccountWide
   /** Injectable clock for tests. */

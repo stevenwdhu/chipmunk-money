@@ -182,6 +182,11 @@ function schemaNames(sqlite: SQLite): string[] {
   return sqlite.prepare("SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'index', 'view') AND name NOT LIKE 'sqlite_%'").pluck().all() as string[]
 }
 
+/** Triggers, indexes and views of the baseline that a later migration drops on purpose, and why. */
+const DROPPED: Record<string, string> = {
+  'trigger keep_ledger_transactions': '0002: a transaction can move to another ledger that has its account, which tx_move_keeps_refs guards instead.',
+}
+
 /** Whether a write was refused by a trigger (a guard), not for some other reason such as a missing column. */
 function refusedByGuard(write: () => unknown): boolean {
   try {
@@ -197,7 +202,7 @@ function refusedByGuard(write: () => unknown): boolean {
  * went wrong, one line each: rows lost, added or changed, columns, triggers, indexes or views
  * gone, broken foreign keys or pages, accounts the view no longer gives its ledger, and guards
  * that no longer refuse. Added columns, tables and names are fine, and so is a trigger or view
- * made again under its name.
+ * made again under its name, or one a later migration drops on purpose (DROPPED).
  */
 function upgradeProblems(migrations: string): string[] {
   const { file, rows } = baselineDatabase()
@@ -240,7 +245,7 @@ function upgradeProblems(migrations: string): string[] {
       if (changed) problems.push(`${key}: ${changed} rows not as before`)
     }
     const namesAfter = new Set(schemaNames(sqlite))
-    for (const name of namesBefore) if (!namesAfter.has(name)) problems.push(`${name} is gone`)
+    for (const name of namesBefore) if (!namesAfter.has(name) && !(name in DROPPED)) problems.push(`${name} is gone`)
     return problems
   }
 
