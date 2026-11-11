@@ -21,6 +21,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 ### Fixed
 
 - Restoring a ledger backup no longer changes the name of a refund you had renamed apart from its purchase.
+- A bank connection whose saved sign-in was made with another `secret.key` now says so, and what to do, in place of "bad decrypt".
 
 ## v0.2.3 (2026-11-10)
 
