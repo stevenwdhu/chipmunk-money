@@ -4,7 +4,7 @@ A release is a version of Spending Tracker that people run: a Git tag, a GitHub 
 
 ## Version numbers
 
-Versions follow [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`, like `0.4.2`. The first release is `0.1.0`. Each release goes up from the one before by what the commits since then hold, the biggest change deciding:
+Versions follow [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`, like `0.4.2`. The first release, `0.1.0`, is the first Docker image (commit `beed743`, tagged afterwards). The root `package.json` holds the latest release's version until the next release sets its own. Each release goes up from the one before by what the commits since then hold, the biggest change deciding:
 
 | Since the last release | The new version | Example |
 |---|---|---|
