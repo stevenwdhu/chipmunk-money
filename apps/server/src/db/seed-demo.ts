@@ -204,6 +204,8 @@ export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
       cadence: 'biweekly',
       anchorDate: addDays(end, -23),
       totalPayments: 4,
+      // $590.00 in all: the last payment is the $140.75 that's left.
+      fullPriceMinor: -59_000,
       accountId: plans.vacuum.account,
       categoryId: category('General shopping'),
     }),

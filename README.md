@@ -29,7 +29,7 @@ It runs as one small server, in Docker or with Node.js, on a home server, a NAS 
 - **Ledgers.** Separate books for "Personal" and "Family", each with its own accounts, categories and reports.
 - **Bank sync.** [SimpleFIN Bridge](https://www.simplefin.org/), [Plaid](https://plaid.com) or Wealthsimple, side by side, on a schedule you choose. Pending charges are replaced when they post, and refunds and card payments are recognized. [More](docs/bank-sync.md)
 - **Categories that learn.** Each category you pick teaches it. Tell it a payee is *always* Groceries and it never asks again. New payees can go to an AI of your choice, including one running on your own computer with [Ollama](https://ollama.com). [More](docs/ai.md)
-- **Recurring payments.** Subscriptions, bills and pay are found in your history. Instalment plans like Pay in 4 show what's left and when they end. You get a warning when a payment is missing or the price changed.
+- **Recurring payments.** Subscriptions, bills and pay are found in your history. Instalment plans like Pay in 4 show what's left and when they end, and a plan's full price tells the app what its last payment will be when that's a different amount. You get a warning when a payment is missing or the price changed.
 - **Reports.** Spending by month, category and payee, income against spending, your savings rate. Filter out the one-offs to see your everyday spending, and save a view as a report of its own.
 - **Quick add on your phone.** A bottom sheet for the coffee you just bought, or press <kbd>N</kbd> on a computer. Transfers, tags, notes, search, bulk edit and undo.
 - **CSV import.** It remembers each bank's columns, skips duplicates and can be undone.

@@ -9,7 +9,7 @@ What changed in each release of Spending Tracker. Versions follow [Semantic Vers
 - **Add a payment** to a recurring item by hand, at its own amount: an instalment plan's down payment, a first payment that covers part of a period, or a last payment that's the remainder. It counts and takes the item's category, and the usual amount stays.
 - **A plan's full price** (optional). It predicts the last payment, for what's left and what's coming up. It keeps two plans from one payee apart, giving each its own payment. It finds a missing down payment when that makes the payments add up to the full price exactly.
 - A plan's last payment at a smaller amount is asked about as its last payment, not a new price.
-- The demo has two instalment plans, and its regular bills are confirmed.
+- The demo has two instalment plans, one with a full price, and its regular bills are confirmed.
 
 ### Changed
 
