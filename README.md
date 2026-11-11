@@ -122,7 +122,7 @@ Open http://localhost:8787 and choose how to begin:
 - **Start from scratch** opens the app with your first account.
 - **Restore a backup** brings back a ledger you saved before.
 
-Your data lives in the `spending-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
+`:latest` is the newest release. To take only fixes, use a minor version like `:0.1`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `spending-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
 
 Running from source, building the image yourself, using it from your phone and backups: [docs/self-hosting.md](docs/self-hosting.md).
 
@@ -155,6 +155,7 @@ The agent works through the app's API with a key you create for it, *Read only* 
 | [REST API](docs/api.md) | Keys, conventions, examples and every endpoint |
 | [MCP server](docs/mcp.md) | Connecting agents, and every tool |
 | [Development](docs/development.md) | Scripts, the project's layout and notes |
+| [Releasing](docs/releasing.md) | Version numbers, Docker tags and how a release is made |
 
 ## Contributing
 

@@ -4,7 +4,7 @@ Spending Tracker is one server: the web app, the API and the MCP endpoint. Run i
 
 ## Docker
 
-The quickest start is the prebuilt image. Every commit to `main` is published as `ghcr.io/stevenwdhu/spending-tracker:latest` for amd64 and arm64 (Apple silicon and Raspberry Pi too), and each release as its version (`:1.2.3`). Save this as `compose.yaml` in a folder of its own:
+The quickest start is the prebuilt image. Each release is published as `ghcr.io/stevenwdhu/spending-tracker` for amd64 and arm64 (Apple silicon and Raspberry Pi too): `:latest` is the newest release, `:0.4` its newest fixes for one minor version, and `:0.4.2` that exact release (see [Releasing](releasing.md)). Save this as `compose.yaml` in a folder of its own:
 
 ```yaml
 services:

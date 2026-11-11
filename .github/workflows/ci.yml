@@ -60,12 +60,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # After both pass: the image for amd64 and arm64 (Apple silicon, Raspberry Pi) on GitHub's registry,
-  # as ghcr.io/<owner>/spending-tracker: latest for main, the version for a v1.2.3 tag, and each commit's sha.
+  # A release: after both pass on a version tag (v0.1.0), the image for amd64 and arm64 (Apple silicon,
+  # Raspberry Pi) on GitHub's registry as ghcr.io/<owner>/spending-tracker:0.1.0, :0.1 and :latest.
+  # Pushes to main only run the checks. docs/releasing.md says how a release is made.
   publish:
     name: Publish image
     needs: [check, docker]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -73,6 +74,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v5
+      # The tag is the version in package.json, or nothing is published.
+      - name: Check the tag matches the version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME doesn't match package.json's version $version"
+            exit 1
+          fi
       # arm64 is built under emulation: slower, but the same Dockerfile.
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -86,10 +95,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
           context: .
