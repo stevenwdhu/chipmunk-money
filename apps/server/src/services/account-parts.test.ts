@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { accountBankSwitchSchema, importCommitSchema, importPreviewSchema, transactionCreateSchema } from '@chipmunk/shared'
+import { accountBankSwitchSchema, activityQuerySchema, importCommitSchema, importPreviewSchema, transactionCreateSchema } from '@chipmunk/shared'
+import { createApp } from '../app'
 import { bankAccounts, bankConnections } from '../db/schema'
 import { makeAccount } from '../test/helpers'
 import { expectPartsSumToAccount, sharedWorld, TESTER, type SharedWorld } from '../test/shared-accounts'
@@ -21,6 +22,7 @@ import { reorder } from './categories'
 import { commitImport, previewImport } from './import'
 import { createInstitution, deleteInstitution, listInstitutions } from './institutions'
 import { getSharing, removeMember } from './sharing'
+import { listActivity } from './activity'
 import { createTransaction } from './transactions'
 
 /**
@@ -244,15 +246,52 @@ describe('changing a shared account in a ledger it’s shared with', () => {
     expect(updateAccount(w.personal, w.visa, { type: 'chequing' }).type).toBe('chequing')
   })
 
+  it('leaves no new institution behind when an edit that names one is refused, over the API', async () => {
+    const w = sharedWorld()
+    const app = createApp(w.storage)
+    const patch = (ctx: typeof w.family, body: unknown) =>
+      app.request(`/api/v1/ledgers/${ctx.ledger.slug}/accounts/${w.visa}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify(body),
+      })
+    const state = (ctx: typeof w.family) => ({
+      institutions: listInstitutions(ctx).map((i) => i.name),
+      activity: listActivity(ctx, activityQuerySchema.parse({})).items.length,
+      account: getAccount(ctx, w.visa),
+    })
+    for (const [ctx, body, message] of [
+      [w.family, { institution: 'Credit union', name: 'Family Visa' }, 'Visa’s home is Personal. Its name, type, opening balance and notes are changed there.'],
+      [w.personal, { institution: 'Credit union', type: 'chequing' }, 'Visa is shared with other ledgers, so its type can’t change.'],
+    ] as const) {
+      const before = state(ctx)
+      const res = await patch(ctx, body)
+      expect(res.status).toBe(409)
+      expect(((await res.json()) as { error: { message: string } }).error.message).toBe(message)
+      expect(state(ctx)).toEqual(before)
+    }
+    // Allowed, the same edit adds the institution and logs it.
+    const res = await patch(w.family, { institution: 'Credit union' })
+    expect(res.status).toBe(200)
+    expect(listInstitutions(w.family).map((i) => i.name)).toEqual(['Credit union'])
+    expect(listActivity(w.family, activityQuerySchema.parse({})).items.map((e) => e.summary)).toContain('Added the institution Credit union')
+  })
+
   it('reorders and moves it between institutions on its own row', () => {
     const w = sharedWorld()
     const joint = makeAccount(w.family, 'Joint', 'chequing', 0, 'Credit union')
+    const cash = makeAccount(w.personal, 'Cash', 'cash')
+    reorder(w.personal, 'accounts', [cash, w.visa])
     reorder(w.family, 'accounts', [w.visa, joint])
+    // Each ledger's place is its own: Visa is second in Personal and first in Family.
     expect(listAccounts(w.family).map((a) => [a.name, a.sort])).toEqual([
       ['Visa', 0],
       ['Joint', 1],
     ])
-    expect(getAccount(w.personal, w.visa).sort).toBe(0)
+    expect(listAccounts(w.personal).map((a) => [a.name, a.sort])).toEqual([
+      ['Cash', 0],
+      ['Visa', 1],
+    ])
 
     const td = listInstitutions(w.family).find((i) => i.name === 'TD')!
     const union = listInstitutions(w.family).find((i) => i.name === 'Credit union')!

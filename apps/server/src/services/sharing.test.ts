@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { activityQuerySchema } from '@chipmunk/shared'
 import { bankAccounts, bankConnections } from '../db/schema'
+import { clearForDemo } from '../db/seed-demo'
 import { makeAccount } from '../test/helpers'
-import { sharedWorld, TESTER } from '../test/shared-accounts'
+import { expectPartsSumToAccount, sharedWorld, TESTER, type SharedWorld } from '../test/shared-accounts'
 import { createAccount, getAccount, listAccounts, setBalance } from './accounts'
 import { listActivity } from './activity'
 import { BankService } from './bank/service'
 import type { AppContext } from './context'
 import { listInstitutions } from './institutions'
+import { eraseAll } from './setup'
 import { addMember, getSharing, removeMember } from './sharing'
 
 /**
@@ -253,4 +255,62 @@ describe('a shared account in each ledger', () => {
     expect(counts).toEqual({ personal: 1, family: 1, trip: 0 })
     expect(w.storage.registry.toDTO(w.storage.registry.get('family')).accounts).toBe(1)
   })
+})
+
+describe('deleting, erasing or clearing a ledger that has a shared account', () => {
+  /** Each way a ledger's data goes: deleting it, erasing it in the app, and clearing it for the demo. */
+  const ways = (w: SharedWorld, ctx: AppContext) => ({
+    delete: () => w.storage.registry.remove(ctx.ledger.id),
+    erase: () => eraseAll(w.storage, ctx),
+    seed: () => clearForDemo(w.storage, ctx),
+  })
+  const stop = (account: string, other: string) => ({ status: 409, message: `${account} is shared with ${other}. Stop sharing it first.` })
+  const inApp = (account: string, other: string) => ({ status: 409, message: `${account} is shared with ${other}. Erase this ledger in the app first.` })
+
+  it('refuses the home, before anything changes', () => {
+    const w = sharedWorld()
+    w.addTx(w.personal, '2026-09-01', -200)
+    w.addTx(w.family, '2026-09-02', -300)
+    const way = ways(w, w.personal)
+    expect(status(way.delete)).toEqual(stop('Visa', 'Family'))
+    expect(status(way.erase)).toEqual(stop('Visa', 'Family'))
+    expect(status(way.seed)).toEqual(inApp('Visa', 'Family'))
+    expect(w.storage.registry.find(w.personal.ledger.id)).toBeDefined()
+    expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: -200, family: -300 }, totalMinor: -500 })
+  })
+
+  it('refuses the ledger whose part carries the opening balance, naming the home', () => {
+    const w = sharedWorld({ opening: -1_000 })
+    w.addTx(w.family, '2026-09-02', -300)
+    w.personal.q.run('UPDATE accounts SET opening_ledger_id = ? WHERE ledger_id = @ledger AND id = ?', w.family.ledger.id, w.visa)
+    const way = ways(w, w.family)
+    expect(status(way.delete)).toEqual(stop('Visa', 'Personal'))
+    expect(status(way.erase)).toEqual(stop('Visa', 'Personal'))
+    expect(status(way.seed)).toEqual(inApp('Visa', 'Personal'))
+    expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: 0, family: -1_300 }, totalMinor: -1_300 })
+  })
+
+  it('names the first other ledger when the home shares it with several', () => {
+    const w = sharedWorld({ shareWith: ['trip', 'family'] })
+    expect(status(ways(w, w.personal).delete)).toEqual(stop('Visa', 'Family'))
+  })
+
+  it('leaves a ledger with no shared account, and an account that isn’t shared, as they were', () => {
+    const w = sharedWorld({ shareWith: [] })
+    w.addTx(w.personal, '2026-09-01', -200)
+    expect(ways(w, w.personal).erase()).toEqual({ backup: null })
+    expect(listAccounts(w.personal)).toEqual([])
+  })
+
+  for (const way of ['delete', 'erase', 'seed'] as const) {
+    it(`lets a ledger the account is only shared with go (${way}): its rows and its member row go, the home's stay`, () => {
+      const w = sharedWorld({ opening: -1_000 })
+      w.addTx(w.personal, '2026-09-01', -200)
+      w.addTx(w.family, '2026-09-02', -300)
+      ways(w, w.family)[way]()
+      expect(w.personal.accountWide.ledgers(w.visa).map((l) => l.slug)).toEqual(['personal'])
+      expect(getSharing(w.personal, w.visa)).toMatchObject({ members: [], totalBalanceMinor: -1_200 })
+      expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: -1_200 }, totalMinor: -1_200 })
+    })
+  }
 })

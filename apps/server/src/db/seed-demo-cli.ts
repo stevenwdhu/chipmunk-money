@@ -8,11 +8,7 @@
 import { env } from '../env'
 import { setLedgerSetting } from '../services/settings'
 import { openStorage } from '../storage'
-import { clearLedger, safetyCopy } from './maintenance'
-import { loadDemo } from './seed-demo'
-
-/** What --force keeps: the ledger's settings, its activity log, and the categories it uses (its own list, or what it turned off on the shared one). */
-const KEPT = ['ledger_settings', 'activity', 'payee_rules', 'category_groups', 'categories', 'labels', 'category_labels', 'ledger_category_off']
+import { clearForDemo, loadDemo } from './seed-demo'
 
 function main() {
   const storage = openStorage({ dataDir: env.dataDir })
@@ -21,17 +17,8 @@ function main() {
     const ledger = flag > 0 ? storage.registry.get(process.argv[flag + 1] ?? '') : storage.registry.defaultLedger()
     const ctx = storage.registry.context(ledger.id)
     if (process.argv.includes('--force')) {
-      const n = ctx.q.pluck<number>(
-        `SELECT (SELECT count(*) FROM transactions WHERE ledger_id = @ledger) + (SELECT count(*) FROM ledger_accounts WHERE ledger_id = @ledger)
-           + (SELECT count(*) FROM recurring_items WHERE ledger_id = @ledger) + (SELECT count(*) FROM custom_reports WHERE ledger_id = @ledger)
-           + (SELECT count(*) FROM tags WHERE ledger_id = @ledger)`,
-      )!
-      if (n) {
-        // The same safety net the app keeps before erasing a ledger.
-        const backup = safetyCopy(storage.sqlite, `pre-seed-demo-${ledger.slug}`)
-        if (backup) console.log(`Saved the database as it was to ${backup}`)
-        clearLedger(storage.sqlite, ledger.id, KEPT)
-      }
+      const backup = clearForDemo(storage, ctx)
+      if (backup) console.log(`Saved the database as it was to ${backup}`)
     }
     const { transactions, recurringSuggestions } = loadDemo(ctx)
     setLedgerSetting(ctx, 'setup.completed', true)

@@ -32,6 +32,23 @@ function inHome(ctx: AppContext, accountId: number): { account: Account; ledgers
 }
 
 /**
+ * Refuses to delete, erase or clear a ledger that is a shared account's home, or whose part carries
+ * one's opening balance: the account would be left without its home or that balance. A 409 naming
+ * the account and another ledger that has it, then what to do first (`then`). Run it before the
+ * safety copy and the transaction. A ledger an account is only shared with can go, and its member
+ * row goes with it.
+ */
+export function refuseWhileSharing(ctx: AppContext, then = 'Stop sharing it first.'): void {
+  for (const accountId of ctx.accountWide.sharedAccounts(ctx.ledger.id)) {
+    const ledgers = ctx.accountWide.ledgers(accountId)
+    const here = ledgers.find((l) => l.ledgerId === ctx.ledger.id)
+    if (!here?.isHome && !here?.isOpening) continue
+    const other = ledgers.find((l) => l.ledgerId !== ctx.ledger.id)!
+    throw new HTTPException(409, { message: `${ctx.accountWide.account(accountId)!.name} is shared with ${other.name}. ${then}` })
+  }
+}
+
+/**
  * How an account of this ledger is shared: its home (this ledger), its opening ledger, and each
  * other ledger it's shared with, each with how many transactions it holds on it and its part of
  * the balance. An account that isn't shared, of any type, has no members.

@@ -62,9 +62,9 @@ const sum = (rows: Array<{ amount: number }>) => rows.reduce((s, r) => s + r.amo
  * the same rows give an account that isn't shared (the latest recorded balance and every row after
  * it, or the opening balance and every row). Only the opening ledger's part carries the opening
  * balance and the recorded balances: every other part is what its ledger holds. Each ledger's net
- * worth counts exactly its part, and its running balance ends at it. What it expects is worked out
- * here from each ledger's own rows, not by the code it checks. Returns today's parts, by ledger
- * slug, and the total.
+ * worth counts exactly its part, and on every page of its register each row's running balance is
+ * the part less the ledger's own rows listed above it. What it expects is worked out here from each
+ * ledger's own rows, not by the code it checks. Returns today's parts, by ledger slug, and the total.
  */
 export function expectPartsSumToAccount(storage: Storage, accountId: number, opts: { dates?: ISODate[] } = {}) {
   const ledgers = storage.registry.defaultContext().accountWide.ledgers(accountId)
@@ -84,7 +84,10 @@ export function expectPartsSumToAccount(storage: Storage, accountId: number, opt
   const rows = new Map(
     ctxs.map((c) => [
       c.ledger.id,
-      c.q.all<{ date: string; amount: number }>('SELECT date, amount_minor AS amount FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL', accountId),
+      c.q.all<{ id: number; date: string; amount: number }>(
+        'SELECT id, date, amount_minor AS amount FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL',
+        accountId,
+      ),
     ]),
   )
   const upTo = (ledgerId: string | null, d?: ISODate) => [...rows].flatMap(([id, rs]) => (ledgerId === null || id === ledgerId ? rs : [])).filter((r) => !d || r.date <= d)
@@ -138,9 +141,22 @@ export function expectPartsSumToAccount(storage: Storage, accountId: number, opt
     const listed = report.byAccount.find((a) => a.accountId === accountId)
     if (listed) expect(listed.balanceMinor, `${l.slug}’s net worth lists its part`).toBe(part(l.ledgerId, t))
 
-    // The register's running balance ends at the part (worked back from it).
-    const newest = listTransactions(c, transactionQuerySchema.parse({ accountId, limit: 1 })).items[0]
-    if (newest && newest.balanceAfterMinor !== null) expect(newest.balanceAfterMinor, `${l.slug}’s running balance ends at its part`).toBe(parts[i])
+    // The register's running balance, page by page: each row's is the part less the ledger's own rows listed above it.
+    const own = new Map(rows.get(l.ledgerId)!.map((r) => [r.id, r.amount]))
+    const register: Array<{ id: number; date: string; balanceAfterMinor: number | null }> = []
+    for (let cursor: string | undefined; ; ) {
+      const page = listTransactions(c, transactionQuerySchema.parse({ accountId, limit: 2, cursor }))
+      register.push(...page.items)
+      if (!page.nextCursor) break
+      cursor = page.nextCursor
+    }
+    expect(register.map((t) => t.id).sort((a, b) => a - b), `${l.slug}’s register lists its own rows`).toEqual([...own.keys()].sort((a, b) => a - b))
+    expect(register.map((t) => t.date), `${l.slug}’s register, newest first`).toEqual(register.map((t) => t.date).sort().reverse())
+    let above = 0
+    register.forEach((t, k) => {
+      if (t.balanceAfterMinor !== null) expect(t.balanceAfterMinor, `${l.slug}’s running balance after its row ${k + 1}`).toBe(parts[i]! - above)
+      above += own.get(t.id)!
+    })
   })
 
   return { parts: Object.fromEntries(ledgers.map((l, i) => [l.slug, parts[i]!])), totalMinor: total() }

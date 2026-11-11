@@ -9,7 +9,10 @@ import type { AppContext } from '../services/context'
 import { createCustomReport } from '../services/custom-reports'
 import { addPayment, confirmRecurring, createRecurring, detectRecurring, dismissRecurring, listRecurring } from '../services/recurring'
 import { today } from '../services/settings'
+import { refuseWhileSharing } from '../services/sharing'
 import { insertTransaction } from '../services/transactions'
+import type { Storage } from '../storage'
+import { clearLedger, safetyCopy } from './maintenance'
 
 function rng(seed: number) {
   return () => {
@@ -19,6 +22,28 @@ function rng(seed: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
+}
+
+/** What `pnpm seed:demo --force` keeps: the ledger's settings, its activity log, and the categories it uses (its own list, or what it turned off on the shared one). */
+const KEPT_FOR_DEMO = ['ledger_settings', 'activity', 'payee_rules', 'category_groups', 'categories', 'labels', 'category_labels', 'ledger_category_off']
+
+/**
+ * Clears a ledger that has data for the demo (`pnpm seed:demo --force`), after saving a copy of the
+ * whole database, the same safety net the app keeps before erasing a ledger. Not while it's a shared
+ * account's home or opening ledger. Returns the copy's path, or null when nothing was cleared (or
+ * there's no copy, in memory).
+ */
+export function clearForDemo(storage: Storage, ctx: AppContext): string | null {
+  const n = ctx.q.pluck<number>(
+    `SELECT (SELECT count(*) FROM transactions WHERE ledger_id = @ledger) + (SELECT count(*) FROM ledger_accounts WHERE ledger_id = @ledger)
+       + (SELECT count(*) FROM recurring_items WHERE ledger_id = @ledger) + (SELECT count(*) FROM custom_reports WHERE ledger_id = @ledger)
+       + (SELECT count(*) FROM tags WHERE ledger_id = @ledger)`,
+  )!
+  if (!n) return null
+  refuseWhileSharing(ctx, 'Erase this ledger in the app first.')
+  const backup = safetyCopy(storage.sqlite, `pre-seed-demo-${ctx.ledger.slug}`)
+  clearLedger(storage.sqlite, ctx.ledger.id, KEPT_FOR_DEMO)
+  return backup
 }
 
 /**

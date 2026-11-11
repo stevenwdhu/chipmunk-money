@@ -5,6 +5,7 @@ import { eraseLedger, safetyCopy } from '../db/maintenance'
 import { loadDemo } from '../db/seed-demo'
 import type { Storage } from '../storage'
 import type { AppContext } from './context'
+import { refuseWhileSharing } from './sharing'
 import { getLedgerSetting, setLedgerSetting } from './settings'
 
 const SETUP_KEY = 'setup.completed'
@@ -46,9 +47,10 @@ export function startDemo(ctx: AppContext) {
  * Deletes this ledger's accounts, transactions, recurring items, tags, reports and learned
  * categories, and turns every shared category back on. Its ledger settings and activity log are
  * kept, and app-wide settings are untouched. A copy of the whole database is saved in
- * data/backups first (not in a dry run).
+ * data/backups first (not in a dry run). Not while it's a shared account's home or opening ledger.
  */
 export function eraseAll(storage: Storage, ctx: AppContext) {
+  refuseWhileSharing(ctx)
   const backup = safetyCopy(storage.sqlite, `pre-erase-${ctx.ledger.slug}`)
   // Bank accounts linked to its accounts are unlinked by their foreign key.
   eraseLedger(storage.sqlite, ctx.ledger.id, SETUP_KEY)

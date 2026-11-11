@@ -703,12 +703,15 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
         accounts.requireManualBalance(c.var.ctx, params.id)
       }
       const { institutionId, institution, ...rest } = body
-      const placed = institutionId !== undefined || institution !== undefined ? institutions.resolveInstitution(c.var.ctx, { institutionId, institution }) : null
-      if (placed) logNewInstitution(c, placed)
-      const after = accounts.updateAccount(c.var.ctx, params.id, { ...rest, ...(placed ? { institutionId: placed.id } : {}) })
-      logUpdate(c, 'account', after.id, `Edited the account ${before.name}`, before, after)
-      if (after.institutionId !== before.institutionId) removeIfEmpty(c, before.institutionId)
-      return after
+      // One transaction: an update that's refused (a shared account's 409s) leaves no new institution behind.
+      return c.var.ctx.q.transaction(() => {
+        const placed = institutionId !== undefined || institution !== undefined ? institutions.resolveInstitution(c.var.ctx, { institutionId, institution }) : null
+        if (placed) logNewInstitution(c, placed)
+        const after = accounts.updateAccount(c.var.ctx, params.id, { ...rest, ...(placed ? { institutionId: placed.id } : {}) })
+        logUpdate(c, 'account', after.id, `Edited the account ${before.name}`, before, after)
+        if (after.institutionId !== before.institutionId) removeIfEmpty(c, before.institutionId)
+        return after
+      })
     },
   )
   r.delete(

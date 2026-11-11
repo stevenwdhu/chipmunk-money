@@ -13,6 +13,7 @@ import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
 import { accountWideOn, type AccountWide } from './services/account-rows'
 import { seedCatalog } from './services/catalog'
+import { refuseWhileSharing } from './services/sharing'
 import { slugify, ulid } from './lib/ids'
 import { SecretBox } from './lib/secrets'
 import type { AppContext, AppStore, CtxOf } from './services/context'
@@ -216,14 +217,16 @@ export class LedgerRegistry {
 
   /**
    * Deletes a ledger and all its data, after saving a copy of the whole database as
-   * data/backups/pre-delete-<slug>-<time>.db (safetyCopy, not in a dry run). Bank accounts linked
-   * to its accounts are unlinked (their foreign key). Then the freed pages go back to the disk.
+   * data/backups/pre-delete-<slug>-<time>.db (safetyCopy, not in a dry run). Not while it's a shared
+   * account's home or opening ledger (refuseWhileSharing). Bank accounts linked to its accounts are
+   * unlinked (their foreign key). Then the freed pages go back to the disk.
    */
   remove(idOrSlug: string): { backup: string | null } {
     const row = this.get(idOrSlug)
     if (this.rows().length === 1) {
       throw new HTTPException(409, { message: "You can't delete your only ledger. Erase its data instead." })
     }
+    refuseWhileSharing(this.context(row.id))
     const backup = safetyCopy(this.sqlite, `pre-delete-${row.slug}`)
     ledgerMaintenance(this.sqlite, row.id, () =>
       this.sqlite.transaction(() => {
