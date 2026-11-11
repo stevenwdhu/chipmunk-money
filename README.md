@@ -120,7 +120,7 @@ Open http://localhost:8787 and choose how to begin:
 
 - **Explore the demo** loads 13 months of sample data to click around in.
 - **Start from scratch** opens the app with your first account.
-- **Restore a backup** brings back a ledger you saved before.
+- **Restore a backup** shows how to put back a full backup you saved before.
 
 `:latest` is the newest release. To take only fixes, use a minor version like `:0.2`, and [CHANGELOG.md](CHANGELOG.md) says what each release changed. Your data lives in the `chipmunk-data` volume. Keep a copy of it somewhere safe, `secret.key` included, because that file unlocks your bank connections and AI keys. Updating is `docker compose pull && docker compose up -d`.
 

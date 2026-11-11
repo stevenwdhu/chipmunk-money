@@ -25,7 +25,7 @@ const tz = computed(() => settings.data.value?.effectiveTimezone)
 const ACCESS: Array<{ value: ApiScope; label: string; hint: string }> = [
   { value: 'read', label: 'Read only', hint: 'See everything, change nothing.' },
   { value: 'write', label: 'Read and write', hint: 'Also add and edit transactions, accounts, categories and recurring items.' },
-  { value: 'admin', label: 'Full access', hint: 'Also manage ledgers, app settings, API keys, restore and erase.' },
+  { value: 'admin', label: 'Full access', hint: 'Also manage ledgers, app settings, API keys, the full backup and erase.' },
 ]
 const accessOf = (k: ApiKey) => ACCESS.find((a) => a.value === k.scopes[k.scopes.length - 1]) ?? ACCESS[0]!
 const ledgerNames = (k: ApiKey) =>

@@ -1013,10 +1013,6 @@ export function useSetupMutations() {
       mutationFn: () => lapi.post<{ transactions: number; recurringSuggestions: number }>('/setup/demo'),
       onSuccess: refreshAll,
     }),
-    restore: useMutation({
-      mutationFn: (file: File) => lapi.upload<{ accounts: number; transactions: number }>('/restore', file),
-      onSuccess: refreshAll,
-    }),
     erase: useMutation({
       mutationFn: () => lapi.post<{ backup: string | null }>('/erase', { confirm: 'erase' }),
       onSuccess: refreshAll,
@@ -1047,12 +1043,6 @@ export function useLedgerMutations() {
     remove: useMutation({
       mutationFn: ({ id, confirm }: { id: string; confirm: string }) =>
         api.del<{ backup: string | null }>(`/ledgers/${id}`, { confirm }),
-      onSuccess: refresh,
-    }),
-    /** Fills a ledger (usually just created) from an uploaded backup file. */
-    restoreInto: useMutation({
-      mutationFn: ({ slug, file }: { slug: string; file: File }) =>
-        api.upload<{ accounts: number; transactions: number }>(`/ledgers/${encodeURIComponent(slug)}/restore`, file),
       onSuccess: refresh,
     }),
   }

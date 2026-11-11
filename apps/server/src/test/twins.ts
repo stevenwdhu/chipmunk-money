@@ -15,7 +15,7 @@ import { startDemo } from '../services/setup'
 import { deleteTransaction, insertTransaction } from '../services/transactions'
 import type { Storage } from '../storage'
 import { testLedger, testStorage } from './helpers'
-import { ledgerRows } from './ledger-backup'
+import { ledgerRows } from './world'
 
 /**
  * Two ledgers in one database seeded alike with the demo (the same accounts, payees, amounts and
@@ -263,8 +263,6 @@ export interface Req {
   path: string
   query?: Record<string, unknown>
   body?: unknown
-  /** Raw bytes to send instead of JSON (a backup to restore). */
-  upload?: Uint8Array
 }
 
 /** Lets work a request left running (AI categorizing, payee tidying) finish. */
@@ -286,11 +284,8 @@ export function queryString(query: Record<string, unknown> | undefined): string 
 export async function send(app: Twins['app'], req: Req, headers: Record<string, string> = { 'sec-fetch-site': 'same-origin' }): Promise<Res> {
   const res = await app.request(`/api/v1${req.path}${queryString(req.query)}`, {
     method: req.method,
-    headers: {
-      ...headers,
-      ...(req.upload ? { 'content-type': 'application/octet-stream' } : req.body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    body: req.upload ? new Uint8Array(req.upload) : req.body === undefined ? undefined : JSON.stringify(req.body),
+    headers: { ...headers, ...(req.body === undefined ? {} : { 'content-type': 'application/json' }) },
+    body: req.body === undefined ? undefined : JSON.stringify(req.body),
   })
   const type = res.headers.get('content-type') ?? ''
   let body: Json
@@ -299,13 +294,6 @@ export async function send(app: Twins['app'], req: Req, headers: Record<string, 
   else if (type.startsWith('text/')) body = await res.text()
   else body = { sha256: createHash('sha256').update(new Uint8Array(await res.arrayBuffer())).digest('hex') }
   return { status: res.status, body, message: res.status >= 400 ? body?.error?.message : undefined }
-}
-
-/** The raw bytes of a file response (a ledger backup). */
-export async function download(app: Twins['app'], path: string): Promise<Uint8Array> {
-  const res = await app.request(`/api/v1${path}`, { headers: { 'sec-fetch-site': 'same-origin' } })
-  if (res.status !== 200) throw new Error(`${path}: ${res.status}`)
-  return new Uint8Array(await res.arrayBuffer())
 }
 
 /** A new API key (from the web app), as an authorization header. */

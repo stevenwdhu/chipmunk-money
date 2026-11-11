@@ -127,7 +127,7 @@ export const CHILD_NAMES: ReadonlySet<string> = new Set(TABLES.filter((t) => t.k
 /**
  * Deletes every row of one ledger: its root rows, its own categories, and the child rows under
  * them, children before parents so foreign keys stay on (their actions, such as unlinking bank
- * accounts, keep firing). `keep` leaves those tables alone (restore keeps the activity log, say).
+ * accounts, keep firing). `keep` leaves those tables alone (erasing keeps the activity log, say).
  * Rows of other ledgers and the shared list aren't touched.
  *
  * Run it in the ledger's write scope (ledgerMaintenance in scope.ts): the write guards refuse it otherwise.

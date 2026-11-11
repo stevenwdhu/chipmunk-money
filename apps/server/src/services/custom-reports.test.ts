@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { transactionCreateSchema, type CustomReport, type ReportSpec } from '@chipmunk/shared'
 import { createApp } from '../app'
-import { exportLedger } from '../db/ledger-backup'
 import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
 import { leaveSharedList } from './catalog'
 import { createGroup, createTag, deleteGroup, deleteTag, mergeCategory, setCategoryEnabled } from './categories'
@@ -17,7 +16,7 @@ import {
 } from './custom-reports'
 import { createLabel, deleteLabel } from './labels'
 import { listRecurring } from './recurring'
-import { eraseAll, restoreBackup, startDemo } from './setup'
+import { eraseAll, startDemo } from './setup'
 import { createTransaction, deleteTransaction } from './transactions'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -149,19 +148,14 @@ describe('custom reports', () => {
     expect(getCustomReport(ctx, both.id)).toMatchObject({ spec: { filter: { spending: { only: [{ field: 'category', ids: [groceries, 'none'] }] } } }, missing: [] })
   })
 
-  it('are cleared by erasing, and carried by a backup', () => {
-    const sourceStorage = testStorage()
-    const source = sourceStorage.registry.defaultContext()
-    const tag = createTag(source, 'kept')
-    createCustomReport(source, { name: 'Kept', spec: spending({ only: [{ field: 'tag', ids: [tag.id] }] }) })
-    const bytes = exportLedger(sourceStorage.sqlite, source.ledger.id)
-
+  it('are cleared by erasing', () => {
     const storage = testStorage()
-    const target = storage.registry.defaultContext()
-    restoreBackup(storage, target, bytes)
-    expect(listCustomReports(target)).toEqual([expect.objectContaining({ name: 'Kept', description: 'Spending: Only #kept', missing: [] })])
-    eraseAll(storage, target)
-    expect(listCustomReports(target)).toEqual([])
+    const ctx = storage.registry.defaultContext()
+    const tag = createTag(ctx, 'kept')
+    createCustomReport(ctx, { name: 'Kept', spec: spending({ only: [{ field: 'tag', ids: [tag.id] }] }) })
+    expect(listCustomReports(ctx)).toEqual([expect.objectContaining({ name: 'Kept', description: 'Spending: Only #kept', missing: [] })])
+    eraseAll(storage, ctx)
+    expect(listCustomReports(ctx)).toEqual([])
   })
 
   it('keep the names of what they filter by, to name what’s gone', () => {
@@ -203,22 +197,6 @@ describe('custom reports', () => {
         { kind: 'label', id: splurge.id, reason: 'deleted' },
       ],
     })
-  })
-
-  it('still point at what’s gone after a restore: its ids aren’t handed out again', () => {
-    const sourceStorage = testStorage()
-    const source = sourceStorage.registry.defaultContext()
-    createTag(source, 'kept')
-    const gone = createTag(source, 'gone')
-    const report = createCustomReport(source, { name: 'Gone', spec: spending({ only: [{ field: 'tag', ids: [gone.id] }] }) })
-    deleteTag(source, gone.id)
-    const bytes = exportLedger(sourceStorage.sqlite, source.ledger.id)
-
-    const storage = testStorage()
-    const target = storage.registry.defaultContext()
-    restoreBackup(storage, target, bytes)
-    expect(createTag(target, 'new').id).toBeGreaterThan(gone.id)
-    expect(getCustomReport(target, report.id).missing).toEqual([{ kind: 'tag', id: gone.id, reason: 'deleted' }])
   })
 
   it('keep a payee they couldn’t follow to too many new names, and say why', () => {

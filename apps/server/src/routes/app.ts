@@ -189,7 +189,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
     {
       scope: 'admin',
       summary: 'Delete a ledger',
-      description: 'Deletes the ledger and all its data, after saving its backup in data/backups (`deleted-<slug>-<time>.db`, restorable like any ledger backup). Send its name as `confirm`.',
+      description: 'Deletes the ledger and all its data, after saving a copy of the whole database in data/backups (`pre-delete-<slug>-<time>.db`). Send its name as `confirm`.',
       params: ledgerParam,
       body: ledgerDeleteSchema,
       response: backupResultSchema,

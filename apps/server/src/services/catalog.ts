@@ -1,11 +1,9 @@
 import { HTTPException } from 'hono/http-exception'
 import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@chipmunk/shared'
 import type { UnscopedQuery } from '../db/scope'
-import { ulid } from '../lib/ids'
 import type { Storage } from '../storage'
-import type { AppContext, AppStore } from './context'
+import type { AppContext } from './context'
 import { joinCategoryRefs } from './custom-reports'
-import { getAppSetting, setAppSetting } from './settings'
 
 /**
  * The shared category list, and how a ledger uses it.
@@ -19,9 +17,6 @@ import { getAppSetting, setAppSetting } from './settings'
  * The shared rows belong to no ledger, so they're read and written with every ledger in scope
  * (onSharedList, the one listed site in db/unscoped-sites.ts), from this module and catalog-edit.ts.
  */
-
-/** In app_settings: this list's id, which a ledger backup remembers so it can be restored by id. */
-const TOKEN_KEY = 'categories.catalog'
 
 /** Statements with every ledger in scope, for the shared list's rows. */
 export type SharedList = UnscopedQuery
@@ -95,16 +90,6 @@ export function readCatalog(db: SharedList): Catalog {
   }
 }
 
-/** The list's id, which a ledger's backup remembers so its category ids can be restored as they are. */
-export function catalogToken(app: AppStore): string {
-  let token = getAppSetting<string | null>(app, TOKEN_KEY, null)
-  if (!token) {
-    token = ulid()
-    setAppSetting(app, TOKEN_KEY, token)
-  }
-  return token
-}
-
 /**
  * Starts the shared list from the default categories and labels, the first time. Runs with every
  * ledger in scope, on the statements it hands over (storage.ts).
@@ -136,7 +121,6 @@ export function seedCatalog(db: SharedList) {
         })
       })
     }
-    db.run('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', TOKEN_KEY, JSON.stringify(ulid()))
   })
 }
 
@@ -238,15 +222,6 @@ export function joinPreview(storage: Storage, ctx: AppContext) {
       }
       return { id: c.id, name: c.name, group: c.groupName, transactionCount: c.transactionCount, suggestion: suggestion?.id ?? null }
     })
-}
-
-/**
- * Whether a ledger with categories of these names joining the shared list (a backup from another
- * install, say) would add categories to it: the list has none of that name, or of a former name.
- */
-export function wouldAddToSharedList(storage: Storage, names: readonly string[]): boolean {
-  const catalog = onSharedList(storage, readCatalog)
-  return names.some((name) => !sharedByName(catalog, name))
 }
 
 /** The shared category for one of a ledger's own, added to the list (in the group of the same name, with its labels) when it has none. */

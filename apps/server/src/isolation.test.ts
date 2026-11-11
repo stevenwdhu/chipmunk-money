@@ -3,7 +3,6 @@ import { createApi } from './app'
 import {
   apiKey,
   deleteRows,
-  download,
   FREE_BANK_ACCOUNT,
   ledgerHash,
   mcpClient,
@@ -39,8 +38,6 @@ interface C {
   t: Twins
   me: Twin
   other: Twin
-  /** The subject's backup, downloaded before the writes, for restoring. */
-  backup?: Uint8Array
 }
 
 type NumberKind = { [K in keyof TwinIds]: TwinIds[K] extends number ? K : never }[keyof TwinIds]
@@ -51,7 +48,6 @@ interface Case {
   params?: (c: C) => Record<string, number>
   query?: (c: C) => Record<string, unknown>
   body?: (c: C) => unknown
-  upload?: (c: C) => Uint8Array
   /** The kind of id each path parameter is, when it isn't the usual one for its path. */
   kinds?: Record<string, NumberKind>
   /** The status it answers on purpose when it isn't a success (a 409, say). */
@@ -183,7 +179,6 @@ const READS: Case[] = [
   { route: 'GET /ledgers/:ledger/activity', query: () => ({ actor: 'web', entity: 'ledger' }) },
   { route: 'GET /ledgers/:ledger/activity/actors' },
   { route: 'GET /ledgers/:ledger/setup' },
-  { route: 'GET /ledgers/:ledger/backup' },
   { route: 'GET /ledgers/:ledger/export/transactions.csv' },
   { route: 'GET /ledgers/:ledger/export/transactions.csv', query: (c) => ({ ...RANGE, filter: filter(c) }) },
 ]
@@ -326,7 +321,6 @@ const importRows = [
 /** After the MCP tools: the ledger as a whole. */
 const ENDINGS: Case[] = [
   { route: 'PATCH /ledgers/:ledger', body: (c) => ({ color: '#16a34a', name: `${c.me.ctx.ledger.name} renamed` }) },
-  { route: 'POST /ledgers/:ledger/restore', upload: (c) => c.backup! },
   { route: 'POST /ledgers/:ledger/erase', body: () => ({ confirm: 'erase' }) },
   { route: 'POST /ledgers/:ledger/setup/demo' },
   { route: 'DELETE /ledgers/:ledger', body: (c) => ({ confirm: c.t.storage.registry.get(ledgerOf(c)).name }) },
@@ -451,7 +445,7 @@ async function request(c: C, k: Case, override: Record<string, number> = {}): Pr
     if (params[p] === undefined) throw new Error(`${k.route}: no ${p}`)
     return String(params[p])
   })
-  return { method, path, query: k.query?.(c), body: await k.body?.(c), upload: k.upload?.(c) }
+  return { method, path, query: k.query?.(c), body: await k.body?.(c) }
 }
 
 async function run(c: C, k: Case, override?: Record<string, number>): Promise<{ req: Req; res: Res }> {
@@ -598,7 +592,6 @@ for (const world of WORLDS) {
       it(`${direction.name}, keep every write to its own rows`, async () => {
         const t = twins({ own: world.own })
         const c: C = { t, ...direction.pick(t) }
-        c.backup = await download(t.app, `/ledgers/${ledgerOf(c)}/backup`)
         let otherBefore = ledgerHash(t.storage, c.other.ctx.ledger.id)
         const check = async (what: string, appWide = false) => {
           await settle()

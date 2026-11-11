@@ -166,17 +166,6 @@ export function deleteAccount(ctx: AppContext, id: number) {
   ctx.q.run('DELETE FROM accounts WHERE id = ? AND ledger_id = @ledger', id)
 }
 
-/**
- * Stops syncing into a ledger's accounts (one, or all of them). Deleting an account unlinks it by
- * itself (bank_accounts.account_id is ON DELETE SET NULL): this is for accounts that stay.
- */
-export function unlinkBankAccounts(ctx: Pick<AppContext, 'q'>, accountId?: number) {
-  const { q } = ctx
-  const mine = 'account_id IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger)'
-  if (accountId === undefined) q.run(`UPDATE bank_accounts SET account_id = NULL WHERE ${mine}`)
-  else q.run(`UPDATE bank_accounts SET account_id = NULL WHERE account_id = ? AND ${mine}`, accountId)
-}
-
 export function saveImportMapping(ctx: AppContext, id: number, mapping: ColumnMapping) {
   ctx.q.run('UPDATE accounts SET import_mapping = ? WHERE id = ? AND ledger_id = @ledger', JSON.stringify(mapping), id)
 }

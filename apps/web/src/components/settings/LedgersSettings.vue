@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Ellipsis, FileArchive, FolderArchive, Pencil, Plus, Star, Trash2 } from '@lucide/vue'
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Ellipsis, FolderArchive, Pencil, Plus, Star, Trash2 } from '@lucide/vue'
 import type { Ledger } from '@chipmunk/shared'
 import DeleteLedgerDialog from '@/components/ledger/DeleteLedgerDialog.vue'
 import LedgerEditDialog from '@/components/ledger/LedgerEditDialog.vue'
@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useLedgerMutations, useLedgers } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
-import { currentLedger, ledgerApiHref } from '@/lib/ledger'
+import { currentLedger } from '@/lib/ledger'
 
 const ledgers = useLedgers()
 const m = useLedgerMutations()
@@ -106,9 +106,6 @@ function move(l: Ledger, dir: -1 | 1) {
               <DropdownMenuItem @select="edit(l)"><Pencil />Edit</DropdownMenuItem>
               <DropdownMenuItem v-if="!l.isDefault && !l.archived" @select="run(m.update.mutateAsync({ id: l.id, isDefault: true }), `${l.name} now opens by default`)">
                 <Star />Open by default
-              </DropdownMenuItem>
-              <DropdownMenuItem as-child>
-                <a :href="ledgerApiHref('/backup', l.slug)" download><FileArchive />Download backup</a>
               </DropdownMenuItem>
               <DropdownMenuItem
                 v-if="!l.archived"

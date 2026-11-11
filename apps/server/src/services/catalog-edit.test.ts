@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { categoryOf, learnedOf, learnIn, spendIn } from '../test/category-lists'
 import { testLedger, testStorage } from '../test/helpers'
-import { joinSharedList, leaveSharedList, usesSharedList, wouldAddToSharedList } from './catalog'
+import { joinSharedList, leaveSharedList, usesSharedList } from './catalog'
 import {
   applyCatalogLabel,
   catalogUsage,
@@ -181,8 +181,6 @@ describe('joining the shared list', () => {
     const [tPhone, tBoat, tJunk, tFuel] = [spendIn(a, own('Mobile phones')), spendIn(a, boat.id), spendIn(a, junk.id), spendIn(a, own('Fuel'))]
     learnIn(a, junk.id)
 
-    expect(wouldAddToSharedList(storage, ['Mobile phones', 'Fuel'])).toBe(false)
-    expect(wouldAddToSharedList(storage, ['Boat'])).toBe(true)
     joinSharedList(storage, a, new Map([[junk.id, null]]))
 
     expect(usesSharedList(a)).toBe(true)

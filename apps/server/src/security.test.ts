@@ -1,9 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 import { transactionCreateSchema, type ApiKeyCreated } from '@chipmunk/shared'
 import Anthropic from '@anthropic-ai/sdk'
@@ -301,90 +300,6 @@ describe('keys limited to some ledgers', () => {
     }
     expect(app.select({ accountId: bankAccounts.accountId }).from(bankAccounts).where(eq(bankAccounts.id, 'someone-elses')).get()).toEqual({ accountId: null })
   })
-
-  it('can’t add to the shared category list or change app settings by restoring a backup', async () => {
-    const { storage, app, web, key } = setup()
-    await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
-    const limited = await key({ scopes: ['admin'], ledgers: ['family'] })
-    const backup = await app.request('http://localhost:8787/api/v1/ledgers/family/backup', { headers: SAME_ORIGIN })
-    expect(backup.status).toBe(200)
-    // The backup as someone might make it by hand: from another category list, with a category this one doesn't have and app settings.
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'st-sec-'))
-    const file = path.join(dir, 'family.db')
-    writeFileSync(file, new Uint8Array(await backup.arrayBuffer()))
-    const db = new Database(file)
-    db.prepare(`DELETE FROM app_settings WHERE key = 'categories.catalog'`).run()
-    db.prepare(`INSERT INTO categories (name) VALUES ('Added by a backup')`).run()
-    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('ai.primary', ?), ('timezone', '"Pacific/Kiritimati"')`).run(
-      JSON.stringify({ kind: 'openai-compatible', model: 'm', baseUrl: 'http://attacker.example/v1', apiKey: null }),
-    )
-    db.close()
-    const bytes = readFileSync(file)
-    rmSync(dir, { recursive: true, force: true })
-    const before = (await web('/api/v1/settings')).body
-    const restore = (auth: Record<string, string>) =>
-      app.request('http://localhost:8787/api/v1/ledgers/family/restore', { method: 'POST', headers: { ...auth, 'content-type': 'application/octet-stream' }, body: bytes })
-    // On the shared list, Personal has it too.
-    const shared = () =>
-      storage.registry.defaultContext().q.get(`SELECT count(*) AS n FROM ledger_categories WHERE ledger_id = @ledger AND name = 'Added by a backup'`)
-
-    const refused = await restore(limited)
-    expect(refused.status).toBe(403)
-    expect(((await refused.json()) as Json).error.message).toBe('This backup has categories the shared list doesn’t, and a key limited to some ledgers can’t add to it. Restore it in the app.')
-    expect(shared()).toEqual({ n: 0 })
-
-    // The app may add to the list, but a backup's app settings are never taken.
-    expect((await restore(SAME_ORIGIN)).status).toBe(200)
-    expect(shared()).toEqual({ n: 1 })
-    const after = (await web('/api/v1/settings')).body
-    expect([after.timezone, after.ai.primary]).toEqual([before.timezone, null])
-    expect(before.timezone).not.toBe('Pacific/Kiritimati')
-  })
-
-  it('can’t move where other ledgers’ ids continue by restoring a backup', async () => {
-    const { storage, app, web, key } = setup()
-    const personal = storage.registry.defaultContext()
-    const mine = makeAccount(personal)
-    await web('/api/v1/ledgers', 'POST', { name: 'Family', start: 'empty' })
-    const family = storage.registry.context('family')
-    const theirs = makeAccount(family)
-    await createTransaction(family, transactionCreateSchema.parse({ accountId: theirs, date: '2026-10-01', amountMinor: -500, payee: 'Shop' }), { useAi: false })
-    const limited = await key({ scopes: ['admin'], ledgers: ['family'] })
-    const backup = await app.request('http://localhost:8787/api/v1/ledgers/family/backup', { headers: limited })
-    expect(backup.status).toBe(200)
-    const good = new Uint8Array(await backup.arrayBuffer())
-    /** The backup edited by hand. */
-    const edited = (sql: string) => {
-      const dir = mkdtempSync(path.join(os.tmpdir(), 'st-sec-'))
-      const file = path.join(dir, 'family.db')
-      writeFileSync(file, good)
-      const db = new Database(file)
-      db.exec(sql)
-      db.close()
-      const bytes = readFileSync(file)
-      rmSync(dir, { recursive: true, force: true })
-      return bytes
-    }
-    const copy = (id: string) =>
-      `INSERT INTO transactions (id, ledger_id, account_id, date, amount_minor, payee, payee_key) SELECT ${id}, ledger_id, account_id, date, amount_minor, payee, payee_key FROM transactions LIMIT 1`
-    const restore = (bytes: Uint8Array) =>
-      app.request('http://localhost:8787/api/v1/ledgers/family/restore', { method: 'POST', headers: { ...limited, 'content-type': 'application/octet-stream' }, body: bytes })
-    const addToPersonal = async () => {
-      const res = await web('/api/v1/ledgers/personal/transactions', 'POST', { accountId: mine, date: '2026-10-02', amountMinor: -700, payee: 'Cafe' })
-      expect(res.status).toBe(201)
-      expect(res.body.id).toBeLessThan(1000)
-      expect((await web(`/api/v1/ledgers/personal/transactions/${res.body.id}`)).body.payee).toBe('Cafe')
-    }
-
-    const huge = 'UPDATE sqlite_sequence SET seq = 9223372036854775807;'
-    for (const sql of [huge, huge + copy(String(2 ** 50))]) {
-      expect((await restore(edited(sql))).status).toBe(200)
-      await addToPersonal()
-    }
-    const refused = await restore(edited(copy(String(2n ** 62n))))
-    expect([refused.status, ((await refused.json()) as Json).error.message]).toEqual([400, 'That backup has inconsistent data, so nothing was changed.'])
-    await addToPersonal()
-  })
 })
 
 describe('AI provider keys', () => {
@@ -438,15 +353,15 @@ describe('AI provider errors', () => {
 })
 
 describe('request size', () => {
-  it('is limited, with more room for restores and imports', async () => {
+  it('is limited, with more room for imports', async () => {
     const { web } = setup()
     const big = { name: 'x'.repeat(1024 * 1024 + 1) }
     const res = await web('/api/v1/ledgers', 'POST', big)
     expect(res.status).toBe(413)
     expect(res.body.error).toEqual({ code: 'payload_too_large', message: 'That request is too big. The most it can send is 1 MB.' })
-    // A restore of a few MB gets as far as reading the file (it isn't a backup).
-    const restore = await web('/api/v1/ledgers/personal/restore', 'POST', 'x'.repeat(3 * 1024 * 1024))
-    expect(restore.status).toBe(400)
+    // An import preview of a few MB gets as far as checking its rows (there are none).
+    const preview = await web('/api/v1/ledgers/personal/import/preview', 'POST', { accountId: 1, rows: [], note: 'x'.repeat(3 * 1024 * 1024) })
+    expect([preview.status, preview.body.error.code]).toEqual([400, 'validation_failed'])
     expect(UPLOAD_LIMIT).toBe(200 * 1024 * 1024)
   })
 })

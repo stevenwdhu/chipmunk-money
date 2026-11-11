@@ -110,7 +110,7 @@ function withScope<T>(sqlite: SQLite, scope: ScopeValue, fn: () => T): T {
 
 /**
  * Runs fn with one ledger's rows writable and no pin checker: for maintenance that works on all
- * of a ledger's rows at once (deleting it, erasing it, restoring a backup into it). The write
+ * of a ledger's rows at once (deleting it, erasing it, clearing it for the demo). The write
  * guards stay on, so nothing it does reaches another ledger.
  */
 export function ledgerMaintenance<T>(sqlite: SQLite, ledgerId: string, fn: () => T): T {

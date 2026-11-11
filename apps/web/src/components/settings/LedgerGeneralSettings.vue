@@ -97,8 +97,8 @@ async function categorizeNow() {
       <CardHeader>
         <CardTitle>Archive or delete</CardTitle>
         <CardDescription>
-          Archiving hides the ledger from the ledger menu but keeps everything; restore it from App settings → Ledgers. Deleting
-          removes it for good (a copy is saved in <code class="text-xs">data/backups</code>).
+          Archiving hides the ledger from the ledger menu but keeps everything. Restore it from App settings → Ledgers. Deleting
+          removes it for good (a copy of the whole database is saved in <code class="text-xs">data/backups</code> first).
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-2">

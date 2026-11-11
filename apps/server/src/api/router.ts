@@ -21,8 +21,6 @@ export interface RouteMeta {
   query?: z.ZodType
   /** JSON request body. */
   body?: z.ZodType
-  /** A raw request body instead of JSON, e.g. a backup file. The handler reads it. */
-  upload?: { contentType: string; description: string }
   /** JSON response body. */
   response?: z.ZodType
   /** A file response instead of JSON. The handler returns the Response. */

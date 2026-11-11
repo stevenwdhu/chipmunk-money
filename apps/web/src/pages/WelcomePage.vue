@@ -6,13 +6,13 @@ import { ArchiveRestore, FlaskConical, Loader2, Plus, Wallet } from '@lucide/vue
 import FieldLabel from '@/components/FieldLabel.vue'
 import LedgerMark from '@/components/ledger/LedgerMark.vue'
 import LedgerSwitcher from '@/components/ledger/LedgerSwitcher.vue'
+import RestoreBackupDialog from '@/components/RestoreBackupDialog.vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useLedgerMutations, useLedgers, useSetupMutations } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { setCurrentLedger } from '@/lib/ledger'
-import { cn } from '@/lib/utils'
 
 const router = useRouter()
 const m = useSetupMutations()
@@ -34,10 +34,8 @@ async function applyName(): Promise<string> {
   setCurrentLedger(updated.slug)
   return updated.slug
 }
-const fileInput = ref<HTMLInputElement | null>(null)
-const dragOver = ref(false)
-const restoreError = ref('')
-const busy = computed(() => m.start.isPending.value || m.demo.isPending.value || m.restore.isPending.value)
+const restoreOpen = ref(false)
+const busy = computed(() => m.start.isPending.value || m.demo.isPending.value)
 
 async function startFresh() {
   try {
@@ -58,29 +56,6 @@ async function loadDemo() {
   } catch (err) {
     toast.error(errorMessage(err))
   }
-}
-
-async function restore(file: File | undefined) {
-  if (!file || busy.value) return
-  restoreError.value = ''
-  try {
-    const slug = await applyName()
-    const { accounts, transactions } = await m.restore.mutateAsync(file)
-    router.replace({ name: 'overview', params: { ledger: slug } })
-    toast.success(`Restored ${accounts} account${accounts === 1 ? '' : 's'} and ${transactions} transaction${transactions === 1 ? '' : 's'}`)
-  } catch (err) {
-    restoreError.value = errorMessage(err)
-  }
-}
-
-function onPick(e: Event) {
-  const input = e.target as HTMLInputElement
-  restore(input.files?.[0])
-  input.value = ''
-}
-function onDrop(e: DragEvent) {
-  dragOver.value = false
-  restore(e.dataTransfer?.files?.[0])
 }
 </script>
 
@@ -128,25 +103,16 @@ function onDrop(e: DragEvent) {
           </CardFooter>
         </Card>
 
-        <Card
-          :class="cn('gap-4 transition-colors', dragOver && 'border-primary bg-muted')"
-          @dragover.prevent="dragOver = true"
-          @dragleave="dragOver = false"
-          @drop.prevent="onDrop"
-        >
+        <Card class="gap-4">
           <CardHeader>
             <span class="mb-2 grid size-10 place-items-center rounded-lg bg-muted"><ArchiveRestore class="size-5" /></span>
             <CardTitle>Restore a backup</CardTitle>
             <CardDescription>
-              Upload a <code class="text-xs">.db</code> backup you downloaded from Ledger settings → Data, or drop the file here.
+              Put back a full backup of every ledger. It's done by hand on the server, and the steps are a click away.
             </CardDescription>
           </CardHeader>
-          <CardContent v-if="restoreError" class="text-sm text-destructive">{{ restoreError }}</CardContent>
           <CardFooter class="mt-auto">
-            <Button class="w-full" variant="outline" :disabled="busy" @click="fileInput?.click()">
-              <Loader2 v-if="m.restore.isPending.value" class="animate-spin" />Choose backup file
-            </Button>
-            <input ref="fileInput" type="file" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3" class="sr-only" @change="onPick" />
+            <Button class="w-full" variant="outline" :disabled="busy" @click="restoreOpen = true">Show me how</Button>
           </CardFooter>
         </Card>
 
@@ -166,5 +132,6 @@ function onDrop(e: DragEvent) {
         </Card>
       </div>
     </div>
+    <RestoreBackupDialog v-model:open="restoreOpen" />
   </main>
 </template>

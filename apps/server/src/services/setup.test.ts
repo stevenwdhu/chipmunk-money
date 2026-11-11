@@ -1,12 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { transactionCreateSchema } from '@chipmunk/shared'
 import { createApp } from '../app'
-import { exportLedger } from '../db/ledger-backup'
 import { seedDemo } from '../db/seed-demo'
 import { makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
 import { getAppSetting } from './settings'
-import { eraseAll, restoreBackup, setupStatus, startDemo, startEmpty } from './setup'
-import { createTransaction } from './transactions'
+import { eraseAll, setupStatus, startDemo, startEmpty } from './setup'
 
 describe('setup', () => {
   it('needs setup only on an empty, untouched database', async () => {
@@ -44,31 +41,6 @@ describe('setup', () => {
     expect(tripOf(a)).not.toBe(tripOf(b))
     for (const ctx of [a, b]) expect(specOf(ctx).filter.spending.filterOut[0].when[0]).toEqual({ field: 'tag', ids: [tripOf(ctx)] })
     expect(() => seedDemo(b)).toThrow(/already has data/)
-  })
-
-  it('restores a backup into another install, replacing what was there', async () => {
-    const from = testStorage()
-    const source = from.registry.defaultContext()
-    const acc = makeAccount(source, 'Backup Chequing')
-    await createTransaction(source, transactionCreateSchema.parse({ accountId: acc, date: '2026-09-01', amountMinor: -500, payee: 'Coffee', tags: ['restored'] }), { useAi: false })
-    const bytes = exportLedger(from.sqlite, source.ledger.id)
-
-    const storage = testStorage()
-    const target = storage.registry.defaultContext()
-    makeAccount(target, 'Will be replaced')
-    const counts = restoreBackup(storage, target, bytes)
-    expect(counts).toEqual({ accounts: 1, transactions: 1 })
-    expect(target.q.all('SELECT name FROM ledger_accounts WHERE ledger_id = @ledger')).toEqual([{ name: 'Backup Chequing' }])
-    expect(target.q.all('SELECT name FROM tags WHERE ledger_id = @ledger')).toEqual([{ name: 'restored' }])
-    expect(setupStatus(target).needsSetup).toBe(false)
-  })
-
-  it('rejects files that are not backups and leaves data alone', () => {
-    const storage = testStorage()
-    const ctx = storage.registry.defaultContext()
-    makeAccount(ctx)
-    expect(() => restoreBackup(storage, ctx, new TextEncoder().encode('date,payee,amount\n'.repeat(20)))).toThrow(/isn't a Chipmunk backup/)
-    expect(setupStatus(ctx).accounts).toBe(1)
   })
 
   it('erases everything but settings and shows the welcome screen again', () => {

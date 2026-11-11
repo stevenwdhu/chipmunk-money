@@ -7,7 +7,8 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 ### Breaking
 
 - **Every ledger is now in one database, `chipmunk.db`,** in place of `meta.db` and a file per ledger in `ledgers/`. A data folder from v0.2.3 isn't read by this version: it has to be converted once, with the app stopped. Keep `secret.key` next to `chipmunk.db`.
-- **A ledger's "Download backup" file is in the new format,** and only files from this version restore. The full backup is now `chipmunk.db` itself.
+- **One-ledger backup and restore are removed.** The only backup is the full backup, a zip of `chipmunk.db` with every ledger, in App settings → Ledgers and Ledger settings → Data. Restoring it is done by hand, and the Restore button shows the steps (also in [docs/self-hosting.md](docs/self-hosting.md#backups)).
+- One-ledger backup files from v0.2.3 or earlier can't be restored by this version. Restore one with v0.2.3 first, then update.
 
 ### Changed
 
@@ -16,11 +17,10 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 - The shared category list is stored once for every ledger, not copied into each one.
 - New API keys start with `cm_`. Keys made before keep working.
 - The stdio MCP server reads `CHIPMUNK_API_URL` and `CHIPMUNK_API_KEY`, in place of `ST_API_URL` and `ST_API_KEY`.
-- Deleting a ledger, erasing it or restoring a backup over it first saves a copy of it in `backups/`.
+- Deleting a ledger, erasing it or `pnpm seed:demo --force` first saves a copy of the whole database in `backups/`, every ledger and the sealed bank sign-ins included, in place of a copy of that ledger alone. These copies are never deleted for you, so clear out old ones now and then.
 
 ### Fixed
 
-- Restoring a ledger backup no longer changes the name of a refund you had renamed apart from its purchase.
 - A bank connection whose saved sign-in was made with another `secret.key` now says so, and what to do, in place of "bad decrypt".
 
 ## v0.2.3 (2026-11-10)

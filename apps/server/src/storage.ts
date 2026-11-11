@@ -8,7 +8,7 @@ import type { LlmCategorizer } from './ai/types'
 import { DB_FILE, openDatabase, type SQLite } from './db/client'
 import { ledgers } from './db/schema'
 import { allLedgers, appDatabase, ledgerMaintenance, LedgerQuery, type UnscopedQuery } from './db/scope'
-import { databaseCopy, reclaimSpace, saveLedgerExport } from './db/ledger-backup'
+import { databaseCopy, reclaimSpace, safetyCopy } from './db/maintenance'
 import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
 import { seedCatalog } from './services/catalog'
@@ -199,16 +199,16 @@ export class LedgerRegistry {
   }
 
   /**
-   * Deletes a ledger and all its data, after saving its backup as data/backups/deleted-<slug>-<time>.db
-   * (restorable into a ledger from Settings → Data). Bank accounts linked to its accounts are
-   * unlinked (their foreign key). Then the freed pages go back to the disk.
+   * Deletes a ledger and all its data, after saving a copy of the whole database as
+   * data/backups/pre-delete-<slug>-<time>.db (safetyCopy, not in a dry run). Bank accounts linked
+   * to its accounts are unlinked (their foreign key). Then the freed pages go back to the disk.
    */
   remove(idOrSlug: string): { backup: string | null } {
     const row = this.get(idOrSlug)
     if (this.rows().length === 1) {
       throw new HTTPException(409, { message: "You can't delete your only ledger. Erase its data instead." })
     }
-    const backup = saveLedgerExport(this.sqlite, row.id, `deleted-${row.slug}`)
+    const backup = safetyCopy(this.sqlite, `pre-delete-${row.slug}`)
     ledgerMaintenance(this.sqlite, row.id, () =>
       this.sqlite.transaction(() => {
         deleteLedgerRows(this.sqlite, row.id)

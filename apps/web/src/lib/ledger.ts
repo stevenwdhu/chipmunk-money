@@ -46,7 +46,6 @@ export const lapi = {
   patch: <T>(path: string, body: unknown) => api.patch<T>(ledgerPath(path), body),
   put: <T>(path: string, body: unknown) => api.put<T>(ledgerPath(path), body),
   del: <T = void>(path: string, body?: unknown) => api.del<T>(ledgerPath(path), body),
-  upload: <T>(path: string, file: Blob) => api.upload<T>(ledgerPath(path), file),
 }
 
 /** Query keys that hold one ledger's ids: a custom report's filter, and the report it came from. Another ledger's page opens without them. */

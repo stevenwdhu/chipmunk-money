@@ -82,7 +82,6 @@ import {
   recurringPaymentSchema,
   recurringUpdateSchema,
   reorderSchema,
-  restoreResultSchema,
   setupStatusSchema,
   recategorizeSchema,
   suggestCategorySchema,
@@ -113,7 +112,6 @@ import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import { actorName, requireLedger, type Actor } from '../api/auth'
 import { ApiRouter } from '../api/router'
-import { exportLedger } from '../db/ledger-backup'
 import { aiEnabled } from '../ai/runner'
 import * as accounts from '../services/accounts'
 import { activityActors, diff, listActivity, recordActivity, type ActivityEntry } from '../services/activity'
@@ -1619,48 +1617,13 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       return result
     },
   )
-  r.get(
-    '/backup',
-    {
-      ...data,
-      scope: 'read',
-      summary: 'Download a backup',
-      description: 'This ledger alone, its rows and the category list it uses, as one SQLite file to restore here or into another ledger. Nothing app-wide is in it.',
-      file: { contentType: 'application/vnd.sqlite3', description: 'The ledger’s backup' },
-    },
-    (c) => {
-      // This ledger's rows (and the category list it uses) in a file of their own: no other ledger's, and nothing app-wide.
-      const bytes = exportLedger(storage.sqlite, c.var.ctx.ledger.id)
-      c.header('Content-Type', 'application/vnd.sqlite3')
-      c.header('Content-Disposition', `attachment; filename="chipmunk-${c.var.ctx.ledger.slug}-${today(c.var.ctx)}.db"`)
-      return c.body(new Uint8Array(bytes))
-    },
-  )
-  r.post(
-    '/restore',
-    {
-      ...data,
-      scope: 'admin',
-      summary: 'Restore from a backup',
-      description:
-        'Replaces all of this ledger’s data with the backup file. The current data is saved in data/backups first. A key limited to some ledgers can’t restore a backup that would add categories to the shared list.',
-      upload: { contentType: 'application/octet-stream', description: 'A backup file (.db) from Download backup' },
-      response: restoreResultSchema,
-    },
-    async (c) => {
-      const bytes = new Uint8Array(await c.req.arrayBuffer())
-      const result = setup.restoreBackup(storage, c.var.ctx, bytes, { addCategories: !limitedKey(c) })
-      log(c, { action: 'restore', entity: 'ledger', summary: `Restored from a backup (${result.accounts} accounts, ${result.transactions} transactions)` })
-      return result
-    },
-  )
   r.post(
     '/erase',
     {
       ...data,
       scope: 'admin',
       summary: 'Erase this ledger’s data',
-      description: 'Deletes all accounts, transactions, recurring items and tags, and resets the categories. A copy is saved in data/backups first. Send `{ "confirm": "erase" }`.',
+      description: 'Deletes all accounts, transactions, recurring items and tags, and resets the categories. A copy of the whole database is saved in data/backups first (`pre-erase-<slug>-<time>.db`). Send `{ "confirm": "erase" }`.',
       body: z.object({ confirm: z.literal('erase') }),
       response: backupResultSchema,
     },

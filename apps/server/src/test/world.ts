@@ -131,3 +131,16 @@ export function ledgerRowCounts(sqlite: SQLite, ledger: string): Record<string, 
   }
   return counts
 }
+
+/** Every row of a ledger, table by table (child rows through their parents), in a fixed order. */
+export function ledgerRows(sqlite: SQLite, ledger: string): Record<string, unknown[]> {
+  const out: Record<string, unknown[]> = {}
+  for (const t of TABLES) {
+    if (t.kind === 'app') continue
+    const where =
+      t.kind === 'child' ? t.parents!.map((p) => `"${p.column}" IN (SELECT id FROM "${p.table}" WHERE ledger_id = @ledger)`).join(' OR ') : 'ledger_id = @ledger'
+    const columns = (sqlite.prepare(`PRAGMA table_info("${t.name}")`).all() as Array<{ name: string }>).map((c) => `"${c.name}"`)
+    out[t.name] = sqlite.prepare(`SELECT * FROM "${t.name}" WHERE ${where} ORDER BY ${columns.join(', ')}`).all({ ledger })
+  }
+  return out
+}

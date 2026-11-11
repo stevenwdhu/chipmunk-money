@@ -18,7 +18,7 @@ export const TAGS: Array<{ name: string; description: string }> = [
   { name: 'Import', description: 'Bring in rows from a bank export. Preview first, then commit; every import can be undone.' },
   { name: 'Categorization', description: 'Category suggestions from your history, then AI.' },
   { name: 'Activity', description: 'Every change made through the API, by whom.' },
-  { name: 'Data', description: 'Setup, backups, restore and erase.' },
+  { name: 'Data', description: 'Setup, the full backup, erase and export.' },
   { name: 'Settings', description: 'App-wide settings: time zone and AI providers.' },
   { name: 'API keys', description: 'Keys for scripts and agents.' },
 ]
@@ -135,12 +135,6 @@ export function buildOpenApi(specs: RouteSpec[], opts: { version: string }) {
     }
     if (spec.body) {
       operation.requestBody = { required: true, content: { 'application/json': { schema: schemaOf(spec.body, 'input') } } }
-    } else if (spec.upload) {
-      operation.requestBody = {
-        required: true,
-        description: spec.upload.description,
-        content: { [spec.upload.contentType]: { schema: { type: 'string', format: 'binary' } } },
-      }
     }
     if (spec.method === 'post') {
       operation.parameters = [

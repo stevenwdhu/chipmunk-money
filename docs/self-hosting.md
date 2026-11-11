@@ -64,7 +64,7 @@ pnpm dev         # web on http://localhost:5173, API on http://localhost:8787
 
 On a fresh install the app opens on a welcome screen with three choices:
 - **Start from scratch:** opens the app with the "add account" dialog.
-- **Restore a backup:** upload a `.db` file from Ledger settings → Data → Download backup.
+- **Restore a backup:** shows how to put a full backup back by hand (see [Backups](#backups)).
 - **Explore the demo:** loads 13 months of sample data.
 
 Add more ledgers from the ledger menu → **New ledger**. To clear one, use **Ledger settings → Data → Erase this ledger's data**, which brings its welcome screen back. Default categories are created on first start. To try it with sample data apart from your own, see the demo setup in [CONTRIBUTING.md](../CONTRIBUTING.md).
@@ -84,9 +84,15 @@ To use it from your phone on the same network, open `http://<your-computer's-ip>
 
 Everything is in one SQLite database, `chipmunk.db` in the data directory, with every ledger, the app settings and the bank connections. While the server runs, SQLite also keeps `chipmunk.db-wal` and `chipmunk.db-shm` beside it.
 
-- **Ledger settings → Data → Download backup** gives you that ledger alone: its rows and the category list it uses, in one `.db` file. Nothing app-wide is in it (API keys, bank connections, app settings).
-- **Ledger settings → Data → Restore from backup** (or the welcome screen, or New ledger → From a backup) puts such a file into a ledger, replacing its data. Its activity log stays. Backups from older versions are upgraded first.
-- **App settings → Ledgers → Full backup** is a zip of the whole database (`chipmunk.db`) and a `manifest.json` that says how to restore it. To move machines, stop the server, remove `chipmunk.db-wal` and `chipmunk.db-shm` from the new data directory if they're there, unzip `chipmunk.db` into it, and copy `secret.key` over from the old one. Copying `chipmunk.db` from a running server without its `-wal` file can lose the latest changes, so stop it or use the full backup.
-- Before a migration, the server saves a copy of the whole database in `backups/`. Before a restore, an erase, deleting a ledger or `pnpm seed:demo --force`, it saves that ledger's backup there (`pre-restore-…`, `pre-erase-…`, `deleted-…` and `pre-seed-demo-…`), which restores like any ledger backup. Nothing in `backups/` is ever deleted for you, so clear out old copies now and then.
+- **Full backup (all ledgers)**, in App settings → Ledgers and in Ledger settings → Data, is a zip of the whole database (`chipmunk.db`) and a `manifest.json` that says how to restore it. There's no backup of one ledger: a backup is always every ledger. Copying `chipmunk.db` from a running server without its `-wal` file can lose the latest changes, so stop it or use the full backup.
+- Before a migration, an erase, deleting a ledger or `pnpm seed:demo --force`, the server saves a copy of the whole database in `backups/` (`pre-migrate-…`, `pre-erase-<ledger>-…`, `pre-delete-<ledger>-…` and `pre-seed-demo-<ledger>-…`). Each is a `chipmunk.db` of its own, every ledger and the sealed bank sign-ins included. Nothing in `backups/` is ever deleted for you, so clear out old copies now and then.
+- **Restoring is done by hand,** and puts every ledger back to the copy. **Restore from backup** in Ledger settings → Data, and the welcome screen's **Restore a backup**, show these steps:
+  1. Stop the server.
+  2. In the data directory (where `chipmunk.db` and `secret.key` are), delete `chipmunk.db-wal` and `chipmunk.db-shm` if they're there.
+  3. Replace `chipmunk.db` with the one from the full backup zip, or with a copy from `backups/` renamed to `chipmunk.db`.
+  4. Start the server.
+
+  To move machines, do the same in the new data directory and copy `secret.key` over from the old one.
+- One-ledger `.db` backups from v0.2.3 or earlier can't be read by this version. Restore one with v0.2.3 first, then update that install to this version.
 - Backups don't include `secret.key`, so bank connections, the ChatGPT sign-in and the AI and Plaid keys don't come along. After moving machines, either copy that file over as well, or enter the keys again and reconnect your banks (SimpleFIN with a new setup token, Plaid in its window, Wealthsimple by signing in). If the server finds saved secrets it can't read at startup, it says how many in its log.
 - In Docker, see [Back up the volume](#docker).

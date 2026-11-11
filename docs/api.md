@@ -18,7 +18,7 @@ Create a key for each script or agent in **App settings → API keys**, and send
 |---|---|---|
 | **Read only** | `read` | Look at everything: transactions, accounts, reports, settings. |
 | **Read and write** | `read`, `write` | Also add and change things: transactions, categories, accounts, recurring items, imports, bank syncs. |
-| **Full access** | `read`, `write`, `admin` | Also ledgers, app settings, API keys, the full backup, restore and erase. |
+| **Full access** | `read`, `write`, `admin` | Also ledgers, app settings, API keys, the full backup and erase. |
 
 Each endpoint in the reference below says the scope it needs. A key without it gets 403.
 
@@ -26,7 +26,7 @@ A key can also be limited to some ledgers, and given an expiry. A key limited to
 
 - API keys, app settings, managing bank connections, the full backup, and renaming payees across ledgers.
 - Creating ledgers, which ledger the app opens, the ledgers' order, and deleting or archiving the one the app opens.
-- The shared category list and its labels, and restoring a backup that would add categories to it.
+- The shared category list and its labels.
 - It only sees and links bank accounts that already sync into its ledgers, and only syncs connections that feed nothing but its ledgers.
 
 `GET /me` says who the API thinks you are: the key's name, its scopes, the ids of the ledgers it's limited to (null for every ledger), and `defaultLedger`, the ledger to use when you don't name one. That's the one the app opens, or the key's first ledger when it can't use that one.
@@ -38,7 +38,7 @@ A key can also be limited to some ledgers, and given an expiry. A key limited to
 - **Money** is in minor units (cents) as integers: `-1299` is $12.99 out, `250000` is $2,500 in. Reports give spending as positive numbers.
 - **Dates** are `YYYY-MM-DD`, in the app's time zone (App settings → General).
 - **Lists** that can be long are paged. Pass `limit` (up to 500 for transactions) and, for the next page, the previous page's `nextCursor` as `cursor`. `nextCursor` is null on the last page.
-- **Request size:** a JSON request can be up to 1 MB. Restores, imports and `/mcp` can be up to 200 MB.
+- **Request size:** a JSON request can be up to 1 MB. Imports and `/mcp` can be up to 200 MB.
 
 ### Errors
 
@@ -342,7 +342,7 @@ Every change made through the API, by whom.
 
 ### Data
 
-Setup, backups, restore and erase.
+Setup, the full backup, erase and export.
 
 | Method | Path | What it does | Scope |
 |---|---|---|---|
@@ -350,8 +350,6 @@ Setup, backups, restore and erase.
 | GET | `/ledgers/{ledger}/setup` | Get setup status. | read |
 | POST | `/ledgers/{ledger}/setup/start` | Start from scratch. | write |
 | POST | `/ledgers/{ledger}/setup/demo` | Load the demo data. | write |
-| GET | `/ledgers/{ledger}/backup` | Download a backup. | read |
-| POST | `/ledgers/{ledger}/restore` | Restore from a backup. | admin |
 | POST | `/ledgers/{ledger}/erase` | Erase this ledger’s data. | admin |
 | GET | `/ledgers/{ledger}/export/transactions.csv` | Export transactions as CSV. | read |
 

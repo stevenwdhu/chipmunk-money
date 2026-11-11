@@ -40,8 +40,8 @@ async function remove() {
       <DialogHeader>
         <DialogTitle>Delete {{ ledger?.name }}?</DialogTitle>
         <DialogDescription>
-          This removes the ledger with its {{ ledger?.accounts ?? 0 }} accounts and {{ ledger?.transactions ?? 0 }} transactions. A copy
-          is saved in <code class="text-xs">data/backups</code> first. To keep it out of the way without deleting, archive it instead.
+          This removes the ledger with its {{ ledger?.accounts ?? 0 }} accounts and {{ ledger?.transactions ?? 0 }} transactions. A copy of
+          the whole database is saved in <code class="text-xs">data/backups</code> first. To keep it out of the way without deleting, archive it instead.
         </DialogDescription>
       </DialogHeader>
       <form class="grid gap-1.5" @submit.prevent="typed === ledger?.name && remove()">

@@ -11,7 +11,6 @@ import {
   listSnapshots,
   saveImportMapping,
   setBalance,
-  unlinkBankAccounts,
   updateAccount,
 } from './accounts'
 
@@ -130,34 +129,5 @@ describe('accounts in one database', () => {
     expect(count(personal, 'SELECT count(*) FROM transactions WHERE ledger_id = @ledger')).toBe(0)
     expect(count(family, 'SELECT count(*) FROM transactions WHERE ledger_id = @ledger')).toBe(1)
     expect(getAccount(family, f)).toMatchObject({ balanceMinor: 5, transactionCount: 1 })
-  })
-
-  it('unlinks only its own ledger’s bank accounts', () => {
-    const { storage, personal, family } = twoLedgers()
-    const p = makeAccount(personal)
-    const p2 = makeAccount(personal, 'Card', 'credit')
-    const f = makeAccount(family)
-    storage.sqlite.prepare(`INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c1', 'simplefin', 'Bank', 'x')`).run()
-    const link = storage.sqlite.prepare(`INSERT INTO bank_accounts (id, connection_id, remote_id, name, currency, account_id) VALUES (?, 'c1', ?, 'Chequing', 'CAD', ?)`)
-    link.run('bp', 'rp', p)
-    link.run('bp2', 'rp2', p2)
-    link.run('bf', 'rf', f)
-    const links = () => storage.sqlite.prepare('SELECT id, account_id AS account FROM bank_accounts ORDER BY id').all()
-
-    unlinkBankAccounts(personal, f)
-    unlinkBankAccounts(personal, p2)
-    expect(links()).toEqual([
-      { id: 'bf', account: f },
-      { id: 'bp', account: p },
-      { id: 'bp2', account: null },
-    ])
-    unlinkBankAccounts(personal)
-    expect(links()).toEqual([
-      { id: 'bf', account: f },
-      { id: 'bp', account: null },
-      { id: 'bp2', account: null },
-    ])
-    expect(listAccounts(family)[0]!.bank).toMatchObject({ bankAccountId: 'bf' })
-    expect(listAccounts(personal).map((a) => a.bank)).toEqual([null, null])
   })
 })

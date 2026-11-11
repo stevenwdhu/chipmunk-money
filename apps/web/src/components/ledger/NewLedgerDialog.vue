@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { ArchiveRestore, FlaskConical, Loader2, Plus } from '@lucide/vue'
+import { FlaskConical, Loader2, Plus } from '@lucide/vue'
 import { unusedColor } from '@chipmunk/shared'
 import ColorPicker from '@/components/ColorPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
@@ -19,12 +19,11 @@ const router = useRouter()
 const { all } = useLedgers()
 const m = useLedgerMutations()
 
-type Start = 'empty' | 'demo' | 'restore'
+type Start = 'empty' | 'demo'
 const name = ref('')
 const color = ref(unusedColor([]))
 const customColors = useCustomColors()
 const start = ref<Start>('empty')
-const file = ref<File | null>(null)
 const error = ref('')
 const busy = ref(false)
 
@@ -34,36 +33,25 @@ watch(open, (v) => {
   // A colour no other ledger uses yet, when there is one.
   color.value = unusedColor(all.value.map((l) => l.color))
   start.value = 'empty'
-  file.value = null
   error.value = ''
 })
 
 const starts: Array<{ value: Start; label: string; hint: string; icon: typeof Plus }> = [
   { value: 'empty', label: 'Start empty', hint: 'Add accounts and transactions yourself.', icon: Plus },
-  { value: 'restore', label: 'From a backup', hint: 'Fill it from a .db backup file.', icon: ArchiveRestore },
   { value: 'demo', label: 'Demo data', hint: '13 months of sample spending to explore.', icon: FlaskConical },
 ]
 
 async function create() {
   if (!name.value.trim()) return (error.value = 'Give the ledger a name, like “Family”')
-  if (start.value === 'restore' && !file.value) return (error.value = 'Choose the backup file to restore')
   busy.value = true
   error.value = ''
   try {
     const ledger = await m.create.mutateAsync({
       name: name.value.trim(),
       color: color.value,
-      start: start.value === 'restore' ? undefined : start.value,
+      start: start.value,
     })
     customColors.remember(color.value)
-    if (start.value === 'restore' && file.value) {
-      try {
-        await m.restoreInto.mutateAsync({ slug: ledger.slug, file: file.value })
-      } catch (err) {
-        // Keep the ledger; its welcome screen offers the restore again.
-        toast.error(`Created ${ledger.name}, but the backup couldn't be restored: ${errorMessage(err)}`)
-      }
-    }
     open.value = false
     toast.success(`Created ${ledger.name}`)
     router.push({ name: start.value === 'empty' ? 'accounts' : 'overview', params: { ledger: ledger.slug }, query: start.value === 'empty' ? { new: '1' } : undefined })
@@ -93,7 +81,7 @@ async function create() {
         </div>
         <div class="grid gap-1.5">
           <FieldLabel>Start with</FieldLabel>
-          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Start with">
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Start with">
             <button
               v-for="s in starts"
               :key="s.value"
@@ -113,15 +101,6 @@ async function create() {
               <span class="text-xs text-muted-foreground">{{ s.hint }}</span>
             </button>
           </div>
-        </div>
-        <div v-if="start === 'restore'" class="grid gap-1.5">
-          <FieldLabel html-for="ledger-file" hint="A .db file from Ledger settings → Data → Download backup.">Backup file</FieldLabel>
-          <Input
-            id="ledger-file"
-            type="file"
-            accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3"
-            @change="(e: Event) => (file = (e.target as HTMLInputElement).files?.[0] ?? null)"
-          />
         </div>
         <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
         <DialogFooter>

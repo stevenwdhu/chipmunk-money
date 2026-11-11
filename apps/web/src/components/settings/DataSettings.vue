@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { ArchiveRestore, FileArchive, FileInput, FileOutput, Loader2, Trash2 } from '@lucide/vue'
+import { ArchiveRestore, FileInput, FileOutput, FolderArchive, Loader2, Trash2 } from '@lucide/vue'
+import RestoreBackupDialog from '@/components/RestoreBackupDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -12,34 +13,10 @@ import { useLedgers, useSetupMutations } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { ledgerApiHref } from '@/lib/ledger'
 
-const router = useRouter()
 const m = useSetupMutations()
 const { current } = useLedgers()
 
 const restoreOpen = ref(false)
-const restoreFile = ref<File | null>(null)
-const restoreError = ref('')
-watch(restoreOpen, (v) => {
-  if (v) {
-    restoreFile.value = null
-    restoreError.value = ''
-  }
-})
-function pick(e: Event) {
-  restoreFile.value = (e.target as HTMLInputElement).files?.[0] ?? null
-  restoreError.value = ''
-}
-async function restore() {
-  if (!restoreFile.value) return
-  try {
-    const { accounts, transactions } = await m.restore.mutateAsync(restoreFile.value)
-    restoreOpen.value = false
-    toast.success(`Restored ${accounts} account${accounts === 1 ? '' : 's'} and ${transactions} transaction${transactions === 1 ? '' : 's'}`)
-    router.push({ name: 'overview' })
-  } catch (err) {
-    restoreError.value = errorMessage(err)
-  }
-}
 
 const eraseOpen = ref(false)
 const eraseWord = ref('')
@@ -71,13 +48,13 @@ async function erase() {
       <CardHeader>
         <CardTitle>Backup and restore</CardTitle>
         <CardDescription>
-          A backup is a complete copy of {{ current?.name ?? 'this ledger' }} in a single file. Keep it somewhere safe. The server also
-          saves a copy in <code class="text-xs">data/backups</code> before every database upgrade, restore or erase. To back up every
-          ledger at once, use App settings → Ledgers → Full backup.
+          A backup covers the whole app: every ledger and the app settings in one zip. Keep it somewhere safe, with a copy of
+          <code class="text-xs">secret.key</code>, which isn't in it. The server also saves a copy of the whole database in
+          <code class="text-xs">data/backups</code> before every upgrade, erase or ledger deletion.
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-2">
-        <Button as-child variant="outline"><a :href="ledgerApiHref('/backup')" download><FileArchive />Download backup</a></Button>
+        <Button as-child variant="outline"><a href="/api/v1/backup/full" download><FolderArchive />Full backup (all ledgers)</a></Button>
         <Button variant="outline" @click="restoreOpen = true"><ArchiveRestore />Restore from backup</Button>
       </CardContent>
     </Card>
@@ -105,35 +82,14 @@ async function erase() {
       </CardContent>
     </Card>
 
-    <Dialog v-model:open="restoreOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Restore from a backup</DialogTitle>
-          <DialogDescription>
-            Everything in {{ current?.name ?? 'this ledger' }} is replaced by the backup. Other ledgers aren't touched. A copy of your current data is saved in
-            <code class="text-xs">data/backups</code> first.
-          </DialogDescription>
-        </DialogHeader>
-        <div class="grid gap-1.5">
-          <Label for="restore-file">Backup file</Label>
-          <Input id="restore-file" type="file" accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3" @change="pick" />
-        </div>
-        <p v-if="restoreError" class="text-sm text-destructive">{{ restoreError }}</p>
-        <DialogFooter>
-          <Button variant="outline" @click="restoreOpen = false">Cancel</Button>
-          <Button :disabled="!restoreFile || m.restore.isPending.value" @click="restore">
-            <Loader2 v-if="m.restore.isPending.value" class="animate-spin" />Replace my data
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <RestoreBackupDialog v-model:open="restoreOpen" />
 
     <Dialog v-model:open="eraseOpen">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Erase {{ current?.name ?? 'this ledger' }}'s data?</DialogTitle>
           <DialogDescription>
-            This deletes all of this ledger's accounts, transactions, recurring items and tags. A copy is saved in
+            This deletes all of this ledger's accounts, transactions, recurring items and tags. A copy of the whole database is saved in
             <code class="text-xs">data/backups</code> first. Afterwards you'll see the welcome screen again.
           </DialogDescription>
         </DialogHeader>

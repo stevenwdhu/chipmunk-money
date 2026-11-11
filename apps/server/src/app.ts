@@ -27,9 +27,9 @@ export const API_VERSION = '1.0.0'
 const MB = 1024 * 1024
 /** The most a JSON request may send. */
 const JSON_LIMIT = 1 * MB
-/** The most a restore, an import or an MCP call (which can import) may send: backups get large. */
+/** The most an import or an MCP call (which can import) may send: bank exports get large. */
 export const UPLOAD_LIMIT = 200 * MB
-const UPLOAD_ROUTES = /^\/api\/v1\/ledgers\/[^/]+\/(restore|import\/(preview|commit))$/
+const UPLOAD_ROUTES = /^\/api\/v1\/ledgers\/[^/]+\/import\/(preview|commit)$/
 
 const limitTo = (maxSize: number) =>
   bodyLimit({ maxSize, onError: (c) => errorResponse(c, 413, `That request is too big. The most it can send is ${maxSize / MB} MB.`) })

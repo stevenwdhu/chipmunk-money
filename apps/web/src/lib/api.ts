@@ -28,17 +28,13 @@ function withQuery(path: string, query?: Query) {
   return qs ? `${path}?${qs}` : path
 }
 
-async function request<T>(method: string, path: string, body?: unknown, query?: Query, file?: Blob): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, query?: Query): Promise<T> {
   let res: Response
   try {
     res = await fetch(`/api/v1${withQuery(path, query)}`, {
       method,
-      headers: file
-        ? { 'content-type': 'application/octet-stream' }
-        : body === undefined
-          ? undefined
-          : { 'content-type': 'application/json' },
-      body: file ?? (body === undefined ? undefined : JSON.stringify(body)),
+      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
     throw new ApiError("Can't reach the server. Check your connection and try again.", 0)
@@ -59,8 +55,6 @@ export const api = {
   patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
   put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
   del: <T = void>(path: string, body?: unknown) => request<T>('DELETE', path, body),
-  /** Sends a file as the raw request body. */
-  upload: <T>(path: string, file: Blob) => request<T>('POST', path, undefined, undefined, file),
 }
 
 export function errorMessage(err: unknown): string {

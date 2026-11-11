@@ -159,8 +159,9 @@ function keepPrivate(file: string) {
 
 /**
  * Writes a consistent copy of the whole database to `data/backups/<label>-<time>.db` (readable by
- * you only) and returns its path. Skipped (null) for in-memory databases. Only for migrations:
- * a copy of one ledger is a ledger export.
+ * you only) and returns its path. Skipped (null) for in-memory databases. Before migrations, and
+ * the safety copy before deleting, erasing or seeding a ledger (safetyCopy in maintenance.ts).
+ * VACUUM INTO can't run inside a transaction.
  */
 export function snapshotDb(sqlite: Database.Database, label: string): string | null {
   if (sqlite.memory) return null

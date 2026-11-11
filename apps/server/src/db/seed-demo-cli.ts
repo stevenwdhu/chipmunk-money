@@ -2,13 +2,13 @@
  * Loads the demo data from the command line. Kept apart from seed-demo.ts so importing that (the
  * welcome screen does) never runs this, bundled or not.
  *   pnpm seed:demo                     # into the default ledger; refuses if it already has data
- *   pnpm seed:demo --force             # saves that ledger to data/backups, then clears its data (not its settings, activity or categories)
+ *   pnpm seed:demo --force             # saves a copy of the whole database to data/backups, then clears that ledger's data (not its settings, activity or categories)
  *   pnpm seed:demo --ledger family     # into another ledger (by slug or id)
  */
 import { env } from '../env'
 import { setLedgerSetting } from '../services/settings'
 import { openStorage } from '../storage'
-import { clearLedger, saveLedgerExport } from './ledger-backup'
+import { clearLedger, safetyCopy } from './maintenance'
 import { loadDemo } from './seed-demo'
 
 /** What --force keeps: the ledger's settings, its activity log, and the categories it uses (its own list, or what it turned off on the shared one). */
@@ -28,8 +28,8 @@ function main() {
       )!
       if (n) {
         // The same safety net the app keeps before erasing a ledger.
-        const backup = saveLedgerExport(storage.sqlite, ledger.id, `pre-seed-demo-${ledger.slug}`)
-        if (backup) console.log(`Saved the “${ledger.name}” ledger as it was to ${backup}`)
+        const backup = safetyCopy(storage.sqlite, `pre-seed-demo-${ledger.slug}`)
+        if (backup) console.log(`Saved the database as it was to ${backup}`)
         clearLedger(storage.sqlite, ledger.id, KEPT)
       }
     }

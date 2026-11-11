@@ -890,11 +890,8 @@ export type SetupStatus = z.output<typeof setupStatusSchema>
 export const demoResultSchema = z.object({ transactions: z.number().int(), recurringSuggestions: z.number().int() })
 export type DemoResult = z.output<typeof demoResultSchema>
 
-export const restoreResultSchema = z.object({ accounts: z.number().int(), transactions: z.number().int() })
-export type RestoreResult = z.output<typeof restoreResultSchema>
-
 export const backupResultSchema = z.object({
-  backup: z.string().nullable().describe('File name of the safety copy saved in data/backups.'),
+  backup: z.string().nullable().describe('File name of the safety copy saved in data/backups: a copy of the whole database. Null when no copy was made.'),
 })
 export type BackupResult = z.output<typeof backupResultSchema>
 
