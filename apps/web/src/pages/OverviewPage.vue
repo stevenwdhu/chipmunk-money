@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { ArrowDownRight, ArrowUpRight, CalendarClock, FileInput, Plus, Sparkles, Wallet } from '@lucide/vue'
@@ -29,12 +29,50 @@ const range = computed(() => monthRange(month.value))
 
 const accounts = useAccounts()
 const summary = useSummary(month)
-const recent = useTransactions(() => ({ from: range.value.from, to: range.value.to }), 8)
+// The latest transactions: at least MIN_ROWS, and on a wide screen as many as fit beside the cards on
+// the right (the grid makes the card as tall as they are).
+const MIN_ROWS = 8
+const recent = useTransactions(() => ({ from: range.value.from, to: range.value.to }), 30)
 const upcoming = useUpcoming(14)
 const m = useTransactionMutations()
 
 const s = computed(() => summary.data.value)
 const recentItems = computed(() => recent.data.value?.pages[0]?.items ?? [])
+
+// The list is laid out whole, off the flow, and cut after the last row that fits: the card's own height
+// comes from its first MIN_ROWS rows, so it never grows to fit more. Rows cut off can't be tabbed to.
+// (One list, not two, so every row's columns line up.)
+const listBox = ref<HTMLElement | null>(null)
+const listEl = ref<HTMLElement | null>(null)
+const fit = reactive({ min: 0, bottom: 0 })
+function measure() {
+  const box = listBox.value
+  const list = listEl.value
+  if (!box || !list) return
+  const top = list.getBoundingClientRect().top
+  const rows = [...list.querySelectorAll<HTMLElement>('[data-tx-id]')]
+  const bottoms = rows.map((r) => r.getBoundingClientRect().bottom - top)
+  const least = Math.min(MIN_ROWS, bottoms.length)
+  fit.min = least ? bottoms[least - 1]! : 0
+  const room = Math.max(box.clientHeight, fit.min)
+  const fits = bottoms.findIndex((b) => b > room + 0.5)
+  const shown = Math.max(least, fits < 0 ? bottoms.length : fits)
+  fit.bottom = shown ? bottoms[shown - 1]! : 0
+  rows.forEach((r, i) => (r.inert = i >= shown))
+}
+// Again when the card's height changes (the cards beside it), and when the rows do (data, width).
+watch(
+  [listBox, listEl],
+  ([box, list], _, onCleanup) => {
+    if (!box || !list?.firstElementChild) return
+    const observer = new ResizeObserver(() => measure())
+    observer.observe(box)
+    observer.observe(list.firstElementChild)
+    onCleanup(() => observer.disconnect())
+  },
+  { flush: 'post' },
+)
+watch(recentItems, () => nextTick(measure))
 const netWorth = computed(() => accounts.active.value.reduce((n, a) => n + a.balanceMinor, 0))
 const hasAccounts = computed(() => (accounts.data.value?.length ?? 0) > 0)
 
@@ -162,7 +200,11 @@ function showCategory(c: CategoryAmount) {
               </Button>
             </CardAction>
           </CardHeader>
-          <TransactionList v-if="recentItems.length" class="border-t" :items="recentItems" :today="today" show-account @open="openTx" @accept="accept" />
+          <div v-if="recentItems.length" ref="listBox" class="relative flex-1 border-t" :style="{ minHeight: `${fit.min}px` }">
+            <div ref="listEl" class="absolute inset-x-0 top-0 overflow-hidden" :style="{ maxHeight: `${fit.bottom}px` }">
+              <TransactionList :items="recentItems" :today="today" show-account @open="openTx" @accept="accept" />
+            </div>
+          </div>
           <div v-else-if="recent.isSuccess.value" class="border-t">
             <EmptyState title="Nothing this month yet" description="Add a transaction with the + button, or import a CSV from your bank.">
               <Button size="sm" @click="ui.openAdd()"><Plus />Add transaction</Button>
