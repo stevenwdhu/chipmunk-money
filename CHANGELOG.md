@@ -4,11 +4,23 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 
 ## Unreleased
 
+### Breaking
+
+- **Every ledger is now in one database, `chipmunk.db`,** in place of `meta.db` and a file per ledger in `ledgers/`. A data folder from v0.2.3 isn't read by this version: it has to be converted once, with the app stopped. Keep `secret.key` next to `chipmunk.db`.
+- **A ledger's "Download backup" file is in the new format,** and only files from this version restore. The full backup is now `chipmunk.db` itself.
+
 ### Changed
 
 - **Spending Tracker is now Chipmunk**, and the project is Chipmunk Money: the repo is `stevenwdhu/chipmunk-money` and the image `ghcr.io/stevenwdhu/chipmunk-money`. Set the new image in your compose file to get this release.
+- A new icon: a C of a chipmunk's stripes around an acorn.
+- The shared category list is stored once for every ledger, not copied into each one.
 - New API keys start with `cm_`. Keys made before keep working.
 - The stdio MCP server reads `CHIPMUNK_API_URL` and `CHIPMUNK_API_KEY`, in place of `ST_API_URL` and `ST_API_KEY`.
+- Deleting a ledger, erasing it or restoring a backup over it first saves a copy of it in `backups/`.
+
+### Fixed
+
+- Restoring a ledger backup no longer changes the name of a refund you had renamed apart from its purchase.
 
 ## v0.2.3 (2026-11-10)
 
