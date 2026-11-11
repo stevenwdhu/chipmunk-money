@@ -8,7 +8,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 
 - **Every ledger is now in one database, `chipmunk.db`,** in place of `meta.db` and a file per ledger in `ledgers/`. A data folder from v0.2.3 isn't read by this version: it has to be converted once, with the app stopped. Keep `secret.key` next to `chipmunk.db`.
 - **One-ledger backup and restore are removed.** The only backup is the full backup, a zip of `chipmunk.db` with every ledger, in App settings → Ledgers and Ledger settings → Data. Restoring it is done by hand, and the Restore button shows the steps (also in [docs/self-hosting.md](docs/self-hosting.md#backups)).
-- One-ledger backup files from v0.2.3 or earlier can't be restored by this version. Restore one with v0.2.3 first, then update.
+- One-ledger backup files from v0.2.3 or earlier can't be restored by this version. Restore one with v0.2.3 first, then update. The same goes for the `deleted-…` and `pre-restore-…` files in `backups/`, and any other copy there made before updating: each holds one ledger, so it can't be put in place of `chipmunk.db`. The `pre-migrate-…` copies, and the `pre-delete-…`, `pre-erase-…` and `pre-seed-demo-…` copies made by this version or later, are whole databases.
 - **Undo of a CSV import is removed,** in the app and the API (`DELETE /import/batches/{id}`). To take an import back, select its transactions and delete them. Recent imports stays as a list of what was imported and when, without the count of rows still there (`remaining`).
 
 ### Changed

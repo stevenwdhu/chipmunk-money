@@ -26,8 +26,15 @@ const open = defineModel<boolean>('open', { default: false })
           <code class="text-xs">chipmunk.db-wal</code> and <code class="text-xs">chipmunk.db-shm</code> if they are there.
         </li>
         <li>
-          Replace <code class="text-xs">chipmunk.db</code> with the one from the full backup zip, or with a copy from the
-          <code class="text-xs">backups</code> folder renamed to <code class="text-xs">chipmunk.db</code>.
+          Replace <code class="text-xs">chipmunk.db</code> with the one from the full backup zip, or with a whole-database copy from
+          the <code class="text-xs">backups</code> folder renamed to <code class="text-xs">chipmunk.db</code>.
+          <p class="mt-1 text-muted-foreground">
+            Whole-database copies are the <code class="text-xs">pre-migrate-…</code> files, and the
+            <code class="text-xs">pre-delete-…</code>, <code class="text-xs">pre-erase-…</code> and
+            <code class="text-xs">pre-seed-demo-…</code> files made by v0.3.0 or later. Files named
+            <code class="text-xs">deleted-…</code> or <code class="text-xs">pre-restore-…</code>, and any copy made before updating to
+            v0.3.0, hold one ledger and can't be used this way.
+          </p>
         </li>
         <li>Start Chipmunk.</li>
       </ol>

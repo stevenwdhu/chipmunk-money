@@ -22,7 +22,7 @@ import { getAppSetting, sealStoredSecrets, setAppSetting, today } from './servic
  * backups/ for the safety copies). Ledgers are rows in `ledgers`, and their data is in the same
  * tables as every other ledger's, so a ledger's context is cheap: its handle (ctx.q) is pinned to
  * its rows, and ctx.app reaches the app-wide tables. Deleting a ledger deletes its rows
- * (deleteLedgerRows), after saving its backup.
+ * (deleteLedgerRows), after saving a copy of the whole database.
  */
 
 type LedgerRow = typeof ledgers.$inferSelect
