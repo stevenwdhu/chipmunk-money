@@ -7,7 +7,7 @@ import { createAccount, setBalance } from '../services/accounts'
 import { historySuggestion } from '../services/categorize'
 import type { AppContext } from '../services/context'
 import { createCustomReport } from '../services/custom-reports'
-import { addPayment, confirmRecurring, createRecurring, detectRecurring, dismissRecurring, listRecurring } from '../services/recurring'
+import { addPayment, confirmRecurring, createRecurring, detectRecurring, listRecurring } from '../services/recurring'
 import { today } from '../services/settings'
 import { insertTransaction } from '../services/transactions'
 
@@ -227,8 +227,6 @@ export function loadDemo(ctx: AppContext, opts: { force?: boolean } = {}) {
   // Confirm the obvious ones; leave the rest as suggestions to review in the app.
   for (const item of listRecurring(ctx, 'suggested')) {
     if (/rent|netflix|spotify|rogers|payroll|fido|goodlife|hydro|cashback/i.test(item.payee)) confirmRecurring(ctx, item.id)
-    // The scan takes a coffee you buy most weekdays for a schedule: dismissed, as you would.
-    else if (/tim hortons|starbucks|balzacs/i.test(item.payee)) dismissRecurring(ctx, item.id)
   }
   // Mark the newest Uber Eats charge as an AI-style suggestion to show the review flow.
   ctx.sqlite

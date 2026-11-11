@@ -172,6 +172,16 @@ describe('recurring detection', () => {
     expect(listRecurring(ctx, 'suggested').map((i) => i.expectedAmountMinor)).toEqual([-4515])
   })
 
+  it('doesn’t take a coffee you buy at one price on a couple of weekdays a week for a schedule', async () => {
+    const ctx = testContext()
+    // Two visits a week for 12 weeks, on whichever days: Mon and Wed, then Tue and Fri, Wed and Thu, Mon and Fri.
+    const days = [[0, 2], [1, 4], [2, 3], [0, 4]]
+    const dates: string[] = []
+    for (let w = 0; w < 12; w++) for (const d of days[w % 4]!) dates.push(addDays('2026-07-06', w * 7 + d))
+    await pay(ctx, 'STARBUCKS 04527', -625, dates)
+    expect(detectRecurring(ctx).created).toBe(0)
+  })
+
   it('needs 3 in a row for a weekly schedule', async () => {
     const ctx = testContext()
     // Groceries at the same price on 4 of the last 7 Saturdays, no more than 2 in a row.

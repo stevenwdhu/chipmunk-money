@@ -1178,6 +1178,37 @@ export function detectRecurring(ctx: AppContext): { created: number } {
           (t) => !used.has(t.id) && !series.includes(t) && !t.recurringItemId && !known(t) && amountWithin(t.amount, anchor.amount, pct),
         ).length >= series.length
       /**
+       * Payments of this amount that a schedule can't account for. A coffee bought on most weekdays lands
+       * in a weekly or semi-monthly schedule's windows often enough to make one, but anywhere in them, and
+       * on other days as often. A bill lands on its date, and there are no others. So: over the due dates
+       * looked back at, more payments of this amount besides the schedule's than a quarter of its own. Or,
+       * for a schedule this short, its payments on average more than 0.4 of a day from their dates (one day
+       * off in three is fine, every other one isn't), or a day for semi-monthly, whose dates are approximate. One due on a weekend and paid the Friday before or the
+       * Monday after is on its date.
+       */
+      const scattered = (cadence: Cadence, series: DetectRow[]) => {
+        const spread = monthsPer[cadence] ? Math.max(days, cadenceInfo(cadence).tolerance) : days
+        const windows: Array<ReturnType<typeof lookback>> = []
+        // The anchor's own window, then each due date's before it (semi-monthly's lookback starts at the other payday).
+        for (let k = 0; k <= LOOKBACK; k++) {
+          const w = lookback(anchor.date, k === 0 && cadence === 'semimonthly' ? 'monthly' : cadence, k, spread)
+          if (w.to < first) break
+          windows.push(w)
+        }
+        const from = windows.reduce((d, w) => (w.from < d ? w.from : d), anchor.date)
+        // All of them, also ones another suggestion took (it's how often you pay this), but not another item's.
+        const others = within(from, anchor.date).filter((t) => !series.includes(t) && !t.recurringItemId && amountWithin(t.amount, anchor.amount, pct))
+        if (others.length > series.length / 4) return true
+        const limit = cadence === 'weekly' || cadence === 'biweekly' ? 0.4 : cadence === 'semimonthly' ? 1 : null
+        if (limit === null) return false
+        const onDate = (due: ISODate, date: ISODate) => {
+          const dates = weekday(due) === 6 ? [due, addDays(due, -1), addDays(due, 2)] : weekday(due) === 0 ? [due, addDays(due, -2), addDays(due, 1)] : [due]
+          return Math.min(...dates.map((d) => Math.abs(daysBetween(d, date))))
+        }
+        const offs = series.filter((t) => t !== anchor).map((t) => Math.min(...windows.flatMap((w) => w.expected.map((e) => onDate(e, t.date)))))
+        return offs.length > 0 && offs.reduce((a, b) => a + b, 0) / offs.length > limit
+      }
+      /**
        * `finished`: a plan that's been paid off, which ends at `last` (its final payment, which may be a
        * little different) and is suggested at its usual amount.
        */
@@ -1285,7 +1316,7 @@ export function detectRecurring(ctx: AppContext): { created: number } {
         const enough = found.run >= 3 || (cadence !== 'weekly' && found.hits.length >= 4)
         // Semi-monthly needs its other payday (an odd number of half months back).
         if (!enough || (cadence === 'semimonthly' && !found.hits.some((h) => h.k % 2 === 1))) continue
-        if (frequent(found.hits.map((h) => h.t))) continue
+        if (frequent(found.hits.map((h) => h.t)) || scattered(cadence, found.hits.map((h) => h.t))) continue
         if (!best || found.coverage > best.coverage) best = { ...found, cadence }
       }
       if (best) {
