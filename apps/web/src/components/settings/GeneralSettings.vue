@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { toast } from 'vue-sonner'
-import { Monitor, Moon, Sun } from '@lucide/vue'
+import { ExternalLink, Monitor, Moon, Sun } from '@lucide/vue'
 import { formatDateLong, type Settings } from '@st/shared'
 import FieldLabel from '@/components/FieldLabel.vue'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -42,6 +43,11 @@ async function setDetection(patch: Partial<Settings['recurringDetection']>) {
     toast.error(errorMessage(err))
   }
 }
+
+// This copy's version. Run with `pnpm dev`, it's the code since that release, not the release itself.
+const version = __APP_VERSION__
+const dev = import.meta.env.DEV
+const releaseUrl = `https://github.com/stevenwdhu/spending-tracker/releases/tag/v${version}`
 
 const themes = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -139,6 +145,23 @@ const themes = [
         <CardTitle>Currency</CardTitle>
         <CardDescription>All amounts are in Canadian dollars (CAD). Support for other currencies is planned.</CardDescription>
       </CardHeader>
+    </Card>
+
+    <Card class="gap-2">
+      <CardHeader>
+        <CardTitle>About</CardTitle>
+        <CardDescription>
+          Spending Tracker <span class="tabular font-medium text-foreground">{{ version }}</span><template v-if="dev">, in development</template>
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-wrap gap-2">
+        <Button as-child variant="outline" size="sm">
+          <a :href="releaseUrl" target="_blank" rel="noopener"><ExternalLink />What’s new in {{ version }}</a>
+        </Button>
+        <Button as-child variant="outline" size="sm">
+          <a href="https://github.com/stevenwdhu/spending-tracker/releases" target="_blank" rel="noopener"><ExternalLink />All releases</a>
+        </Button>
+      </CardContent>
     </Card>
   </div>
 </template>

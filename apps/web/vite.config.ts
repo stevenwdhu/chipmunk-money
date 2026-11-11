@@ -18,7 +18,11 @@ compiler.registerTS(() => require('typescript'))
 const rootEnv = fileURLToPath(new URL('../../.env', import.meta.url))
 const apiPort = process.env.API_PORT ?? (existsSync(rootEnv) ? parseEnv(readFileSync(rootEnv, 'utf8')).API_PORT : undefined) ?? 8787
 
+// The release's version, from the root package.json, shown in App settings.
+const appVersion: string = JSON.parse(readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8')).version
+
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(appVersion) },
   plugins: [
     vue({ compiler }),
     tailwindcss(),
