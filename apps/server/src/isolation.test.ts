@@ -504,7 +504,8 @@ describe('the isolation test’s cases', () => {
 })
 
 for (const world of WORLDS) {
-  describe(`Two ledgers ${world.name}`, () => {
+  // Each case walks every route. That is about 2s here and over the default 5s on a CI runner.
+  describe(`Two ledgers ${world.name}`, { timeout: 30_000 }, () => {
     for (const direction of DIRECTIONS) {
       it(`${direction.name}, answer reads the same with the other ledger's rows gone, never with its canary`, async () => {
         const t = twins({ own: world.own })
