@@ -144,7 +144,7 @@ function showCategory(c: CategoryAmount) {
           <span class="text-muted-foreground"> Set one, and choose whether its payee is always set that way.</span>
         </div>
         <Button size="sm" variant="outline" as-child>
-          <RouterLink :to="{ name: 'transactions', query: { needsReview: '1' } }">Review</RouterLink>
+          <RouterLink :to="{ name: 'transactions', query: { needsReview: '1', period: 'all' } }">Review</RouterLink>
         </Button>
       </div>
 
