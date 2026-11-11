@@ -2,6 +2,7 @@ import type { DB } from '../db/client'
 import type { LedgerQuery } from '../db/scope'
 import type { LlmCategorizer } from '../ai/types'
 import type { SecretBox } from '../lib/secrets'
+import type { AccountWide } from './account-rows'
 
 /** What the whole app shares: app settings, API keys, bank connections, payee names. */
 export interface AppStore {
@@ -25,8 +26,20 @@ export interface AppContext {
   /** The same object as `app`, under its older name. */
   meta: AppStore
   ledger: { id: string; name: string; slug: string }
+  /**
+   * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
+   * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, never
+   * another ledger's rows.
+   */
+  accountWide: AccountWide
   /** Injectable clock for tests. */
   now: () => Date
   /** Injectable LLM runner for tests; defaults to the configured providers. */
   llm?: LlmCategorizer
 }
+
+/**
+ * Another ledger's context, by its id: for a service that writes in each ledger a shared account is
+ * in, through that ledger's own handle. Passed to the services that need it, never kept on a context.
+ */
+export type CtxOf = (ledgerId: string) => AppContext

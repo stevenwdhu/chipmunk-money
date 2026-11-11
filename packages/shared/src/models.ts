@@ -54,6 +54,18 @@ export const accountBankSchema = z
   })
   .describe('Where this account syncs from, if it’s linked to a bank.')
 
+const ledgerRef = z.object({ slug: z.string(), name: z.string() })
+
+export const accountSharingBlockSchema = z
+  .object({
+    home: ledgerRef.describe('The ledger new transactions from sync and CSV go to, and where the account’s settings are changed.'),
+    isHome: z.boolean().describe('Whether this ledger is the home.'),
+    opening: ledgerRef.describe('The ledger whose balance on the account carries its opening balance and recorded balances.'),
+    ledgers: z.array(ledgerRef).describe('Every ledger that has the account, the home first.'),
+    totalBalanceMinor: minor.describe('The account’s balance across every ledger that has it: for a synced account, the bank’s.'),
+  })
+  .describe('How the account is shared between ledgers, or null when only this ledger has it. Each ledger’s `balanceMinor` is what it holds of the account.')
+
 export const accountSchema = z
   .object({
     id,
@@ -75,10 +87,28 @@ export const accountSchema = z
     balanceAsOf: date.nullable().describe('Date of the latest recorded balance (by hand, or the bank’s for a synced investment, loan or property).'),
     transactionCount: z.number().int(),
     importMapping: columnMappingSchema.nullable().describe('The CSV column mapping remembered from the last import.'),
-    bank: accountBankSchema.nullable(),
+    bank: accountBankSchema.nullable().describe('Where this account syncs from, if it’s linked to a bank. Null in a ledger the account is shared with: it syncs into its home.'),
+    sharing: accountSharingBlockSchema.nullable(),
   })
   .meta({ id: 'Account' })
 export type Account = z.output<typeof accountSchema>
+
+const ledgerPart = ledgerRef.extend({
+  archived: z.boolean().describe('Whether the ledger is archived.'),
+  transactionCount: z.number().int().describe('The transactions it holds on the account, deleted ones left out.'),
+  balanceMinor: minor.describe('Its balance on the account: what it holds, and for the opening ledger also the opening balance and recorded balances.'),
+})
+
+export const accountSharingSchema = z
+  .object({
+    accountId: id,
+    home: ledgerPart,
+    opening: ledgerRef,
+    members: z.array(ledgerPart).describe('The other ledgers the account is shared with. Empty when it isn’t shared.'),
+    totalBalanceMinor: minor.describe('The sum of every ledger’s balance on the account.'),
+  })
+  .meta({ id: 'AccountSharing' })
+export type AccountSharing = z.output<typeof accountSharingSchema>
 
 export const balanceSnapshotSchema = z
   .object({ id, date, balanceMinor: minor, source: z.enum(['manual', 'sync']) })

@@ -11,10 +11,11 @@ import { allLedgers, appDatabase, ledgerMaintenance, LedgerQuery, type UnscopedQ
 import { databaseCopy, reclaimSpace, safetyCopy } from './db/maintenance'
 import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
+import { accountWideOn, type AccountWide } from './services/account-rows'
 import { seedCatalog } from './services/catalog'
 import { slugify, ulid } from './lib/ids'
 import { SecretBox } from './lib/secrets'
-import type { AppContext, AppStore } from './services/context'
+import type { AppContext, AppStore, CtxOf } from './services/context'
 import { getAppSetting, sealStoredSecrets, setAppSetting, today } from './services/settings'
 
 /**
@@ -33,6 +34,8 @@ export interface Storage {
   /** The app-wide tables. */
   app: AppStore
   registry: LedgerRegistry
+  /** A ledger's context by its id (404 when there's no such ledger), for services that write in several ledgers. */
+  ctxOf: CtxOf
   now: () => Date
   /** data/ directory, or null when everything is in memory (tests). */
   dataDir: string | null
@@ -53,12 +56,16 @@ const DEFAULT_LEDGER_KEY = 'defaultLedger'
  * the shared connection.
  */
 export class LedgerRegistry {
+  private readonly accountWide: AccountWide
+
   constructor(
     private sqlite: SQLite,
     private app: AppStore,
     private now: () => Date,
     private llm?: LlmCategorizer,
-  ) {}
+  ) {
+    this.accountWide = accountWideOn(sqlite)
+  }
 
   private rows(): LedgerRow[] {
     return this.app.db.select().from(ledgers).orderBy(asc(ledgers.sort), asc(ledgers.createdAt)).all()
@@ -92,6 +99,7 @@ export class LedgerRegistry {
       app: this.app,
       meta: this.app,
       ledger: { id: row.id, name: row.name, slug: row.slug },
+      accountWide: this.accountWide,
       now: this.now,
       llm: this.llm,
     }
@@ -99,6 +107,13 @@ export class LedgerRegistry {
 
   defaultContext(): AppContext {
     return this.context(this.defaultLedger().id)
+  }
+
+  /** A ledger's context by its id only (not its slug), for a service acting in another ledger. */
+  contextById(id: string): AppContext {
+    const row = this.rows().find((r) => r.id === id)
+    if (!row) throw new HTTPException(404, { message: 'That ledger doesn’t exist' })
+    return this.context(row.id)
   }
 
   private dto(row: LedgerRow, defaultId: string, counts: { accounts: number; transactions: number }): Ledger {
@@ -130,6 +145,7 @@ export class LedgerRegistry {
   list(): Ledger[] {
     const rows = this.rows()
     const defaultId = rows.length ? this.defaultOf(rows).id : ''
+    // By the view's ledger: a shared account counts in each ledger that has it, as it's listed there.
     const counts = allLedgers(this.sqlite, 'ledger counts', (db) => {
       const count = (sql: string) => new Map(db.all<{ id: string; n: number }>(sql).map((r) => [r.id, r.n]))
       return {
@@ -269,6 +285,7 @@ export function openStorage(opts: {
     sqlite,
     app,
     registry,
+    ctxOf: (ledgerId) => registry.contextById(ledgerId),
     now,
     dataDir: opts.dataDir,
     secrets,

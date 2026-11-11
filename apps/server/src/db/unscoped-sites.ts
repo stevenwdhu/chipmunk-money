@@ -18,7 +18,11 @@ export const UNSCOPED_SITES = {
   },
   'bank links': {
     file: 'src/services/bank/service.ts',
-    why: 'A bank connection is app-wide and its accounts can feed accounts in different ledgers: each link shows the ledger its account is in.',
+    why: "A bank connection is app-wide and its accounts can feed accounts in different ledgers: each link shows its account's home ledger, which a shared account syncs into (the ledgers it's shared with don't count as where it is).",
+  },
+  'one account in every ledger': {
+    file: 'src/services/account-rows.ts',
+    why: "A shared account is held by its home and the ledgers it's shared with, so its parts, its total, its own facts and the ledgers that have it are read by account, across those ledgers. One private wrapper makes the call for every read of the module, and only sums, counts and names leave it.",
   },
   'full backup': {
     file: 'src/storage.ts',

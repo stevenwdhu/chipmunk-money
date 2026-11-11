@@ -155,13 +155,13 @@ export class BankService {
     // In the order the provider listed them.
     return this.withLedgers((connectionId ? q.where(eq(bankAccounts.connectionId, connectionId)) : q).orderBy(sql`rowid`).all())
   }
-  /** Bank accounts with the ledger and name of each one's linked account. */
+  /** Bank accounts with the ledger and name of each one's linked account: its home, for a shared one. */
   private withLedgers(rows: BankAccountRow[]): AccountRow[] {
     const ids = rows.flatMap((r) => (r.accountId === null ? [] : [r.accountId]))
     const linked = ids.length
       ? this.storage.allLedgers('bank links', (db) => {
           const found = db.all<{ id: number; ledgerId: string; name: string }>(
-            'SELECT id, ledger_id AS ledgerId, name FROM ledger_accounts WHERE id IN (SELECT value FROM json_each(?))',
+            'SELECT id, ledger_id AS ledgerId, name FROM ledger_accounts WHERE home_ledger_id = ledger_id AND id IN (SELECT value FROM json_each(?))',
             JSON.stringify(ids),
           )
           return new Map(found.map((r) => [r.id, r]))

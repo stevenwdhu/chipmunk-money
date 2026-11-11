@@ -18,6 +18,7 @@ import { monthToDate } from './totals'
 
 interface AccountRow {
   id: number
+  ledger_id: string
   name: string
   type: AccountType
   currency: string
@@ -29,6 +30,8 @@ interface AccountRow {
   archived_at: string | null
   sort: number
   import_mapping: string | null
+  home_ledger_id: string
+  opening_ledger_id: string
   tx_count: number
   snap_date: string | null
   snap_balance: number | null
@@ -40,6 +43,7 @@ interface AccountRow {
  *   balance = (latest snapshot, or the opening balance) + Σ transactions dated after that snapshot.
  * Investments, loans and property (revalued) mostly move through snapshots, the others mostly through
  * transactions, and any can have both. Only this ledger's accounts and the transactions it holds count.
+ * A shared account's balance here is this ledger's part instead (sharedAccounts).
  */
 const LIST_SQL = `
   SELECT a.*, i.name AS institution_name,
@@ -61,14 +65,18 @@ const LIST_SQL = `
 
 type BankLink = NonNullable<Account['bank']>
 
-/** Bank links for this ledger's accounts (a bank account is app-wide: its link is to one account, so to that account's ledger). */
+/**
+ * Bank links for this ledger's accounts (a bank account is app-wide: its link is to one account, so
+ * to that account's home). A shared account has none in the other ledgers that have it: it syncs
+ * into its home.
+ */
 function bankLinks(ctx: AppContext): Map<number, BankLink> {
   const rows = ctx.q.all<BankLink & { accountId: number }>(
     `SELECT b.id AS bankAccountId, b.connection_id AS connectionId, c.provider, b.institution, b.name, b.account_id AS accountId,
        b.sync_from AS syncFrom, b.last_synced_at AS lastSyncedAt, b.error, b.balance_minor AS balanceMinor, b.balance_date AS balanceDate
      FROM bank_accounts b
      JOIN bank_connections c ON c.id = b.connection_id
-     JOIN ledger_accounts a ON a.id = b.account_id AND a.ledger_id = @ledger`,
+     JOIN ledger_accounts a ON a.id = b.account_id AND a.ledger_id = @ledger AND a.home_ledger_id = @ledger`,
   )
   return new Map(rows.map(({ accountId, ...link }) => [accountId, link]))
 }
@@ -80,15 +88,65 @@ function thisMonth(ctx: AppContext, accountId?: number) {
   return (id: number) => sums.get(id)?.[0] ?? 0
 }
 
-function toDTO(r: AccountRow, links: Map<number, BankLink>, month: (id: number) => number): Account {
+/**
+ * A shared account's balance in each ledger that has it, and its total, counting every live row
+ * (as LIST_SQL does). The total is the latest recorded balance (or the opening balance) plus every
+ * ledger's rows dated after it. Each ledger's part is what it holds, except the opening ledger's,
+ * which is the rest of the total: so it carries the opening balance and the recorded balances, and
+ * the parts always sum to the total.
+ */
+export function currentParts(ctx: AppContext, accountId: number): { totalMinor: number; parts: Map<string, number> } {
+  const facts = ctx.accountWide.account(accountId)
+  if (!facts) return { totalMinor: 0, parts: new Map() }
+  const recorded = facts.recorded
+  const held = ctx.accountWide.held(accountId, { split: recorded?.date })
+  const totalMinor = (recorded?.balanceMinor ?? facts.openingBalanceMinor) + held.reduce((sum, h) => sum + (recorded ? h.afterMinor : h.totalMinor), 0)
+  const others = held.filter((h) => h.ledgerId !== facts.openingLedgerId).reduce((sum, h) => sum + h.totalMinor, 0)
+  return { totalMinor, parts: new Map(held.map((h) => [h.ledgerId, h.ledgerId === facts.openingLedgerId ? totalMinor - others : h.totalMinor])) }
+}
+
+interface Shared {
+  sharing: NonNullable<Account['sharing']>
+  /** This ledger's part. */
+  balanceMinor: number
+}
+
+/** This ledger's shared accounts among `ids`: how each is shared, and this ledger's part of it. */
+function sharedAccounts(ctx: AppContext, ids: number[]): Map<number, Shared> {
+  const wanted = new Set(ids)
+  const out = new Map<number, Shared>()
+  for (const id of ctx.accountWide.sharedAccounts(ctx.ledger.id)) {
+    if (!wanted.has(id)) continue
+    const ledgers = ctx.accountWide.ledgers(id)
+    const home = ledgers.find((l) => l.isHome)!
+    const opening = ledgers.find((l) => l.isOpening) ?? home
+    const { totalMinor, parts } = currentParts(ctx, id)
+    out.set(id, {
+      sharing: {
+        home: { slug: home.slug, name: home.name },
+        isHome: home.ledgerId === ctx.ledger.id,
+        opening: { slug: opening.slug, name: opening.name },
+        ledgers: ledgers.map((l) => ({ slug: l.slug, name: l.name })),
+        totalBalanceMinor: totalMinor,
+      },
+      balanceMinor: parts.get(ctx.ledger.id) ?? 0,
+    })
+  }
+  return out
+}
+
+function toDTO(r: AccountRow, links: Map<number, BankLink>, month: (id: number) => number, shared?: Shared): Account {
   const base = r.snap_balance ?? r.opening_balance_minor
   const balance = base + r.tx_after_snap
+  // The opening balance and the recorded balances are the home's to show: the other ledgers that
+  // have a shared account show what they hold.
+  const own = r.home_ledger_id === r.ledger_id
   return {
     id: r.id,
     name: r.name,
     type: r.type,
     currency: r.currency,
-    openingBalanceMinor: r.opening_balance_minor,
+    openingBalanceMinor: own ? r.opening_balance_minor : 0,
     openingDate: r.opening_date,
     institutionId: r.institution_id,
     institution: r.institution_name,
@@ -96,12 +154,13 @@ function toDTO(r: AccountRow, links: Map<number, BankLink>, month: (id: number) 
     archived: !!r.archived_at,
     sort: r.sort,
     isLiability: accountTypeInfo(r.type).liability,
-    balanceMinor: balance,
+    balanceMinor: shared ? shared.balanceMinor : balance,
     monthMinor: month(r.id),
-    balanceAsOf: r.snap_date,
+    balanceAsOf: own ? r.snap_date : null,
     transactionCount: r.tx_count,
     importMapping: r.import_mapping ? (JSON.parse(r.import_mapping) as ColumnMapping) : null,
     bank: links.get(r.id) ?? null,
+    sharing: shared?.sharing ?? null,
   }
 }
 
@@ -109,12 +168,13 @@ export function listAccounts(ctx: AppContext): Account[] {
   const rows = ctx.q.all<AccountRow>(`${LIST_SQL} ORDER BY a.archived_at IS NOT NULL, a.sort, a.id`)
   const links = bankLinks(ctx)
   const month = thisMonth(ctx)
-  return rows.map((r) => toDTO(r, links, month))
+  const shared = sharedAccounts(ctx, rows.map((r) => r.id))
+  return rows.map((r) => toDTO(r, links, month, shared.get(r.id)))
 }
 
 export function getAccount(ctx: AppContext, id: number): Account {
   const row = ctx.q.mustGet<AccountRow>(`${LIST_SQL} AND a.id = ?`, 'Account not found', id)
-  return toDTO(row, bankLinks(ctx), thisMonth(ctx, id))
+  return toDTO(row, bankLinks(ctx), thisMonth(ctx, id), sharedAccounts(ctx, [id]).get(id))
 }
 
 export function createAccount(ctx: AppContext, input: Omit<AccountCreate, 'bank'> & { currency: string; openingBalanceMinor: number }) {
