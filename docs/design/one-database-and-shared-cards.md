@@ -5,16 +5,32 @@
 - **Part 1 is in progress, simplified.** Only the owner runs Chipmunk, so the safeguards for strangers' installs are dropped. It ships in the same release as the rename to Chipmunk.
 - **Part 2 (shared credit cards) is on hold.** Part 1 still uses global ids and the `ledger_accounts` view, so Part 2 can come later without another migration.
 
-### Part 1, simplified
+### Part 1, simplified (decided 2026-11-10)
 
-| In the full plan below | Simplified |
-|---|---|
-| Phase 1.2 ships the converter as a dry-run release, then 1.3 the switch | **One release.** The converter runs at boot. `unify-cli check <copy>` ships with it, and the owner runs it on a copy of their data before the release and reports the result. |
-| Text stub `meta.db`, refusal on hash mismatches, `export-legacy` | **Dropped.** The conversion builds `chipmunk.db.partial` and renames it into place only after verification, then moves the originals to `backups/pre-merge-<ts>/`. A crash before the rename leaves the originals as they were, and the next boot starts over. If `chipmunk.db` exists next to legacy files (a crash after the rename), boot moves the legacy files to `backups/pre-merge-<ts>/` and carries on. |
-| Converting old full-backup zips next to an existing install, keeping in-flight idempotency keys | **Dropped.** An old zip unzipped into an empty data directory still converts, because that's the normal boot path. Idempotency keys are not copied. |
-| Tokenizer pin checker with per-scope rules P1 to P5 | **A statement-level checker.** Every alias of a ledger table in a statement needs an `alias.ledger_id = @ledger` or `alias.ledger_id = other.ledger_id` conjunct somewhere in it, and inserts into ledger tables need `ledger_id`. It works together with the TEMP write-guard triggers and the twin isolation test. |
-| Perf script, query-plan tests, fault injection after every step, the request-catalog completeness rule | **Dropped**, except the crash cleanup test and indexes that lead with `ledger_id`. |
-| **Kept as designed** | Global ids with the default ledger at offset 0. Never writing the originals. Verification of counts, sums, balances and net worth per ledger before the rename. The JSON remap of reports and activity. Per-ledger download in today's format, with one importer for old and new backups. The category list as rows with `ledger_id NULL`, with own lists kept. The twin isolation test in both directions. |
+**The app has only the new design.** It is written as if Chipmunk had always kept everything in one database:
+- one `drizzle/` migrations folder starting from a fresh `0000` baseline
+- no boot-time conversion, no legacy migrations, no legacy file formats
+- the per-ledger "Download backup" is a one-ledger file in the new schema, and restore reads that format only
+- the full backup is the whole database
+
+**The owner's data is converted once, outside the app,** by a one-off converter script. It reads `meta.db` and `ledgers/*.db` (at their last schema, ledger 0002 and meta 0000) and writes `chipmunk.db`. It:
+- gives global ids, the default ledger at offset 0
+- rewrites ids inside custom reports and the activity log
+- maps categories to the new model
+- verifies counts, sums, balances and net worth per ledger, printing only totals and pass/fail
+
+The owner runs it on a copy first, then on the real data with the container stopped, before starting the new image. The originals are never written to.
+
+**From the full plan below, kept:**
+- the unified schema with views and triggers (§2.2)
+- the ledger handle with pins, the write guards and the twin isolation test (§2.4), with a statement-level pin checker in place of the per-scope tokenizer
+- storage and lifecycle (§2.5)
+- category list switching (§2.7)
+- the id plan, JSON remap and verification of §2.3, moved into the converter
+
+**Dropped:**
+- everything about legacy files inside the app: detection at boot, the stub, legacy-format export and import, frozen legacy code
+- the dry-run release, perf and query-plan tests
 
 ## The file name
 
