@@ -41,6 +41,9 @@ concurrency:
 jobs:
   check:
     name: Typecheck, test and build
+    # A release pushes main and its tag together, two runs of the same commit. The tag's run checks it
+    # (and publishes the image), so main's run of a release commit is skipped.
+    if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'chore(release):')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

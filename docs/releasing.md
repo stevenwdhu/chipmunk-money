@@ -33,6 +33,6 @@ Each release is published as `ghcr.io/stevenwdhu/spending-tracker` with three ta
 2. **Write the changelog.** In [CHANGELOG.md](../CHANGELOG.md), turn *Unreleased* into the version and the date (`## v0.5.0 (2026-12-01)`), with what changed under *Added*, *Changed*, *Fixed* and *Removed*, in words for the person using the app. Breaking changes go first, with what to do.
 3. **Set the version** in the root `package.json`, without the v (`"version": "0.5.0"`).
 4. **Commit and tag** on `main`: `chore(release): v0.5.0`, then `git tag v0.5.0`.
-5. **Push both:** `git push origin main v0.5.0`. CI runs the checks, then builds and publishes the image. Its publish job stops if the tag isn't `package.json`'s version.
+5. **Push both:** `git push origin main v0.5.0`. CI runs the checks on the tag, then builds and publishes the image. (The push to `main` starts a run too, but it skips a `chore(release):` commit, which the tag's run already checks.) Its publish job stops if the tag isn't `package.json`'s version.
 6. **Publish the notes:** `gh release create v0.5.0 --title v0.5.0 --notes-file <that version's changelog section>`.
 7. **Check** that the images are on the registry under the three tags, and that `docker compose pull && docker compose up -d` runs it.
