@@ -19,8 +19,12 @@ RUN echo "files: $(find . -type f | wc -l)  size: $(du -sh . | cut -f1)" \
  && find . -type f | sort
 
 # ---- build: install from the lockfile, build the web app and MCP, bundle the server ------------
-FROM node:${NODE_VERSION}-slim AS build
+# On the machine's own platform ($BUILDPLATFORM), once for every image: what it makes is JavaScript,
+# the same for amd64 and arm64, so the arm64 image isn't built again under emulation.
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-slim AS build
 ARG PNPM_VERSION
+# The image's platform (amd64 or arm64), set by BuildKit, for better-sqlite3's binary below.
+ARG TARGETARCH
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
@@ -42,15 +46,20 @@ COPY . .
 # apps/web/dist, apps/mcp/dist/stdio.js and the server bundle, apps/server/dist/index.mjs
 RUN pnpm build
 # better-sqlite3 is the one package the bundle leaves out. It ships N-API prebuilds for linux
-# glibc/musl x64/arm64 and has no runtime dependencies: keep only this platform's binary.
+# glibc/musl x64/arm64 and has no runtime dependencies: keep only the image's platform's binary
+# (checked in the runtime stage, which runs on that platform).
 RUN set -eu; \
     mkdir -p /out/node_modules; \
     cp -rL "$(dirname "$(node -p "require.resolve('better-sqlite3/package.json', {paths: ['apps/server']})")")" /out/node_modules/better-sqlite3; \
     cd /out/node_modules/better-sqlite3; \
     rm -rf deps src binding.gyp; \
-    arch="$(node -p 'process.arch')"; \
-    find prebuilds -type f ! -name "linux-${arch}.node" -delete; \
-    node -e "const D=require('/out/node_modules/better-sqlite3'); new D(':memory:').prepare('select 1').get()"
+    case "${TARGETARCH:-$(node -p 'process.arch')}" in \
+      amd64|x64) arch=x64 ;; \
+      arm64) arch=arm64 ;; \
+      *) echo "No better-sqlite3 binary for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    test -f "prebuilds/linux-${arch}.node"; \
+    find prebuilds -type f ! -name "linux-${arch}.node" -delete
 
 # ---- runtime ------------------------------------------------------------------------------------
 FROM node:${NODE_VERSION}-slim AS runtime
@@ -68,6 +77,8 @@ COPY --from=build /src/apps/server/dist ./apps/server/dist
 COPY --from=build /src/apps/server/drizzle ./apps/server/drizzle
 COPY --from=build /src/apps/web/dist ./apps/web/dist
 COPY --from=build /src/apps/mcp/dist ./apps/mcp/dist
+# The database works on this platform: the build stage picked the binary for it.
+RUN node -e "const D=require('/app/node_modules/better-sqlite3'); new D(':memory:').prepare('select 1').get()"
 USER node
 # meta.db, ledgers/, backups/ and secret.key. Keep this volume, and back it up.
 VOLUME ["/data"]

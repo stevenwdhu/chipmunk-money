@@ -39,8 +39,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Two jobs side by side, about as long as each other: the typecheck and the build, and the tests.
   check:
-    name: Typecheck, test and build
+    name: ${{ matrix.name }}
+    strategy:
+      matrix:
+        include:
+          - name: Typecheck and build
+            run: pnpm typecheck && pnpm build
+          - name: Test
+            run: pnpm test
     # A release pushes main and its tag together, two runs of the same commit. The tag's run checks it
     # (and publishes the image), so main's run of a release commit is skipped.
     if: ${{ !(github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'chore(release):')) }}
@@ -67,9 +75,7 @@ jobs:
           key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-${{ runner.os }}-
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm build
+      - run: ${{ matrix.run }}
 
   # A release: after the checks pass on a version tag (v0.1.0), the image for amd64 and arm64 (Apple
   # silicon, Raspberry Pi) on GitHub's registry as ghcr.io/<owner>/spending-tracker:0.1.0, :0.1 and :latest.
