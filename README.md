@@ -32,7 +32,7 @@ It runs as one small server, in Docker or with Node.js, on a home server, a NAS 
 - **Recurring payments.** Subscriptions, bills and pay are found in your history. Instalment plans like Pay in 4 show what's left and when they end, and a plan's full price tells the app what its last payment will be when that's a different amount. You get a warning when a payment is missing or the price changed.
 - **Reports.** Spending by month, category and payee, income against spending, your savings rate. Filter out the one-offs to see your everyday spending, and save a view as a report of its own.
 - **Quick add on your phone.** A bottom sheet for the coffee you just bought, or press <kbd>N</kbd> on a computer. Transfers, tags, notes, search, bulk edit and undo.
-- **CSV import.** It remembers each bank's columns, skips duplicates and can be undone.
+- **CSV import.** It remembers each bank's columns and skips duplicates.
 - **Net worth.** Chequing, cards, cash, investments, loans and property, with their history.
 - **A REST API and an MCP server.** Everything the app does, a script can do too. AI agents like Claude can answer questions about your spending and work through your review queue, each with its own key. [API](docs/api.md) · [MCP](docs/mcp.md)
 

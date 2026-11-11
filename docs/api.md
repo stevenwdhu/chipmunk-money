@@ -310,14 +310,13 @@ Totals and trends. Spending is reported as positive numbers.
 
 ### Import
 
-Bring in rows from a bank export. Preview first, then commit; every import can be undone.
+Bring in rows from a bank export. Preview first, then commit.
 
 | Method | Path | What it does | Scope |
 |---|---|---|---|
 | POST | `/ledgers/{ledger}/import/preview` | Preview an import. | read |
 | POST | `/ledgers/{ledger}/import/commit` | Import transactions. Accepts `?dryRun=true`. | write |
 | GET | `/ledgers/{ledger}/import/batches` | List recent imports. | read |
-| DELETE | `/ledgers/{ledger}/import/batches/{id}` | Undo an import. | write |
 
 ### Categorization
 

@@ -523,7 +523,7 @@ No arguments.
 
 #### `import_transactions`
 
-**Import transactions.** Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch (which can be undone in the app).
+**Import transactions.** Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions.
 
 | Argument | Type | | What it is |
 |---|---|---|---|

@@ -15,7 +15,7 @@ export const TAGS: Array<{ name: string; description: string }> = [
   { name: 'Payees', description: 'How payees are named (name rules, and AI tidying of what the bank sends), and your choice of category for each.' },
   { name: 'Recurring', description: 'Bills, subscriptions, income and instalment plans, detected from history or added by hand.' },
   { name: 'Reports', description: 'Totals and trends. Spending is reported as positive numbers.' },
-  { name: 'Import', description: 'Bring in rows from a bank export. Preview first, then commit; every import can be undone.' },
+  { name: 'Import', description: 'Bring in rows from a bank export. Preview first, then commit.' },
   { name: 'Categorization', description: 'Category suggestions from your history, then AI.' },
   { name: 'Activity', description: 'Every change made through the API, by whom.' },
   { name: 'Data', description: 'Setup, the full backup, erase and export.' },

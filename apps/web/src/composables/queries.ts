@@ -982,13 +982,6 @@ export function useImportMutations() {
         qc.invalidateQueries({ queryKey: keys.aiStatus() })
       },
     }),
-    undo: useMutation({
-      mutationFn: (batchId: number) => lapi.del(`/import/batches/${batchId}`),
-      onSuccess: () => {
-        invalidate()
-        qc.invalidateQueries({ queryKey: keys.importBatches() })
-      },
-    }),
   }
 }
 

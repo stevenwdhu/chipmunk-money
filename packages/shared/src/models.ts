@@ -854,7 +854,6 @@ export const importBatchSchema = z
     fileName: z.string().nullable(),
     rowCount: z.number().int(),
     createdAt: timestamp,
-    remaining: z.number().int().describe('Transactions from this import that still exist.'),
   })
   .meta({ id: 'ImportBatch' })
 export type ImportBatch = z.output<typeof importBatchSchema>

@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import Papa from 'papaparse'
 import { toast } from 'vue-sonner'
-import { ArrowLeft, CheckCircle2, FileUp, Loader2, Sparkles, Undo2 } from '@lucide/vue'
+import { ArrowLeft, CheckCircle2, FileUp, Loader2, Sparkles } from '@lucide/vue'
 import {
   accountTypeInfo,
   applyMapping,
@@ -217,16 +217,6 @@ async function commit() {
 
 const aiEnabled = computed(() => !!settings.data.value?.ai.enabled)
 const aiJob = useAiJobStatus(() => step.value === 'done' && aiEnabled.value)
-
-async function undo(batchId: number) {
-  try {
-    await m.undo.mutateAsync(batchId)
-    toast.success('Import undone')
-    if (result.value?.batchId === batchId) reset()
-  } catch (err) {
-    toast.error(errorMessage(err))
-  }
-}
 
 function reset() {
   step.value = 'file'
@@ -546,21 +536,18 @@ function onPick(e: Event) {
         </div>
         <Button as-child><RouterLink :to="{ name: 'transactions', query: { accountId: accountId ?? undefined, period: 'all' } }">View transactions</RouterLink></Button>
         <Button variant="outline" @click="reset">Import another file</Button>
-        <Button variant="ghost" @click="undo(result.batchId)"><Undo2 />Undo this import</Button>
+        <p class="w-full text-center text-xs text-muted-foreground">Imported the wrong file? Select its transactions in View transactions and delete them.</p>
       </EmptyState>
     </Card>
 
     <Card v-if="step === 'file' && batches.data.value?.length" class="gap-0 py-0">
       <CardHeader class="px-4 py-3 md:px-6"><CardTitle class="text-sm">Recent imports</CardTitle></CardHeader>
       <ul class="divide-y border-t text-sm">
-        <li v-for="b in batches.data.value" :key="b.id" class="flex items-center justify-between gap-3 px-4 py-2.5 md:px-6">
-          <div class="min-w-0">
-            <div class="truncate font-medium">{{ b.fileName ?? 'Import' }}</div>
-            <div class="text-xs text-muted-foreground">
-              {{ b.accountName }} · {{ b.remaining }} of {{ b.rowCount }} transactions · {{ formatDateShort(b.createdAt.slice(0, 10)) }}
-            </div>
+        <li v-for="b in batches.data.value" :key="b.id" class="min-w-0 px-4 py-2.5 md:px-6">
+          <div class="truncate font-medium">{{ b.fileName ?? 'Import' }}</div>
+          <div class="text-xs text-muted-foreground">
+            {{ b.accountName }} · {{ b.rowCount }} transaction{{ b.rowCount === 1 ? '' : 's' }} · {{ formatDateShort(b.createdAt.slice(0, 10)) }}
           </div>
-          <Button variant="ghost" size="sm" :disabled="m.undo.isPending.value || !b.remaining" @click="undo(b.id)"><Undo2 />Undo</Button>
         </li>
       </ul>
     </Card>

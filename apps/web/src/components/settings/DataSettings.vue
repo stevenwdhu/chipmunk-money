@@ -62,7 +62,7 @@ async function erase() {
     <Card class="gap-4">
       <CardHeader>
         <CardTitle>Import</CardTitle>
-        <CardDescription>Bring in CSV exports from your bank. Duplicates are skipped and every import can be undone.</CardDescription>
+        <CardDescription>Bring in CSV exports from your bank. Duplicates are skipped.</CardDescription>
       </CardHeader>
       <CardContent>
         <Button as-child variant="outline"><RouterLink :to="{ name: 'import' }"><FileInput />Import CSV</RouterLink></Button>

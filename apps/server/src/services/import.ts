@@ -15,7 +15,7 @@ import { saveImportMapping } from './accounts'
 import { aiSuggestion, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
 import type { AppContext } from './context'
 import { payeeKeyOf } from './payee-namer'
-import { isCardReward, matchTransactions, releaseLinks } from './matching'
+import { isCardReward, matchTransactions } from './matching'
 import { detectRecurring } from './recurring'
 import { applyPayeeChoices } from './payees'
 import { insertTransaction } from './transactions'
@@ -118,7 +118,8 @@ export function previewImport(ctx: AppContext, input: PreviewInput): ImportPrevi
 }
 
 /**
- * Adds the rows that aren't duplicates as one import batch (which can be undone). With
+ * Adds the rows that aren't duplicates as one import batch, which is how the background AI
+ * categorizing finds them. A wrong import is taken back by deleting its rows. With
  * `background: false` (dry runs), AI categorization isn't started afterwards.
  */
 export function commitImport(ctx: AppContext, input: CommitInput, opts: { background?: boolean } = {}): ImportResult {
@@ -198,22 +199,11 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
 export function listBatches(ctx: AppContext): ImportBatch[] {
   return ctx.q.all<ImportBatch>(
     `SELECT b.id, b.account_id AS accountId, a.name AS accountName, b.file_name AS fileName, b.row_count AS rowCount,
-       b.created_at AS createdAt,
-       (SELECT count(*) FROM transactions t WHERE t.import_batch_id = b.id AND t.ledger_id = b.ledger_id AND t.deleted_at IS NULL) AS remaining
+       b.created_at AS createdAt
      FROM import_batches b JOIN ledger_accounts a ON a.id = b.account_id AND a.ledger_id = b.ledger_id
      WHERE b.ledger_id = @ledger
      ORDER BY b.id DESC LIMIT 50`,
   )
-}
-
-export function undoBatch(ctx: AppContext, batchId: number) {
-  ctx.q.mustGet('SELECT id FROM import_batches WHERE id = ? AND ledger_id = @ledger', 'Import not found', batchId)
-  ctx.q.transaction(() => {
-    releaseLinks(ctx, 'import_batch_id = ?', batchId)
-    const removed = ctx.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND import_batch_id = ?', batchId)
-    ctx.q.run('DELETE FROM import_batches WHERE id = ? AND ledger_id = @ledger', batchId)
-    return removed.changes
-  })
 }
 
 // Background AI categorization ---------------------------------------------

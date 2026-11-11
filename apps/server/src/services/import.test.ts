@@ -3,7 +3,7 @@ import { importCommitSchema, importPreviewSchema, transactionCreateSchema } from
 import { categoryId, makeAccount, testContext } from '../test/helpers'
 import { addTx, countRows, twinAccounts, twinLedgers } from '../test/transaction-twins'
 import { suggestCategory } from './categorize'
-import { categorizeUncategorized, commitImport, listBatches, previewImport, recategorize, undoBatch, type Recategorized } from './import'
+import { categorizeUncategorized, commitImport, listBatches, previewImport, recategorize, type Recategorized } from './import'
 import { setPayeeChoice } from './payees'
 import { createTransaction, getTransaction, listTransactions } from './transactions'
 
@@ -14,7 +14,7 @@ const rows = [
 ]
 
 describe('csv import', () => {
-  it('previews duplicates and history suggestions, commits, skips re-imports and can be undone', async () => {
+  it('previews duplicates and history suggestions, commits and skips re-imports', async () => {
     const ctx = testContext()
     const acc = makeAccount(ctx)
     const groceries = categoryId(ctx, 'Groceries')
@@ -31,9 +31,7 @@ describe('csv import', () => {
 
     const again = commitImport(ctx, importCommitSchema.parse({ accountId: acc, rows }))
     expect(again.imported).toBe(0)
-
-    undoBatch(ctx, result.batchId!)
-    expect(listTransactions(ctx, { limit: 50 }).items).toHaveLength(2)
+    expect(listTransactions(ctx, { limit: 50 }).items).toHaveLength(4)
   })
 
   it('keeps a row’s category from the file as its bank category, for AI to go by', () => {
@@ -94,7 +92,7 @@ describe('asking AI again', () => {
 })
 
 describe('imports in two ledgers', () => {
-  it('finds duplicates, lists batches and undoes them in its own ledger only', () => {
+  it('finds duplicates and lists batches in its own ledger only', () => {
     const { a, b } = twinLedgers()
     const [accA, accB] = [twinAccounts(a), twinAccounts(b)]
     // B already has the rows A is about to import.
@@ -103,19 +101,14 @@ describe('imports in two ledgers', () => {
     const batchA = commitImport(a, importCommitSchema.parse({ accountId: accA.chequing, fileName: 'td.csv', rows }), { background: false })
     expect(batchA).toMatchObject({ imported: 3, skippedDuplicates: 0 })
 
-    expect(listBatches(a)).toEqual([expect.objectContaining({ id: batchA.batchId, accountId: accA.chequing, accountName: 'Chequing', rowCount: 3, remaining: 3 })])
+    expect(listBatches(a)).toEqual([expect.objectContaining({ id: batchA.batchId, accountId: accA.chequing, accountName: 'Chequing', rowCount: 3 })])
     expect(listBatches(b).map((x) => x.id)).toEqual([batchB.batchId])
 
     // The other ledger's account and batch aren't there.
     expect(() => previewImport(a, importPreviewSchema.parse({ accountId: accB.chequing, rows }))).toThrow('That account does not exist')
     expect(() => commitImport(a, importCommitSchema.parse({ accountId: accB.chequing, rows }))).toThrow('That account does not exist')
-    expect(() => undoBatch(a, batchB.batchId!)).toThrow('Import not found')
     expect(countRows(b, 'transactions')).toBe(3)
-
-    undoBatch(a, batchA.batchId!)
-    expect(countRows(a, 'transactions')).toBe(0)
-    expect(countRows(a, 'import_batches')).toBe(0)
-    expect(countRows(b, 'transactions')).toBe(3)
+    expect(countRows(a, 'import_batches')).toBe(1)
     expect(listBatches(b)).toHaveLength(1)
   })
 

@@ -297,7 +297,6 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'POST /ledgers/:ledger/import/preview', body: (c) => ({ accountId: ids(c).chequing, rows: importRows }) },
     { route: 'POST /ledgers/:ledger/import/commit', query: () => ({ dryRun: true }), body: (c) => ({ accountId: ids(c).chequing, fileName: 'october.csv', rows: importRows }) },
     { route: 'POST /ledgers/:ledger/import/commit', body: (c) => ({ accountId: ids(c).chequing, fileName: 'october.csv', rows: importRows }) },
-    { route: 'DELETE /ledgers/:ledger/import/batches/:id', params: (c) => ({ id: ids(c).batch }) },
     // Categorizing and payees
     { route: 'POST /ledgers/:ledger/categorize/suggest', body: (c) => ({ payee: 'COSTCO WHOLESALE #535', accountId: ids(c).card, amountMinor: -15_000 }) },
     { route: 'POST /ledgers/:ledger/categorize/run' },

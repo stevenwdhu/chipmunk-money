@@ -1405,7 +1405,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...imp,
       scope: 'write',
       summary: 'Import transactions',
-      description: 'Adds the rows that aren’t duplicates as one batch, which can be undone. Rows with an `externalId` the account already has are skipped.',
+      description: 'Adds the rows that aren’t duplicates as one batch. Rows with an `externalId` the account already has are skipped. To take an import back, delete its transactions.',
       body: importCommitSchema,
       response: importResultSchema,
       status: 201,
@@ -1426,17 +1426,10 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       return result
     },
   )
-  r.get('/import/batches', { ...imp, scope: 'read', summary: 'List recent imports', response: z.array(importBatchSchema) }, (c) =>
-    imports.listBatches(c.var.ctx),
-  )
-  r.delete(
-    '/import/batches/:id',
-    { ...imp, scope: 'write', summary: 'Undo an import', description: 'Deletes every transaction the import added.', status: 204 },
-    (c, { params }) => {
-      const before = imports.listBatches(c.var.ctx).find((b) => b.id === params.id)
-      imports.undoBatch(c.var.ctx, params.id)
-      log(c, { action: 'undo_import', entity: 'import', entityId: params.id, summary: `Undid the import${before?.fileName ? ` of ${before.fileName}` : ''}`, before })
-    },
+  r.get(
+    '/import/batches',
+    { ...imp, scope: 'read', summary: 'List recent imports', description: 'The last 50 imports, newest first: the file, the account, how many rows it added and when.', response: z.array(importBatchSchema) },
+    (c) => imports.listBatches(c.var.ctx),
   )
 
   // Categorization -------------------------------------------------------
