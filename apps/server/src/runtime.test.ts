@@ -24,29 +24,23 @@ function tempDir() {
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
-  for (const s of opened.splice(0)) {
-    s.registry.closeAll()
-    s.meta.sqlite.close()
-  }
+  for (const s of opened.splice(0)) s.close()
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
 const mode = (file: string) => statSync(file).mode & 0o777
 
 describe.skipIf(process.platform === 'win32')('file permissions', () => {
-  it('keeps the data directory, ledgers, backups and snapshots to their owner', () => {
+  it('keeps the data directory, the database, backups and snapshots to their owner', () => {
     const dataDir = path.join(tempDir(), 'data')
     const storage = openStorage({ dataDir })
     opened.push(storage)
-    const ctx = storage.registry.defaultContext()
-    const snapshot = snapshotDb(ctx.sqlite, 'test')!
+    const snapshot = snapshotDb(storage.sqlite, 'test')!
 
     expect(mode(dataDir)).toBe(0o700)
-    expect(mode(path.join(dataDir, 'ledgers'))).toBe(0o700)
     expect(mode(path.join(dataDir, 'backups'))).toBe(0o700)
-    expect(mode(path.join(dataDir, 'meta.db'))).toBe(0o600)
+    expect(mode(path.join(dataDir, 'chipmunk.db'))).toBe(0o600)
     expect(mode(path.join(dataDir, 'secret.key'))).toBe(0o600)
-    expect(mode(ctx.sqlite.name)).toBe(0o600)
     expect(mode(snapshot)).toBe(0o600)
     // A real copy, not just the empty placeholder.
     expect(statSync(snapshot).size).toBeGreaterThan(0)

@@ -80,7 +80,7 @@ export function restoreBackup(ctx: AppContext, bytes: Uint8Array, opts: { addCat
         badRequest("This backup comes from an older version of Chipmunk that this one can't upgrade. Restore it with a version from before November 2026 first.")
       }
       // Bring older backups up to the current schema before copying.
-      migrate(drizzle(src), { migrationsFolder: env.ledgerMigrations })
+      migrate(drizzle(src), { migrationsFolder: env.migrations })
       if (!opts.addCategories && wouldAddToSharedList(ctx.meta, src)) {
         throw new HTTPException(403, {
           message: 'This backup has categories the shared list doesn’t, and a key limited to some ledgers can’t add to it. Restore it in the app.',

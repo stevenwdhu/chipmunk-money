@@ -132,7 +132,7 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
   const result = ctx.sqlite.transaction(() => {
     const batch = ctx.db
       .insert(importBatches)
-      .values({ accountId: input.accountId, fileName: input.fileName ?? null, rowCount: fresh.length })
+      .values({ ledgerId: ctx.ledger.id, accountId: input.accountId, fileName: input.fileName ?? null, rowCount: fresh.length })
       .returning()
       .get()
     let categorized = 0

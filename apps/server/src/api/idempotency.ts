@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { and, eq, lt } from 'drizzle-orm'
 import type { MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { idempotencyKeys } from '../db/meta-schema'
+import { idempotencyKeys } from '../db/schema'
 import type { MetaStore } from '../services/context'
 import { actorId, type Actor } from './auth'
 

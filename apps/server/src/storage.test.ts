@@ -5,7 +5,6 @@ import { unzipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
 import { transactionCreateSchema } from '@chipmunk/shared'
 import { createApp } from './app'
-import { openLedgerDb, openMetaDb } from './db/client'
 import { seedDefaults } from './db/seed'
 import { SecretBox } from './lib/secrets'
 import { listAccounts } from './services/accounts'
@@ -29,10 +28,7 @@ function open(dataDir: string) {
   return storage
 }
 afterEach(() => {
-  for (const s of opened.splice(0)) {
-    s.registry.closeAll()
-    s.meta.sqlite.close()
-  }
+  for (const s of opened.splice(0)) s.close()
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
@@ -95,18 +91,14 @@ describe('ledgers', () => {
     expect(registry.list().find((l) => l.id === family.id)?.archived).toBe(true)
   })
 
-  it('stores each ledger in its own file and snapshots it before deleting', () => {
+  it('keeps every ledger in chipmunk.db', () => {
     const dir = tempDir()
     const storage = open(dir)
     const family = storage.registry.create({ name: 'Family' })
-    const file = path.join(dir, 'ledgers', family.file)
-    expect(existsSync(file)).toBe(true)
-    expect(existsSync(path.join(dir, 'meta.db'))).toBe(true)
-
-    const { backup } = storage.registry.remove(family.id)
-    expect(existsSync(file)).toBe(false)
-    expect(backup).toMatch(/^deleted-family-/)
-    expect(readdirSync(path.join(dir, 'backups'))).toContain(backup)
+    expect(readdirSync(dir).filter((f) => f.endsWith('.db'))).toEqual(['chipmunk.db'])
+    expect(existsSync(path.join(dir, 'ledgers'))).toBe(false)
+    storage.registry.remove(family.id)
+    expect(storage.registry.list().map((l) => l.name)).toEqual(['Personal'])
   })
 })
 
@@ -182,9 +174,7 @@ describe('ledger API', () => {
     expect(res.headers.get('content-type')).toBe('application/zip')
     const files = unzipSync(new Uint8Array(await res.arrayBuffer()))
     const names = Object.keys(files).sort()
-    expect(names).toContain('meta.db')
-    expect(names).toContain('manifest.json')
-    expect(names.filter((n) => n.startsWith('ledgers/'))).toHaveLength(2)
+    expect(names).toEqual(['chipmunk.db', 'manifest.json'])
     const manifest = JSON.parse(new TextDecoder().decode(files['manifest.json']))
     expect(manifest.ledgers.map((l: { name: string }) => l.name).sort()).toEqual(['Family', 'Personal'])
   })

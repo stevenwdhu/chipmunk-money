@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import type { Account, ActivityPage, BankConnection, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
-import { bankAccounts, bankConnections } from '../../db/meta-schema'
+import { bankAccounts, bankConnections } from '../../db/schema'
 import { makeAccount, testStorage } from '../../test/helpers'
 import { aiConfig, getAppSetting, sealStoredSecrets, setAppSetting } from '../settings'
 import { plaidCategory } from './plaid'
@@ -359,7 +359,7 @@ describe('Plaid', () => {
     expect(listed.flatMap((c) => c.accounts).filter((a) => a.link?.accountId === chequing).map((a) => a.id)).toEqual([remote(conn, 'acc-chq').id])
     // The database holds it to one, too.
     expect(() =>
-      storage.meta.db.update(bankAccounts).set({ ledgerId: ctx.ledger.id, accountId: chequing }).where(eq(bankAccounts.id, 'sf-chq')).run(),
+      storage.meta.db.update(bankAccounts).set({ accountId: chequing }).where(eq(bankAccounts.id, 'sf-chq')).run(),
     ).toThrow(/UNIQUE/)
   })
 })

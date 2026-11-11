@@ -41,10 +41,10 @@ const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (
 
 /** Bank access and AI keys sealed with a secret.key that's gone can't be opened again: say so once, at start. */
 function warnUnreadableSecrets() {
-  const sqlite = storage.meta.sqlite
+  const sqlite = storage.sqlite
   const stored = [
     ...(sqlite.prepare('SELECT secret FROM bank_connections').pluck().all() as string[]),
-    ...(sqlite.prepare('SELECT value FROM settings').pluck().all() as string[]),
+    ...(sqlite.prepare('SELECT value FROM app_settings').pluck().all() as string[]),
   ]
   const unreadable = countUnreadable(storage.secrets, stored)
   if (!unreadable) return
@@ -55,7 +55,7 @@ function warnUnreadableSecrets() {
   )
 }
 
-// Stops taking requests and stops the timers, then closes the databases (which checkpoints the WAL).
+// Stops taking requests and stops the timers, then closes the database (which checkpoints the WAL).
 let stopping = false
 const shutdown = () => {
   if (stopping) return
@@ -63,8 +63,7 @@ const shutdown = () => {
   stopJobs()
   stopBankSync()
   const done = () => {
-    storage.registry.closeAll()
-    storage.meta.sqlite.close()
+    storage.close()
     process.exit(0)
   }
   server.close(done)

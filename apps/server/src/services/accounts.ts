@@ -134,6 +134,7 @@ export function createAccount(ctx: AppContext, input: Omit<AccountCreate, 'bank'
   const row = ctx.db
     .insert(accounts)
     .values({
+      ledgerId: ctx.ledger.id,
       name: input.name,
       type: input.type,
       currency: input.currency,

@@ -1,58 +1,71 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
+import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator'
 import { env } from '../env'
-import * as metaSchema from './meta-schema'
 import * as schema from './schema'
+import { installWriteGuards } from './scope'
+
+/** The database's file name in the data directory. */
+export const DB_FILE = 'chipmunk.db'
+
+/** In the file's header (PRAGMA application_id), so a file can be told apart from other SQLite files: "CHMK". */
+export const APPLICATION_ID = 0x43484d4b
 
 /** Owner-only, for the data directory and what's in it: they hold your finances. */
 const PRIVATE_DIR = 0o700
 const PRIVATE_FILE = 0o600
 
-function openSqlite(file: string): Database.Database {
-  const fresh = file !== ':memory:' && !existsSync(file)
-  if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true, mode: PRIVATE_DIR })
-  const sqlite = new Database(file)
-  // Before WAL mode: SQLite gives the -wal and -shm files the database file's mode.
-  if (fresh) keepPrivate(file)
-  sqlite.pragma('journal_mode = WAL')
-  sqlite.pragma('foreign_keys = ON')
-  sqlite.pragma('busy_timeout = 5000')
-  sqlite.pragma('synchronous = NORMAL')
-  return sqlite
-}
-
-/** Opens (and migrates) one ledger's database file. */
-export function openLedgerDb(file: string) {
-  const sqlite = openSqlite(file)
-  const db = drizzle(sqlite, { schema })
-  checkUpgradable(sqlite, env.ledgerMigrations, file)
-  if (hasPendingMigrations(sqlite, env.ledgerMigrations)) snapshotDb(sqlite, 'pre-migrate')
-  migrate(db, { migrationsFolder: env.ledgerMigrations })
-  return { db, sqlite }
-}
-
-/** Opens (and migrates) the app-wide database: the ledger list and app settings. */
-export function openMetaDb(file: string) {
-  const sqlite = openSqlite(file)
-  const db = drizzle(sqlite, { schema: metaSchema })
-  checkUpgradable(sqlite, env.metaMigrations, file)
-  if (hasPendingMigrations(sqlite, env.metaMigrations)) snapshotDb(sqlite, 'pre-migrate-meta')
-  migrate(db, { migrationsFolder: env.metaMigrations })
-  return { db, sqlite }
-}
-
-export type DB = ReturnType<typeof openLedgerDb>['db']
-export type MetaDB = ReturnType<typeof openMetaDb>['db']
+export type DB = BetterSQLite3Database<typeof schema>
 export type SQLite = Database.Database
 
 /**
- * The migrations this version of the app ships with (ledger schema by default), by timestamp: the
- * first is the baseline the earlier ones were squashed into, the last is the newest.
+ * Opens (and migrates) chipmunk.db, or an in-memory database when `file` is null (tests). The
+ * connection has the write guards (scope.ts) once it's migrated.
  */
-export function shippedMigrations(folder = env.ledgerMigrations): { first: number; last: number } {
+export function openDatabase(file: string | null): { sqlite: SQLite; db: DB } {
+  if (file) mkdirSync(path.dirname(file), { recursive: true, mode: PRIVATE_DIR })
+  const existed = !!file && existsSync(file)
+  const sqlite = new Database(file ?? ':memory:')
+  try {
+    // Before WAL mode: SQLite gives the -wal and -shm files the database file's mode.
+    if (file && !existed) keepPrivate(file)
+    const empty = !sqlite.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get()
+    if (empty) {
+      // Only before the first table: without it, deleting a ledger would never give space back,
+      // and it can't be turned on later without a full VACUUM.
+      sqlite.pragma('auto_vacuum = INCREMENTAL')
+      sqlite.pragma(`application_id = ${APPLICATION_ID}`)
+    } else if (sqlite.pragma('application_id', { simple: true }) !== APPLICATION_ID) {
+      throw new Error(`${file} isn't a Chipmunk database.`)
+    }
+    if (file) sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    // So a REPLACE that deletes the row it conflicts with fires that row's DELETE triggers: the
+    // write guards (scope.ts) need them to see the delete. The content triggers stop on their own
+    // (each changes a row only when its value differs), so letting them recurse changes nothing.
+    sqlite.pragma('recursive_triggers = ON')
+    sqlite.pragma('busy_timeout = 5000')
+    sqlite.pragma('synchronous = NORMAL')
+    sqlite.pragma('journal_size_limit = 67108864')
+    sqlite.pragma('cache_size = -20000')
+    checkUpgradable(sqlite, file ?? ':memory:')
+    if (hasPendingMigrations(sqlite)) snapshotDb(sqlite, 'pre-migrate')
+    migrate(drizzle(sqlite), { migrationsFolder: env.migrations })
+    installWriteGuards(sqlite)
+  } catch (err) {
+    sqlite.close()
+    throw err
+  }
+  return { sqlite, db: drizzle(sqlite, { schema }) }
+}
+
+/**
+ * The migrations this version of the app ships with, by timestamp: the first is the baseline,
+ * the last is the newest.
+ */
+export function shippedMigrations(folder = env.migrations): { first: number; last: number } {
   const journal = JSON.parse(readFileSync(path.join(folder, 'meta/_journal.json'), 'utf8')) as { entries: Array<{ when: number }> }
   return { first: journal.entries[0]!.when, last: journal.entries[journal.entries.length - 1]!.when }
 }
@@ -68,36 +81,33 @@ export function lastAppliedMigration(sqlite: Database.Database): number | null {
 }
 
 /**
- * A database from before the migrations were squashed (one that ran some of them, not all) can't be
- * brought up to date: its migrations are gone, and the baseline would make tables it already has.
+ * A database from before a baseline (one that ran some of the migrations squashed into it, not
+ * all) can't be brought up to date: those migrations are gone, and the baseline would make tables
+ * it already has.
  */
-export function isTooOld(sqlite: Database.Database, folder = env.ledgerMigrations): boolean {
+export function isTooOld(sqlite: Database.Database, folder = env.migrations): boolean {
   const last = lastAppliedMigration(sqlite)
   return last !== null && last < shippedMigrations(folder).first
 }
 
-function checkUpgradable(sqlite: Database.Database, folder: string, file: string) {
-  if (isTooOld(sqlite, folder)) {
-    sqlite.close()
-    throw new Error(`${file} is from an older version of Chipmunk that this one can't upgrade. Upgrade it with a version from before November 2026 first.`)
-  }
+function checkUpgradable(sqlite: Database.Database, file: string) {
+  if (isTooOld(sqlite)) throw new Error(`${file} is from an older version of Chipmunk that this one can't upgrade.`)
 }
 
-function hasPendingMigrations(sqlite: Database.Database, folder: string): boolean {
+function hasPendingMigrations(sqlite: Database.Database): boolean {
   // A brand-new database has nothing worth backing up.
   const last = lastAppliedMigration(sqlite)
   if (sqlite.memory || last === null) return false
   try {
-    return last < shippedMigrations(folder).last
+    return last < shippedMigrations().last
   } catch {
     return false
   }
 }
 
-/** data/backups for files in data/ and in data/ledgers/. */
+/** data/backups, beside the database file. */
 export function backupsDirFor(file: string): string {
-  const dir = path.dirname(file)
-  return path.join(path.basename(dir) === 'ledgers' ? path.dirname(dir) : dir, 'backups')
+  return path.join(path.dirname(file), 'backups')
 }
 
 function keepPrivate(file: string) {
@@ -109,8 +119,9 @@ function keepPrivate(file: string) {
 }
 
 /**
- * Writes a consistent copy of the database to `data/backups/<label>-<time>.db` (readable by you
- * only) and returns its path. Skipped (null) for in-memory databases.
+ * Writes a consistent copy of the whole database to `data/backups/<label>-<time>.db` (readable by
+ * you only) and returns its path. Skipped (null) for in-memory databases. Only for migrations:
+ * a copy of one ledger is a ledger export.
  */
 export function snapshotDb(sqlite: Database.Database, label: string): string | null {
   if (sqlite.memory) return null

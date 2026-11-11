@@ -266,7 +266,7 @@ export function normalizeTagName(name: string) {
 export function upsertTags(ctx: AppContext, names: string[]): number[] {
   const clean = [...new Set(names.map(normalizeTagName).filter(Boolean))]
   if (!clean.length) return []
-  for (const name of clean) ctx.db.insert(tags).values({ name }).onConflictDoNothing().run()
+  for (const name of clean) ctx.db.insert(tags).values({ ledgerId: ctx.ledger.id, name }).onConflictDoNothing().run()
   return ctx.db
     .select({ id: tags.id })
     .from(tags)

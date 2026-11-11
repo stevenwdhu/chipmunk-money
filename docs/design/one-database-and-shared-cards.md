@@ -180,7 +180,9 @@ Their keys stay right because ids are global. `tx_external_id` UNIQUE(account_id
 - **On other tables:**
   - `accounts.institution_id`: in the account's ledger.
   - `payee_rules.category_id` and `payee_category_stats.category_id`: visible to the ledger.
-- **How each guard decides:** it raises only when the referenced row exists and is in another ledger. When the row doesn't exist yet, the deferred FK catches it at commit. That lets the importer insert links before transactions (§2.6).
+- **How each guard decides:** it raises only when the referenced row exists and is in another ledger. That lets the importer insert links before transactions (§2.6). A deferred FK only checks that the row exists at commit, not which ledger it is in, so each parent table also has a `guard_<table>_referred` trigger on INSERT. It raises when rows already referring to the new row's id are in another ledger. Each lookup is by an indexed FK column.
+  - Not covered: `transactions.transfer_pair_id` (no FK and no index, so a reverse check would scan every transaction), and a parent row whose `id` is changed by UPDATE. The app does neither.
+- **On `ledgers.category_list`:** it can't become `'own'` while the ledger's transactions, recurring items, payee rules or payee stats still point at shared categories. Without that, later unrelated writes to those rows (FK SET NULL actions included) would fail the guards.
 
 **View and content triggers**
 - `transaction_lines` gains `t.ledger_id` in both UNION branches. A link's bill is always in the same ledger, which the guard enforces.
@@ -328,10 +330,12 @@ This is a pure function, `remapJson(kind, value, maps)`, that walks the raw JSON
 
 **Pin rules (`checkPinned`, a tokenizer, not a full parser).** Each subquery, CTE body and UNION branch is its own scope. "Ledger tables" are read from `PRAGMA table_info` when the database opens.
 - **P1.** Every reference to a table or view with `ledger_id` must be pinned in its own scope by a top-level AND conjunct of WHERE or ON. The pin is either `X.ledger_id = @ledger` or `X.ledger_id = Y.ledger_id`, where Y is pinned in the same or an enclosing scope.
-- **P2.** A child table is pinned by a join on its FK column to a pinned parent (for example `JOIN transactions t ON t.id = l.money_in_id`, with `t` pinned).
+- **P2.** A child table is pinned by a join on its FK column to a pinned parent (for example `JOIN transactions t ON t.id = l.money_in_id`, with `t` pinned), or by `l.money_in_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger …)`. This holds for its reads, UPDATEs and DELETEs. An INSERT into a child table needs no pin, since the write guards hold it to its parents' ledger.
 - **P3.** `accounts` may only be read through `ledger_accounts`, which falls under P1.
 - **P4.** An INSERT into a ledger table must list `ledger_id` with `@ledger`, or a pinned column of the INSERT … SELECT.
-- **P5.** `ledger_id = ?` (positional) never counts as a pin. Neither does a pin under OR, NOT or CASE.
+- **P5.** `ledger_id = ?` (positional) never counts as a pin. Neither does a pin under OR, NOT or CASE, or in HAVING.
+- **P6.** In an ON clause, a pin counts only for what the join filters: an inner join's for every table before it, a LEFT JOIN's for the joined table, a RIGHT JOIN's for the tables before it, a FULL JOIN's for none.
+- **P7.** The handle runs only SELECT, INSERT, UPDATE and DELETE (with WITH). It refuses OR REPLACE on ledger tables, writes to `ledgers` not pinned by `id = @ledger`, and parenthesized joins. The connection runs with `recursive_triggers = ON`, so a REPLACE's delete of the conflicting row still fires the write guards.
 - **Shared category rows** (`ledger_id IS NULL`) may only be written from the catalog module, which is a listed site.
 - **On failure** it throws `LedgerScopeError("transactions AS p (subquery at char 212) has no ledger pin")` at prepare time in every environment, production included. The cost is a 500 instead of a leak.
 
@@ -441,12 +445,12 @@ The reviews found these unplanned. Under global ids they need real work.
 - **Leaving the shared list** (`PUT /categories/sharing`, routes/ledger.ts:872-889):
   - In one transaction, copy every shared group, category, label and category_label to own rows with new ids, with the off state carried into `archived_at`.
   - Remap the ledger's `transactions`, `recurring_items`, `payee_rules`, `payee_category_stats` and custom-report specs through the same `remapSpec` helpers.
-  - Delete its `ledger_category_off` rows and set `category_list = 'own'`.
+  - Delete its `ledger_category_off` rows and set `category_list = 'own'`, last: a guard trigger refuses `'own'` while any of those rows still point at a shared category.
   - Category ids change in that ledger. Today they don't. This is a visible change for API clients on an explicit, rare action (open question 4).
 - **Joining the shared list** ports today's mismatch path to the unified tables:
   - Match own categories by name, or as `resolve` says.
   - Add missing ones as `ledger_id NULL` rows, refused for limited keys.
-  - Remap references to shared ids, delete the own rows, and write the off state.
+  - Set `category_list = 'shared'` first, then remap references to shared ids, delete the own rows, and write the off state. The guards check a row's category against the ledger's current list, so a remap to shared ids is refused while the ledger is still `'own'`.
   - Restore with a token mismatch uses this same function.
 - **Deleting a shared category** resets `category_source`, `category_confidence` and `needs_review` on every affected transaction across ledgers before the DELETE, as `forget()` does per ledger today (catalog.ts:395-405). Otherwise SET NULL would leave transactions marked rule/ai/linked with no category.
 - **Fan-out** of App-settings category edits becomes one transaction. Activity is still logged once per ledger (`logAll`) in Part 1, so there is no visible change.

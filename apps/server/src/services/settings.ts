@@ -19,8 +19,7 @@ import {
   type Settings,
   type SettingsUpdate,
 } from '@chipmunk/shared'
-import { bankConnections, settings as metaSettings } from '../db/meta-schema'
-import { settings as ledgerSettings } from '../db/schema'
+import { appSettings as metaSettings, bankConnections } from '../db/schema'
 import type { AppContext, MetaStore } from './context'
 
 export interface StoredAiConfig {
@@ -61,23 +60,23 @@ export function setAppSetting(meta: MetaStore, key: string, value: unknown) {
     .run()
 }
 
-// Per-ledger settings (the ledger's own file) ---------------------------------------
+// Per-ledger settings (ledger_settings) ----------------------------------------------
 
 export function getLedgerSetting<T>(ctx: AppContext, key: string, fallback: T): T {
-  const row = ctx.db.select().from(ledgerSettings).where(eq(ledgerSettings.key, key)).get()
-  return row ? (row.value as T) : fallback
+  const value = ctx.q.pluck<string>('SELECT value FROM ledger_settings WHERE ledger_id = @ledger AND key = @key', { key })
+  return value === undefined ? fallback : (JSON.parse(value) as T)
 }
 
 export function setLedgerSetting(ctx: AppContext, key: string, value: unknown) {
   if (value === null || value === undefined) {
-    ctx.db.delete(ledgerSettings).where(eq(ledgerSettings.key, key)).run()
+    ctx.q.run('DELETE FROM ledger_settings WHERE ledger_id = @ledger AND key = @key', { key })
     return
   }
-  ctx.db
-    .insert(ledgerSettings)
-    .values({ key, value })
-    .onConflictDoUpdate({ target: ledgerSettings.key, set: { value, updatedAt: new Date().toISOString() } })
-    .run()
+  ctx.q.run(
+    `INSERT INTO ledger_settings (ledger_id, key, value) VALUES (@ledger, @key, @value)
+     ON CONFLICT (ledger_id, key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+    { key, value: JSON.stringify(value) },
+  )
 }
 
 /**

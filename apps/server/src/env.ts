@@ -13,7 +13,7 @@ export const env = {
   // API_PORT (not PORT): dev tooling often sets PORT for the web dev server.
   port: Number(process.env.API_PORT ?? 8787),
   host: process.env.HOST ?? '0.0.0.0',
-  /** Holds meta.db, ledgers/<id>.db and backups/. */
+  /** Holds chipmunk.db, secret.key and backups/. */
   dataDir,
   isProduction: process.env.NODE_ENV === 'production',
   /**
@@ -31,6 +31,6 @@ export const env = {
     .map((h) => h.trim().toLowerCase())
     .filter(Boolean),
   webDist: path.join(repoRoot, 'apps/web/dist'),
-  ledgerMigrations: path.join(repoRoot, 'apps/server/drizzle/ledger'),
-  metaMigrations: path.join(repoRoot, 'apps/server/drizzle/meta'),
+  /** The migrations of chipmunk.db. */
+  migrations: path.join(repoRoot, 'apps/server/drizzle'),
 }

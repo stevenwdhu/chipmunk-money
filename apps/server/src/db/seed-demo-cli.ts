@@ -33,8 +33,7 @@ function main() {
     setLedgerSetting(ctx, 'setup.completed', true)
     console.log(`Seeded ${transactions} transactions and ${recurringSuggestions} recurring suggestions into the “${ledger.name}” ledger`)
   } finally {
-    storage.registry.closeAll()
-    storage.meta.sqlite.close()
+    storage.close()
   }
 }
 

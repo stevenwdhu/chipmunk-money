@@ -23,7 +23,7 @@ import {
 import type { z } from 'zod'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../../ai/runner'
-import { bankAccounts, bankConnections } from '../../db/meta-schema'
+import { bankAccounts, bankConnections } from '../../db/schema'
 import { badRequest, notFound } from '../../lib/http'
 import { ulid } from '../../lib/ids'
 import type { Storage } from '../../storage'
@@ -56,7 +56,11 @@ import {
 import { ProviderRequestError, type BankProvider, type FetchResult, type PlaidChanges, type PlaidProvider, type RemoteAccount, type RemoteTransaction } from './types'
 
 type ConnectionRow = typeof bankConnections.$inferSelect
-type AccountRow = typeof bankAccounts.$inferSelect
+type BankAccountRow = typeof bankAccounts.$inferSelect
+type AccountRow = BankAccountRow & {
+  /** The ledger of the account it syncs into (the account's), or null when it isn't linked. */
+  ledgerId: string | null
+}
 /** What a provider sent: what each bank account's part of it is to keep, and how a linked one's is applied. */
 interface Fetched_ {
   data: FetchResult
@@ -134,7 +138,22 @@ export class BankService {
   private accountRows(connectionId?: string): AccountRow[] {
     const q = this.db.select().from(bankAccounts)
     // In the order the provider listed them.
-    return (connectionId ? q.where(eq(bankAccounts.connectionId, connectionId)) : q).orderBy(sql`rowid`).all()
+    return this.withLedgers((connectionId ? q.where(eq(bankAccounts.connectionId, connectionId)) : q).orderBy(sql`rowid`).all())
+  }
+  /** Bank accounts with the ledger each one's linked account is in. */
+  private withLedgers(rows: BankAccountRow[]): AccountRow[] {
+    const ids = rows.flatMap((r) => (r.accountId === null ? [] : [r.accountId]))
+    const ledgerOf = ids.length
+      ? this.storage.allLedgers('bank links', (sqlite) => {
+          const found = sqlite.prepare(`SELECT id, ledger_id FROM ledger_accounts WHERE id IN (${ids.map(() => '?').join(', ')})`).all(...ids)
+          return new Map((found as Array<{ id: number; ledger_id: string }>).map((r) => [r.id, r.ledger_id]))
+        })
+      : new Map<number, string>()
+    return rows.map((r) => ({ ...r, ledgerId: r.accountId === null ? null : (ledgerOf.get(r.accountId) ?? null) }))
+  }
+  private bankAccount(id: string): AccountRow | undefined {
+    const row = this.db.select().from(bankAccounts).where(eq(bankAccounts.id, id)).get()
+    return row ? this.withLedgers([row])[0] : undefined
   }
 
   private recentRequests(row: ConnectionRow): string[] {
@@ -428,7 +447,7 @@ export class BankService {
    * `alignWithBank`).
    */
   linkAccount(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }) {
-    const acct = this.db.select().from(bankAccounts).where(eq(bankAccounts.id, input.bankAccountId)).get()
+    const acct = this.bankAccount(input.bankAccountId)
     if (!acct) notFound('Bank account not found')
     const target = accounts.getAccount(ctx, accountId)
     if (acct.ledgerId && (acct.ledgerId !== ctx.ledger.id || acct.accountId !== target.id)) {
@@ -438,7 +457,7 @@ export class BankService {
     // Switching which bank account feeds this account: the old one stops.
     const previous = this.linkedTo(ctx.ledger.id, target.id)
     if (previous && previous.id !== acct.id) {
-      this.db.update(bankAccounts).set({ ledgerId: null, accountId: null }).where(eq(bankAccounts.id, previous.id)).run()
+      this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, previous.id)).run()
     }
     const sameLink = acct.accountId === target.id && acct.ledgerId === ctx.ledger.id
     // A date, or null for no limit. Not given: the same link keeps its date, and a new one has none.
@@ -446,7 +465,6 @@ export class BankService {
     this.db
       .update(bankAccounts)
       .set({
-        ledgerId: ctx.ledger.id,
         accountId: target.id,
         syncFrom,
         // Re-linking the same account keeps its sync position; a new link starts from syncFrom.
@@ -455,7 +473,7 @@ export class BankService {
       })
       .where(eq(bankAccounts.id, acct.id))
       .run()
-    return { bankAccount: this.accountDTO(this.db.select().from(bankAccounts).where(eq(bankAccounts.id, acct.id)).get()!), connectionId: acct.connectionId }
+    return { bankAccount: this.accountDTO(this.bankAccount(acct.id)!), connectionId: acct.connectionId }
   }
 
   /**
@@ -501,7 +519,7 @@ export class BankService {
 
   /** A bank account a ledger account can switch to: one that isn't syncing into another account. */
   private switchTarget(ctx: AppContext, accountId: number, bankAccountId: string): AccountRow {
-    const acct = this.db.select().from(bankAccounts).where(eq(bankAccounts.id, bankAccountId)).get()
+    const acct = this.bankAccount(bankAccountId)
     if (!acct) notFound('Bank account not found')
     if (acct.ledgerId && (acct.ledgerId !== ctx.ledger.id || acct.accountId !== accountId)) {
       throw new HTTPException(409, { message: `“${acct.name}” already syncs into another account. Switch that account to manual first.` })
@@ -681,7 +699,7 @@ export class BankService {
   unlinkAccount(ctx: AppContext, accountId: number) {
     const linked = this.linkedTo(ctx.ledger.id, accountId)
     if (!linked) throw new HTTPException(409, { message: 'This account isn’t synced.' })
-    this.db.update(bankAccounts).set({ ledgerId: null, accountId: null }).where(eq(bankAccounts.id, linked.id)).run()
+    this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, linked.id)).run()
     return this.accountDTO(linked)
   }
 
@@ -924,7 +942,7 @@ export class BankService {
         : undefined
       if (!ledger || !ctx || !target) {
         // The ledger or account is gone: stop syncing it.
-        this.db.update(bankAccounts).set({ ledgerId: null, accountId: null }).where(eq(bankAccounts.id, acct.id)).run()
+        this.db.update(bankAccounts).set({ accountId: null }).where(eq(bankAccounts.id, acct.id)).run()
         continue
       }
       const providerError = remote?.error ?? null

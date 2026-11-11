@@ -49,7 +49,7 @@ All three run in CI when a push to `main` or a pull request changes code. The Do
 - Prettier settings are in `.prettierrc.json`: no semicolons, single quotes, 110 columns.
 - Match the code around you: its naming, its comment density, its idioms.
 - Messages people see (errors, toasts, UI text) are plain, short sentences, with no semicolons.
-- Changing the database: edit `apps/server/src/db/schema.ts` (ledgers) or `meta-schema.ts` (app-wide), then run `pnpm db:generate` and commit the migration with it.
+- Changing the database: edit `apps/server/src/db/schema.ts` (and `src/db/tables.ts` for a new table), then run `pnpm db:generate` and commit the migration with it. Views and triggers are written by hand into the migration.
 - TypeScript stays on 6.x for now (see Notes in [docs/development.md](docs/development.md)).
 
 ## Commits and pull requests

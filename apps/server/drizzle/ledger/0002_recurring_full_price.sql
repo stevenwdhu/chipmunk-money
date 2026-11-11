@@ -1,1 +1,0 @@
-ALTER TABLE `recurring_items` ADD `full_price_minor` integer;
