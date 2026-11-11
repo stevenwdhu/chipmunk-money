@@ -51,7 +51,6 @@ export interface TwinIds {
   payment: number
   tag: number
   report: number
-  batch: number
   snapshot: number
   category: number
   otherCategory: number
@@ -115,7 +114,8 @@ function seedTwin(storage: Storage, ctx: AppContext, canary: string, own: boolea
     { accountId: card, date: '2026-09-25', amountMinor: -3_300, payee: 'NEW GROCER' },
     { categoryId: groceries, source: 'history', confidence: 0.7, reason: '', autoApply: false },
   )
-  const batch = commitImport(
+  // An import, so the ledger has a batch in Recent imports.
+  commitImport(
     ctx,
     importCommitSchema.parse({
       accountId: chequing,
@@ -126,7 +126,7 @@ function seedTwin(storage: Storage, ctx: AppContext, canary: string, own: boolea
       ],
     }),
     { background: false },
-  ).batchId!
+  )
   setPayeeChoice(ctx, { payee: 'NEW GROCER', mode: 'always', categoryId: groceries })
 
   // The bank: one connection for the app, and a bank account syncing into each ledger's chequing.
@@ -178,7 +178,6 @@ function seedTwin(storage: Storage, ctx: AppContext, canary: string, own: boolea
     payment: one<number>(ctx, 'SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = ? ORDER BY date DESC LIMIT 1', recurring),
     tag: one<number>(ctx, "SELECT id FROM tags WHERE ledger_id = @ledger AND name = 'trip-japan'"),
     report: one<number>(ctx, 'SELECT id FROM custom_reports WHERE ledger_id = @ledger LIMIT 1'),
-    batch,
     snapshot: one<number>(
       ctx,
       'SELECT s.id FROM balance_snapshots s JOIN ledger_accounts a ON a.id = s.account_id AND a.ledger_id = @ledger WHERE a.id = ? ORDER BY s.date DESC LIMIT 1',

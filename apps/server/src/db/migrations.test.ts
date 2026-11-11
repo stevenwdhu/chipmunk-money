@@ -106,7 +106,10 @@ function migrationsFolder(entries: JournalEntry[], extra: Array<{ tag: string; s
   return dir
 }
 
-/** chipmunk.db as the baseline alone made it, with ledgers A and B filled, closed. */
+/**
+ * chipmunk.db as the baseline alone made it, with ledgers A and B filled, closed. A's card is
+ * linked to a bank account, so a SET NULL from accounts has a row to change.
+ */
 function baselineDatabase(file = tempFile('chipmunk.db')): { file: string; rows: Record<'A' | 'B', LedgerRows> } {
   const sqlite = bareDatabase({ file, migrations: migrationsFolder(shippedJournal.entries.slice(0, 1)) })
   addLedger(sqlite, 'A')
@@ -116,26 +119,67 @@ function baselineDatabase(file = tempFile('chipmunk.db')): { file: string; rows:
     A: fillLedger(bareWriter(sqlite, 'A'), { category: shared.food, offCategory: shared.fun }),
     B: fillLedger(bareWriter(sqlite, 'B'), { category: shared.food, offCategory: shared.food }),
   }
+  sqlite.prepare("INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c1', 'simplefin', 'Bank', 'sealed')").run()
+  sqlite
+    .prepare("INSERT INTO bank_accounts (id, connection_id, remote_id, name, currency, account_id) VALUES ('b1', 'c1', 'r1', 'Card', 'CAD', ?)")
+    .run(rows.A.account)
+  sqlite
+    .prepare("INSERT INTO bank_transactions (bank_account_id, remote_id, date, pending, data, first_seen_at, updated_at) VALUES ('b1', 't1', '2026-08-01', 0, '{}', '2026-08-01', '2026-08-01')")
+    .run()
   sqlite.close()
   return { file, rows }
 }
 
 /**
- * How many rows each table holds in all, and in each ledger (child rows through their parents), as
- * `table` and `table@ledger`. Only the tables the database has: a later migration may add some.
+ * Each table in all, and each table in each ledger (child rows through their parents), as `table`
+ * and `table@ledger`, with the WHERE that picks its rows. Only the tables the database has: a
+ * later migration may add some.
  */
-function rowCounts(sqlite: SQLite): Record<string, number> {
+function rowSets(sqlite: SQLite): Array<{ key: string; table: string; where: string; params: Record<string, unknown> }> {
   const tables = new Set(appTables(sqlite))
-  const count = (sql: string, params: Record<string, unknown> = {}) => sqlite.prepare(sql).pluck().get(params) as number
-  const counts: Record<string, number> = {}
-  for (const table of tables) counts[table] = count(`SELECT count(*) FROM "${table}"`)
+  const sets = [...tables].map((table) => ({ key: table, table, where: '1', params: {} }))
   for (const t of TABLES) {
     if (t.kind === 'app' || !tables.has(t.name) || t.parents?.some((p) => !tables.has(p.table))) continue
     const where =
       t.kind === 'child' ? t.parents!.map((p) => `"${p.column}" IN (SELECT id FROM "${p.table}" WHERE ledger_id = @ledger)`).join(' OR ') : 'ledger_id = @ledger'
-    for (const ledger of ['A', 'B']) counts[`${t.name}@${ledger}`] = count(`SELECT count(*) FROM "${t.name}" WHERE ${where}`, { ledger })
+    for (const ledger of ['A', 'B']) sets.push({ key: `${t.name}@${ledger}`, table: t.name, where, params: { ledger } })
   }
+  return sets
+}
+
+/** How many rows each table holds in all and in each ledger, as rowSets names them. */
+function rowCounts(sqlite: SQLite): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const s of rowSets(sqlite)) counts[s.key] = sqlite.prepare(`SELECT count(*) FROM "${s.table}" WHERE ${s.where}`).pluck().get(s.params) as number
   return counts
+}
+
+/** The columns of each table the database has. */
+function tableColumns(sqlite: SQLite): Record<string, string[]> {
+  const columns: Record<string, string[]> = {}
+  for (const table of appTables(sqlite)) columns[table] = (sqlite.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>).map((c) => c.name)
+  return columns
+}
+
+/**
+ * Every row of each table in all and in each ledger, as rowSets names them, with only the columns
+ * given (those from before an upgrade, so a column a migration adds doesn't count), each row as
+ * JSON, in a fixed order.
+ */
+function rowContents(sqlite: SQLite, columns: Record<string, string[]>): Record<string, string[]> {
+  const contents: Record<string, string[]> = {}
+  for (const s of rowSets(sqlite)) {
+    const names = columns[s.table]
+    if (!names) continue
+    const list = names.map((c) => `"${c}"`).join(', ')
+    contents[s.key] = (sqlite.prepare(`SELECT ${list} FROM "${s.table}" WHERE ${s.where} ORDER BY ${list}`).all(s.params) as unknown[]).map((r) => JSON.stringify(r))
+  }
+  return contents
+}
+
+/** The triggers, indexes and views by name, as `type name`. */
+function schemaNames(sqlite: SQLite): string[] {
+  return sqlite.prepare("SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'index', 'view') AND name NOT LIKE 'sqlite_%'").pluck().all() as string[]
 }
 
 /** Whether a write was refused by a trigger (a guard), not for some other reason such as a missing column. */
@@ -150,8 +194,10 @@ function refusedByGuard(write: () => unknown): boolean {
 
 /**
  * Builds the baseline database, opens it with openDatabase and the given folder, and says what
- * went wrong, one line each: rows lost or added, broken foreign keys or pages, accounts the view
- * no longer gives its ledger, and guards that no longer refuse.
+ * went wrong, one line each: rows lost, added or changed, columns, triggers, indexes or views
+ * gone, broken foreign keys or pages, accounts the view no longer gives its ledger, and guards
+ * that no longer refuse. Added columns, tables and names are fine, and so is a trigger or view
+ * made again under its name.
  */
 function upgradeProblems(migrations: string): string[] {
   const { file, rows } = baselineDatabase()
@@ -163,10 +209,40 @@ function upgradeProblems(migrations: string): string[] {
   }
   const plain = raw()
   const before = rowCounts(plain)
+  const columnsBefore = tableColumns(plain)
+  const contentsBefore = rowContents(plain, columnsBefore)
+  const namesBefore = schemaNames(plain)
   const ran = lastAppliedMigration(plain)
   plain.close()
-  const lost = (sqlite: SQLite) =>
-    Object.entries(rowCounts(sqlite)).flatMap(([key, n]) => (key in before && before[key] !== n ? [`${key}: ${before[key]} rows before, ${n} after`] : []))
+  const lost = (sqlite: SQLite) => {
+    const problems = Object.entries(rowCounts(sqlite)).flatMap(([key, n]) =>
+      key in before && before[key] !== n ? [`${key}: ${before[key]} rows before, ${n} after`] : [],
+    )
+    // Only the columns still there, so one gone is its own line, not a failed SELECT.
+    const columnsAfter = tableColumns(sqlite)
+    const kept: Record<string, string[]> = {}
+    for (const [table, names] of Object.entries(columnsBefore)) {
+      if (!columnsAfter[table]) continue
+      kept[table] = names.filter((c) => columnsAfter[table]!.includes(c))
+      for (const c of names) if (!kept[table]!.includes(c)) problems.push(`column ${table}.${c} is gone`)
+    }
+    const contentsAfter = rowContents(sqlite, kept)
+    for (const [key, rowsBefore] of Object.entries(contentsBefore)) {
+      if (!(key in contentsAfter)) continue
+      // Rows from before that aren't there after, each counted once.
+      const left = [...contentsAfter[key]!]
+      const changed = rowsBefore.filter((r) => {
+        const i = left.indexOf(r)
+        if (i < 0) return true
+        left.splice(i, 1)
+        return false
+      }).length
+      if (changed) problems.push(`${key}: ${changed} rows not as before`)
+    }
+    const namesAfter = new Set(schemaNames(sqlite))
+    for (const name of namesBefore) if (!namesAfter.has(name)) problems.push(`${name} is gone`)
+    return problems
+  }
 
   let opened: SQLite
   try {
@@ -228,27 +304,27 @@ function upgradeProblems(migrations: string): string[] {
 
 /**
  * The kind of migration drizzle-kit writes to change a column: a new table, the rows copied, the
- * old table dropped and the new one renamed. The view on accounts is dropped and made again, as
- * the rules allow. SQLite refuses the rename while triggers name the old table, unless
- * `legacyRename` turns that check off. Built from the schema as shipped, so it fits after the
- * last migration.
+ * old table dropped and the new one renamed, without its indexes and triggers. A view on the
+ * table is dropped and made again, as the rules allow. SQLite refuses the rename while triggers
+ * name the old table, unless `legacyRename` turns that check off. Built from the schema as
+ * shipped, so it fits after the last migration.
  */
-function rebuildAccounts(opts: { legacyRename?: boolean } = {}): string {
+function rebuildTable(name: string, opts: { legacyRename?: boolean; view?: string } = {}): string {
   const shipped = bareDatabase()
-  const sqlOf = (name: string) => shipped.prepare('SELECT sql FROM sqlite_master WHERE name = ?').pluck().get(name) as string
-  const table = sqlOf('accounts').replace(/^CREATE TABLE [`"]?accounts[`"]?/, 'CREATE TABLE `__new_accounts`')
-  const view = sqlOf('ledger_accounts')
+  const sqlOf = (n: string) => shipped.prepare('SELECT sql FROM sqlite_master WHERE name = ?').pluck().get(n) as string
+  const table = sqlOf(name).replace(new RegExp(`^CREATE TABLE [\`"]?${name}[\`"]?`), `CREATE TABLE \`__new_${name}\``)
+  const view = opts.view && sqlOf(opts.view)
   shipped.close()
   return [
     'PRAGMA foreign_keys=OFF;',
-    'DROP VIEW `ledger_accounts`;',
+    ...(opts.view ? [`DROP VIEW \`${opts.view}\`;`] : []),
     `${table};`,
-    'INSERT INTO `__new_accounts` SELECT * FROM `accounts`;',
-    'DROP TABLE `accounts`;',
+    `INSERT INTO \`__new_${name}\` SELECT * FROM \`${name}\`;`,
+    `DROP TABLE \`${name}\`;`,
     ...(opts.legacyRename ? ['PRAGMA legacy_alter_table=ON;'] : []),
-    'ALTER TABLE `__new_accounts` RENAME TO `accounts`;',
+    `ALTER TABLE \`__new_${name}\` RENAME TO \`${name}\`;`,
     'PRAGMA foreign_keys=ON;',
-    `${view};`,
+    ...(view ? [`${view};`] : []),
   ].join('\n--> statement-breakpoint\n')
 }
 
@@ -258,23 +334,45 @@ describe('upgrading a database from the baseline', () => {
   })
 
   it('catches a migration that rebuilds a table', () => {
-    const problems = upgradeProblems(migrationsFolder(shippedJournal.entries, [{ tag: '9999_rebuild_accounts', sql: rebuildAccounts({ legacyRename: true }) }]))
-    // Foreign keys stayed on, so dropping accounts cascade-deleted the rows under them. The
-    // triggers on accounts went with the table.
+    const accounts = rebuildTable('accounts', { legacyRename: true, view: 'ledger_accounts' })
+    const problems = upgradeProblems(migrationsFolder(shippedJournal.entries, [{ tag: '9999_rebuild_accounts', sql: accounts }]))
+    // Foreign keys stayed on, so dropping accounts cascade-deleted the rows under them and set
+    // the bank account's link to null. The triggers on accounts went with the table.
     expect(problems).toEqual(
       expect.arrayContaining([
         'transactions@A: 5 rows before, 0 after',
         'transactions@B: 5 rows before, 0 after',
         'balance_snapshots@A: 1 rows before, 0 after',
         'import_batches@B: 1 rows before, 0 after',
+        'bank_accounts: 1 rows not as before',
+        'trigger guard_accounts_insert is gone',
         "an account with another ledger's institution was let through",
         'an account moved to another ledger was let through',
       ]),
     )
+    expect(problems).not.toContain('view ledger_accounts is gone')
+  })
+
+  it('catches a migration that rebuilds a table whose rows are only pointed to with SET NULL', () => {
+    const batches = rebuildTable('import_batches', { legacyRename: true })
+    const problems = upgradeProblems(migrationsFolder(shippedJournal.entries, [{ tag: '9999_rebuild_import_batches', sql: batches }]))
+    // No row is lost: the payment from each ledger's import lost its batch, and the table its
+    // indexes and triggers.
+    expect(problems).toEqual(
+      expect.arrayContaining([
+        'transactions: 2 rows not as before',
+        'transactions@A: 1 rows not as before',
+        'transactions@B: 1 rows not as before',
+        'index import_batches_ledger is gone',
+        'trigger guard_import_batches_insert is gone',
+        'trigger keep_ledger_import_batches is gone',
+      ]),
+    )
+    expect(problems.filter((p) => p.endsWith(' after'))).toEqual([])
   })
 
   it('catches a migration that fails, and leaves the database as it was', () => {
-    const problems = upgradeProblems(migrationsFolder(shippedJournal.entries, [{ tag: '9999_rebuild_accounts', sql: rebuildAccounts() }]))
+    const problems = upgradeProblems(migrationsFolder(shippedJournal.entries, [{ tag: '9999_rebuild_accounts', sql: rebuildTable('accounts', { view: 'ledger_accounts' }) }]))
     expect(problems).toEqual([expect.stringMatching(/^the migrations failed: .*RENAME TO `accounts`.* error in trigger \w+: no such table: main\.accounts$/s)])
   })
 

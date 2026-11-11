@@ -423,7 +423,6 @@ const segmentKind: Record<string, NumberKind> = {
   tags: 'tag',
   recurring: 'recurring',
   'custom-reports': 'report',
-  batches: 'batch',
 }
 /** Kinds whose ids are the same in both ledgers on the shared list. */
 const CATALOG = new Set<NumberKind>(['category', 'otherCategory', 'group', 'label'])
