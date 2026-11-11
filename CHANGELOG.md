@@ -2,6 +2,16 @@
 
 What changed in each release of Spending Tracker. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/spending-tracker` under each version.
 
+## 0.2.1 (2026-11-10)
+
+### Added
+
+- The app's version in App settings, under About, with a link to what's new in it.
+
+### Fixed
+
+- Review on the Overview opens every transaction to review, not just this month's, as many as the banner counts.
+
 ## 0.2.0 (2026-11-10)
 
 ### Added
