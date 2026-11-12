@@ -101,6 +101,19 @@ const SIGN_IN_AGAIN = 'ITEM_LOGIN_REQUIRED'
 /** How long a switch's review keeps its connections from syncing on their own, unless it ends first. */
 const REVIEW_HOLD_MS = 15 * 60_000
 
+/** The ledgers a caller may use, by id: an API key's `ledgers`, or null for every one (the app, or a key for all of them). */
+export type UsableLedgers = readonly string[] | null
+
+/**
+ * Switching which bank account a shared account syncs from changes and deletes rows in every ledger
+ * that has it, so a caller limited to some ledgers must be allowed in all of them.
+ */
+function requireEveryLedger(ctx: AppContext, accountId: number, usable: UsableLedgers) {
+  if (!usable) return
+  if (ctx.accountWide.ledgers(accountId).every((l) => usable.includes(l.ledgerId))) return
+  throw new HTTPException(403, { message: 'A key limited to some ledgers can’t switch a shared account. Do it in the app.' })
+}
+
 /**
  * Bank connections, the accounts they bring, and syncing those accounts into ledgers.
  * Connections, their bank accounts and what those last reported are app-wide, from any of the
@@ -461,12 +474,14 @@ export class BankService {
    * any older history a later fetch brings (one it has the same transactions in is matched, not added
    * twice, where it can tell; an account with transactions is better switched with a review, see
    * `previewSwitch`). Then `fill` brings it up to date. From then on its balance is the bank's (see
-   * `alignWithBank`).
+   * `alignWithBank`). A shared account is linked in its home, by a caller that may use every ledger
+   * that has it (`usable`).
    */
-  linkAccount(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }) {
+  linkAccount(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }, usable: UsableLedgers) {
     const acct = this.bankAccount(input.bankAccountId)
     if (!acct) notFound('Bank account not found')
     accounts.requireHome(ctx, accountId, 'bank')
+    requireEveryLedger(ctx, accountId, usable)
     const target = accounts.getAccount(ctx, accountId)
     if (acct.ledgerId && (acct.ledgerId !== ctx.ledger.id || acct.accountId !== target.id)) {
       const other = acct.ledgerId === ctx.ledger.id ? accounts.getAccount(ctx, acct.accountId!).name : 'an account in another ledger'
@@ -497,7 +512,8 @@ export class BankService {
   /**
    * Brings a newly linked account up to date from what's kept of its bank account, without fetching:
    * its transactions from "sync from" on, and its balance. When nothing was fetched for it yet, its
-   * connection's next sync brings them, and this returns null.
+   * connection's next sync brings them, and this returns null. A shared account's rows are matched in
+   * every ledger that holds them, as a sync's are.
    */
   fill(ctx: AppContext, accountId: number): { added: number; adopted: number } | null {
     accounts.requireHome(ctx, accountId, 'bank')
@@ -588,8 +604,9 @@ export class BankService {
    * fetched. It compares from the oldest one kept, or from `from`. While it's reviewed, the
    * connections involved don't sync on their own (until `endReview`, or 15 minutes on).
    */
-  previewSwitch(ctx: AppContext, accountId: number, input: { bankAccountId: string; from?: string | null }): LinkPreview {
+  previewSwitch(ctx: AppContext, accountId: number, input: { bankAccountId: string; from?: string | null }, usable: UsableLedgers): LinkPreview {
     accounts.requireHome(ctx, accountId, 'bank')
+    requireEveryLedger(ctx, accountId, usable)
     const target = accounts.getAccount(ctx, accountId)
     const acct = this.switchTarget(ctx, target.id, input.bankAccountId)
     const provider = this.row(acct.connectionId).provider
@@ -601,19 +618,17 @@ export class BankService {
     // Nothing fetched for it yet: nothing to compare with.
     if (!acct.fetchedAt) return { ...base, rows: [] }
     const remote = storedTransactions(this.app, acct.id, from)
-    const rows = ctx.q.all<{ id: number; date: string; amountMinor: number; name: string | null; payee: string; payeeKey: string; deleted: number }>(
-      `SELECT id, date, amount_minor AS amountMinor, name, payee, payee_key AS payeeKey, deleted_at IS NOT NULL AS deleted
-       FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND date >= @from`,
-      { accountId: target.id, from: addDays(from, -1) },
-    )
-    const local = rows.map((r) => ({ ...r, deleted: !!r.deleted }))
+    // A shared account's rows in every ledger that holds them: the switch changes each where it is.
+    const local = ctx.accountWide.switchRows(target.id, addDays(from, -1)).map((r) => ({ ...r, deleted: !!r.deletedAt }))
     const plan = planSwitch(local, remote, (payee) => payeeKeyOf(ctx, payee))
     const L = new Map(local.map((l) => [l.id, l]))
     const R = new Map(remote.map((r) => [r.remoteId, r]))
-    // Each side as it shows: its name, or what the payee name rules call its payee.
+    const ledgers = new Map(ctx.accountWide.ledgers(target.id).map((l) => [l.ledgerId, { slug: l.slug, name: l.name }]))
+    // Each side as it shows: its name, or what the payee name rules call its payee. One another ledger holds says which.
     const side = (id: number) => {
       const l = L.get(id)!
-      return { id: l.id, date: l.date, payee: l.name ?? payeeNameOf(ctx, l.payee).name, amountMinor: l.amountMinor, deleted: l.deleted }
+      const shown = { id: l.id, date: l.date, payee: l.name ?? payeeNameOf(ctx, l.payee).name, amountMinor: l.amountMinor, deleted: l.deleted }
+      return l.ledgerId === ctx.ledger.id ? shown : { ...shown, elsewhere: { ledger: ledgers.get(l.ledgerId)!, account: null } }
     }
     const remoteSide = (id: string) => {
       const r = R.get(id)!
@@ -635,10 +650,19 @@ export class BankService {
    * Switches an account to sync from a bank account, as you decided in the review (`previewSwitch`),
    * from the same kept transactions: the pairs take the bank's ids, the bank's others are added or
    * skipped, and yours it doesn't have are deleted or kept. When either side changed since the review
-   * (a sync, an edit), nothing changes: review it again. The next sync carries on from there.
+   * (a sync, an edit, or a move, in any ledger that has the account), nothing changes: review it
+   * again. The next sync carries on from there. A shared account's rows change where they're held,
+   * and its new ones land in its home: a caller limited to some ledgers must be allowed in all of
+   * them (`usable`).
    */
-  switchAccount(ctx: AppContext, accountId: number, input: z.output<typeof accountBankSwitchSchema>): SwitchResult & { bankAccount: BankAccount } {
+  switchAccount(
+    ctx: AppContext,
+    accountId: number,
+    input: z.output<typeof accountBankSwitchSchema>,
+    usable: UsableLedgers,
+  ): SwitchResult & { bankAccount: BankAccount } {
     accounts.requireHome(ctx, accountId, 'bank')
+    requireEveryLedger(ctx, accountId, usable)
     const target = accounts.getAccount(ctx, accountId)
     const acct = this.switchTarget(ctx, target.id, input.bankAccountId)
     if (input.version !== this.switchVersion(ctx, target.id, acct)) {
@@ -648,12 +672,16 @@ export class BankService {
     const remote = storedTransactions(this.app, acct.id, input.from)
     // Reviewed from the oldest one kept (as it starts): no limit. From later, only from there on.
     const oldest = oldestStored(this.app, acct.id)
-    const { bankAccount } = this.linkAccount(ctx, target.id, { bankAccountId: acct.id, syncFrom: oldest && input.from > oldest ? input.from : null })
-    const { newIds, ...result } = applySwitch(ctx, target.id, provider, remote, input)
+    const { bankAccount } = this.linkAccount(ctx, target.id, { bankAccountId: acct.id, syncFrom: oldest && input.from > oldest ? input.from : null }, usable)
+    const { newIds, ledgers, ...result } = applySwitch(ctx, this.storage.ctxOf, target.id, provider, remote, input)
     this.caughtUp(ctx, target.id, acct)
-    // As after a sync: refunds and card payments, recurring payments, then AI for the new ones.
-    matchTransactions(ctx, { earliest: input.from })
-    detectRecurring(ctx)
+    // As after a sync, in each ledger whose rows changed (the home first): refunds and card payments,
+    // recurring payments, then AI for the new ones, which are in the home.
+    for (const ledgerId of ledgers) {
+      const at = ledgerId === ctx.ledger.id ? ctx : this.storage.ctxOf(ledgerId)
+      matchTransactions(at, { earliest: input.from })
+      detectRecurring(at)
+    }
     if (newIds.length && aiEnabled(ctx)) void categorizeUncategorized(ctx, { ids: newIds })
     this.endReview(ctx, target.id)
     return { ...result, bankAccount: { ...bankAccount, lastSyncedAt: acct.fetchedAt } }

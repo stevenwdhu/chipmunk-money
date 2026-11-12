@@ -169,6 +169,8 @@ function log(c: C, entry: ActivityEntry) {
 
 /** Whether the caller is a key limited to some ledgers. */
 const limitedKey = (c: C) => c.var.actor.kind === 'key' && !!c.var.actor.key.ledgers
+/** The ledgers the caller may use, by id, or null for every one. */
+const usableLedgers = (c: C) => (c.var.actor.kind === 'key' ? c.var.actor.key.ledgers : null)
 
 /**
  * Bank connections belong to the whole app, so a key limited to some ledgers can only use the bank
@@ -558,7 +560,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
           institutionId !== undefined || institution !== undefined || !remote ? { institutionId, institution } : { institution: remote.institution ?? remote.connectionName },
         )
         const created = accounts.createAccount(ctx, { ...input, institutionId: placed.id, currency: remote?.currency ?? input.currency })
-        if (link) bank.linkAccount(ctx, created.id, link)
+        if (link) bank.linkAccount(ctx, created.id, link, usableLedgers(c))
         return { a: accounts.getAccount(ctx, created.id), placed }
       })
       const filled = link ? bank.fill(ctx, a.id) : null
@@ -598,7 +600,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params, body }) => {
       requireOwnBankAccount(c, bank, body.bankAccountId)
-      const { bankAccount } = bank.linkAccount(c.var.ctx, params.id, body)
+      const { bankAccount } = bank.linkAccount(c.var.ctx, params.id, body, usableLedgers(c))
       const filled = bank.fill(c.var.ctx, params.id)
       const a = accounts.getAccount(c.var.ctx, params.id)
       log(c, {
@@ -623,7 +625,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params, body }) => {
       requireOwnBankAccount(c, bank, body.bankAccountId)
-      return bank.previewSwitch(c.var.ctx, params.id, body)
+      return bank.previewSwitch(c.var.ctx, params.id, body, usableLedgers(c))
     },
   )
   r.delete(
@@ -653,7 +655,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params, body }) => {
       requireOwnBankAccount(c, bank, body.bankAccountId)
-      const { bankAccount, ...result } = bank.switchAccount(c.var.ctx, params.id, body)
+      const { bankAccount, ...result } = bank.switchAccount(c.var.ctx, params.id, body, usableLedgers(c))
       const a = accounts.getAccount(c.var.ctx, params.id)
       log(c, {
         action: 'link_bank',

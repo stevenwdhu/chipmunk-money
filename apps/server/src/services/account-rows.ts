@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { AccountType, ISODate } from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
 import { changeHome, crossLedgerReferences, moveRows, type MovedCategory } from '../db/move-rows'
@@ -8,10 +9,13 @@ import type { AppContext } from './context'
  * Reads of one account in every ledger that has it (by account_id, not by ledger): a shared
  * account's rows are held by its home and by the ledgers it's shared with. Everything that reads an
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
- * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and for the
- * bank code only, the account's rows the bank's data can touch, each with the ledger that holds it
- * (bankRows, bankIds, holder): sync matches against them and writes each row through its holder's
- * context. Those never reach a response.
+ * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and the
+ * account's rows, each with the ledger that holds it, for two users only. The bank code: sync
+ * matches against them and writes each row through its holder's context (bankRows, bankIds,
+ * holder), and a switch pairs them the same way (switchRows), its review showing them only to a
+ * caller allowed in every ledger that has the account. And a CSV import's duplicate check
+ * (importedRows), whose preview names no other ledger's row. Other than that review, those never
+ * reach a response.
  *
  * A service reaches these through ctx.accountWide: the reads bound to the connection once
  * (accountReadsOn), shared by every context. To add a read, add a function to READS: it takes the
@@ -96,6 +100,39 @@ export interface BankIdHolder {
   id: number
   ledgerId: string
   deleted: boolean
+}
+
+/**
+ * A row of the account as a CSV import's duplicate check sees it, in whichever ledger holds it. For
+ * import.ts only: a preview names the row only when the importing ledger holds it.
+ */
+export interface ImportedRow {
+  id: number
+  ledgerId: string
+  date: ISODate
+  amount: number
+  payeeKey: string
+  externalId: string | null
+  deleted: boolean
+}
+
+/**
+ * A row of the account as a bank switch pairs it, in whichever ledger holds it (deleted ones too).
+ * For the switch only: its review shows another ledger's rows only to a caller allowed in every
+ * ledger that has the account.
+ */
+export interface SwitchRow {
+  id: number
+  /** The ledger that holds it: the one its writes go through. */
+  ledgerId: string
+  date: ISODate
+  amountMinor: number
+  name: string | null
+  payee: string
+  payeeKey: string
+  origin: 'manual' | 'import' | 'sync'
+  externalId: string | null
+  deletedAt: string | null
 }
 
 /** The module's one unscoped call: every read in READS runs through it. */
@@ -231,6 +268,68 @@ const READS = {
   /** The date of the account's oldest live row in any ledger, or null when it has none. */
   firstDate(db: UnscopedQuery, accountId: number): ISODate | null {
     return db.pluck<ISODate | null>('SELECT min(t.date) FROM transactions t WHERE t.account_id = ? AND t.deleted_at IS NULL', accountId) ?? null
+  },
+
+  /**
+   * The account's rows a CSV import can duplicate, in every ledger: each with one of these bank ids
+   * (deleted ones too), and each live one dated from `from` to `to`. For import.ts only.
+   */
+  importedRows(db: UnscopedQuery, accountId: number, opts: { externalIds: readonly string[]; from: ISODate; to: ISODate }): ImportedRow[] {
+    return db
+      .all<Omit<ImportedRow, 'deleted'> & { deleted: number }>(
+        `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, t.external_id AS externalId,
+           t.deleted_at IS NOT NULL AS deleted
+         FROM transactions t
+         WHERE t.account_id = @accountId
+           AND (t.external_id IN (SELECT value FROM json_each(@externalIds)) OR (t.deleted_at IS NULL AND t.date BETWEEN @from AND @to))
+         ORDER BY t.id`,
+        { accountId, externalIds: JSON.stringify(opts.externalIds), from: opts.from, to: opts.to },
+      )
+      .map((r) => ({ ...r, deleted: !!r.deleted }))
+  },
+
+  /**
+   * The payees of the account's purchases dated from `from` to `to`, in every ledger: its debits
+   * that aren't deleted or a transfer. Matching asks only whether a merchant has any, so that money
+   * back from it isn't filed as a card payment.
+   */
+  purchasePayees(db: UnscopedQuery, accountId: number, from: ISODate, to: ISODate): Array<{ payee: string; payeeKey: string }> {
+    // Split rows (the shares a payment gives other ledgers) are to be left out here: a share is a
+    // debit, and counted as a purchase it would keep every later card payment from being filed as one.
+    return db.all<{ payee: string; payeeKey: string }>(
+      `SELECT DISTINCT t.payee, t.payee_key AS payeeKey FROM transactions t
+       WHERE t.account_id = @accountId AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
+         AND t.date BETWEEN @from AND @to
+       ORDER BY t.payee_key, t.payee`,
+      { accountId, from, to },
+    )
+  },
+
+  /** The account's rows dated on or after `from`, in every ledger, deleted ones too: what a bank switch pairs. For the switch only. */
+  switchRows(db: UnscopedQuery, accountId: number, from: ISODate): SwitchRow[] {
+    return db.all<SwitchRow>(
+      `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amountMinor, t.name, t.payee, t.payee_key AS payeeKey, t.origin,
+         t.external_id AS externalId, t.deleted_at AS deletedAt
+       FROM transactions t
+       WHERE t.account_id = @accountId AND t.date >= @from
+       ORDER BY t.id`,
+      { accountId, from },
+    )
+  },
+
+  /**
+   * A hash of the account's rows in every ledger, each with its ledger and account, deleted ones
+   * too: it changes when one is added, edited in a way a switch's review shows, deleted or moved.
+   */
+  switchStamp(db: UnscopedQuery, accountId: number): string {
+    const rows = db
+      .all(
+        `SELECT t.id, t.ledger_id, t.account_id, t.date, t.amount_minor, t.payee, t.name, t.external_id, t.deleted_at IS NOT NULL AS deleted
+         FROM transactions t WHERE t.account_id = ? ORDER BY t.id`,
+        accountId,
+      )
+      .map((r) => Object.values(r as Record<string, unknown>))
+    return createHash('sha1').update(JSON.stringify(rows)).digest('hex')
   },
 }
 

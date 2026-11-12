@@ -174,11 +174,14 @@ const parsed = computed(() => {
   return res
 })
 
+/** Already on the account: in this ledger, or in another ledger it's shared with (which isn't named). */
+const isDuplicate = (r: { duplicateOf: number | null; duplicateElsewhere: boolean }) => r.duplicateOf !== null || r.duplicateElsewhere
+
 async function toReview() {
   if (!parsed.value?.rows.length || !accountId.value) return
   try {
     const rows = await m.preview.mutateAsync({ accountId: accountId.value, rows: parsed.value.rows })
-    preview.value = rows.map((r) => ({ ...r, include: r.duplicateOf === null, categoryId: r.suggestion.categoryId, changed: false }))
+    preview.value = rows.map((r) => ({ ...r, include: !isDuplicate(r), categoryId: r.suggestion.categoryId, changed: false }))
     step.value = 'review'
   } catch (err) {
     toast.error(errorMessage(err))
@@ -186,7 +189,7 @@ async function toReview() {
 }
 
 const included = computed(() => preview.value.filter((r) => r.include))
-const duplicates = computed(() => preview.value.filter((r) => r.duplicateOf !== null).length)
+const duplicates = computed(() => preview.value.filter(isDuplicate).length)
 const suggested = computed(() => preview.value.filter((r) => r.include && r.categoryId).length)
 
 async function commit() {
@@ -494,6 +497,7 @@ function onPick(e: Event) {
                 <TableCell class="max-w-64 truncate">
                   {{ r.payee }}
                   <span v-if="r.duplicateOf !== null" class="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">Already imported</span>
+                  <span v-else-if="r.duplicateElsewhere" class="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">Already in another ledger</span>
                 </TableCell>
                 <TableCell>
                   <CategoryPicker

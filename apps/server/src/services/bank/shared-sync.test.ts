@@ -139,7 +139,7 @@ async function synced(card: { balance: string; transactions: FakeTx[] }) {
   const bank = new BankService(w.storage)
   const conn = await bank.connect({ setupToken: TOKEN })
   const bankAccountId = conn.accounts.find((a) => a.remoteId === 'visa')!.id
-  bank.linkAccount(w.personal, w.visa, { bankAccountId })
+  bank.linkAccount(w.personal, w.visa, { bankAccountId }, null)
   const sync = async (opts: { full?: boolean } = {}) => {
     const result = await bank.sync(conn.id, opts)
     expect(result.ok, result.error ?? '').toBe(true)
@@ -184,7 +184,7 @@ describe('bank sync on a shared account', () => {
     expect(await w.sync({ full: true })).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
     // What a new link takes in, from what was kept: nothing new either, and its opening date goes back to the oldest row, wherever it is.
     w.bank.unlinkAccount(w.personal, w.visa)
-    w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId })
+    w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId }, null)
     expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0 })
     // No new row, no opening balance change, no recorded balance, no activity.
     expect(everything()).toEqual(before)
@@ -194,7 +194,7 @@ describe('bank sync on a shared account', () => {
     w.personal.q.run("UPDATE accounts SET opening_date = '2026-09-30' WHERE id = ? AND ledger_id = @ledger", w.visa)
     w.move(w.personal, ['a1'], w.family)
     w.bank.unlinkAccount(w.personal, w.visa)
-    w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId })
+    w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId }, null)
     expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0 })
     expect(w.opening().openingDate).toBe('2026-09-28')
     expect(w.personal.accountWide.firstDate(w.visa)).toBe('2026-09-28')
@@ -430,10 +430,10 @@ describe('the account’s rows read across ledgers', () => {
   /** Uses of the reads that hand out rows, by file, comments left out. */
   function rowReads(source: string): string[] {
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder)\b/g)].map((m) => m[1]!)
+    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder|switchRows|importedRows)\b/g)].map((m) => m[1]!)
   }
 
-  it('are read only by the bank code, and findByExternalId, which hands out no other ledger’s id', () => {
+  it('are read only by the bank code, the CSV import’s duplicate check and findByExternalId', () => {
     const root = path.join(repoRoot, 'apps/server')
     const found: string[] = []
     const walk = (dir: string) => {
@@ -448,6 +448,10 @@ describe('the account’s rows read across ledgers', () => {
       'src/services/bank/apply.ts: bankRows',
       'src/services/bank/apply.ts: holder',
       'src/services/bank/service.ts: bankIds',
+      'src/services/bank/service.ts: switchRows',
+      'src/services/bank/switching.ts: holder',
+      'src/services/bank/switching.ts: switchRows',
+      'src/services/import.ts: importedRows',
       'src/services/transactions.ts: holder',
     ])
     expect(rowReads('// ctx.accountWide.bankRows(1)\nconst x = ctx.accountWide . holder(1, "a")')).toEqual(['holder'])

@@ -97,10 +97,11 @@ export function cardPaymentCategory(ctx: AppContext): number | null {
  *    is the purchase's, so it isn't one to review: the Refund tag shows the link, to undo if it's wrong.
  *    Interac e-Transfers are money to and from people, not purchases, so they're never refunds.
  * 2. **Credit card payment.** Other money onto a credit card (but not cash back or rewards, or
- *    money from a merchant you bought from in the last year) is a payment. It's paired as a transfer
- *    with the withdrawal from chequing or savings that paid it (the same amount, within 5 days);
- *    without one (yet) it goes in the ledger's "Credit card payment" category, or "Transfer", or
- *    stays uncategorized.
+ *    money from a merchant you bought from in the last year, in any ledger for a shared account)
+ *    is a payment. It's paired as a transfer with the withdrawal from chequing or savings that paid
+ *    it (the same amount, within 5 days); without one (yet) it goes in the ledger's "Credit card
+ *    payment" category, or "Transfer", or stays uncategorized. Money back on a shared account whose
+ *    purchase another ledger holds is neither: it stays an uncategorized credit where it is.
  *
  * Only what's uncategorized or still waiting for review changes (see OPEN): never a category you
  * chose or accepted, or one your history is sure of (cash back, say). Money onto a card you or your
@@ -161,6 +162,18 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
       id,
     )
   const paymentCategory = cardPaymentCategory(ctx)
+  const shared = new Map<number, boolean>()
+  /**
+   * A shared account's purchases from this merchant that other ledgers hold (one moved there): money
+   * back from it is still no card payment, though it can't be linked to them across ledgers.
+   */
+  const boughtElsewhere = (c: Row) => {
+    if (!shared.has(c.accountId)) shared.set(c.accountId, ctx.accountWide.isShared(c.accountId))
+    if (!shared.get(c.accountId)) return false
+    return ctx.accountWide
+      .purchasePayees(c.accountId, addDays(c.date, -MERCHANT_DAYS), c.date)
+      .some((p) => !isPersonTransfer(p.payee) && sameMerchant(p.payeeKey, c.payeeKey))
+  }
 
   ctx.q.transaction(() => {
     const paired = new Set<number>()
@@ -186,9 +199,10 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
       }
 
       // 2. Money onto a credit card: a payment. Cash back, rewards and other credits from a merchant
-      // you buy from aren't; an earlier pass that called them payments is undone.
+      // you buy from (on a shared account, in any ledger) aren't; an earlier pass that called them
+      // payments is undone. One whose purchase another ledger holds stays an ordinary credit here.
       if (c.accountType !== 'credit') continue
-      if (isCardReward(c.payee) || fromMerchant.length) {
+      if (isCardReward(c.payee) || fromMerchant.length || (c.open && !isPersonTransfer(c.payee) && boughtElsewhere(c))) {
         if (c.source === 'rule' && !paired.has(c.id)) {
           clear(c.id)
           result.cleared.push(c.id)

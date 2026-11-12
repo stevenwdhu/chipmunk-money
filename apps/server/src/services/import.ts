@@ -23,55 +23,42 @@ import { insertTransaction } from './transactions'
 type PreviewInput = z.output<typeof importPreviewSchema>
 type CommitInput = z.output<typeof importCommitSchema>
 
-interface ExistingTx {
+/** What an import's row duplicates: a transaction of the account, and whether another ledger holds it. */
+interface Duplicate {
   id: number
-  date: string
-  amount: number
-  payeeKey: string
-  externalId: string | null
+  /** Another ledger holds it (a shared account's): still a duplicate, but a preview doesn't name it. */
+  elsewhere: boolean
 }
 
 /**
- * For each row, the id of an existing transaction it duplicates, or null. A row with an
- * `externalId` matches the transaction with that id (deleted ones too, so a deleted transaction
- * isn't imported again); otherwise rows match on date, amount and payee, allowing a few days of
- * drift because pending dates often shift when they post.
+ * For each row, the existing transaction it duplicates, or null. A row with an `externalId` matches
+ * the transaction with that id (deleted ones too, so a deleted transaction isn't imported again);
+ * otherwise rows match on date, amount and payee, allowing a few days of drift because pending
+ * dates often shift when they post. A shared account's transactions count in every ledger that
+ * holds them (ctx.accountWide.importedRows), so one moved to another ledger isn't imported again.
  */
 function findDuplicates(
   ctx: AppContext,
   accountId: number,
   rows: Array<{ date: string; amountMinor: number; payee: string; externalId?: string | null }>,
-) {
+): Array<Duplicate | null> {
   if (!rows.length) return []
   const externalIds = rows.map((r) => r.externalId).filter((x): x is string => !!x)
   if (new Set(externalIds).size !== externalIds.length) badRequest('Each externalId can only appear once per import')
-  const byExternalId = new Map(
-    externalIds.length
-      ? (
-          ctx.q.all<{ id: number; externalId: string }>(
-            `SELECT id, external_id AS externalId FROM transactions
-             WHERE ledger_id = @ledger AND account_id = ? AND external_id IN (SELECT value FROM json_each(?))`,
-            accountId,
-            JSON.stringify(externalIds),
-          )
-        ).map((r) => [r.externalId, r.id])
-      : [],
-  )
-
   const dates = rows.map((r) => r.date).sort()
-  const existing = ctx.q.all<ExistingTx>(
-    `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, external_id AS externalId FROM transactions
-     WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?`,
-    accountId,
-    addDays(dates[0]!, -3),
-    addDays(dates[dates.length - 1]!, 3),
-  )
+  const from = addDays(dates[0]!, -3)
+  const to = addDays(dates[dates.length - 1]!, 3)
+  const found = ctx.accountWide.importedRows(accountId, { externalIds, from, to })
+  const wanted = new Set(externalIds)
+  const byExternalId = new Map(found.filter((r) => r.externalId && wanted.has(r.externalId)).map((r) => [r.externalId!, r]))
+  const existing = found.filter((r) => !r.deleted && r.date >= from && r.date <= to)
+  const duplicate = (r: { id: number; ledgerId: string }): Duplicate => ({ id: r.id, elsewhere: r.ledgerId !== ctx.ledger.id })
   const used = new Set<number>()
 
   return rows.map((row) => {
     if (row.externalId) {
-      const id = byExternalId.get(row.externalId)
-      if (id !== undefined) return id
+      const held = byExternalId.get(row.externalId)
+      if (held) return duplicate(held)
     }
     // A transaction that came with its own id is only a duplicate of one that didn't, so two
     // identical coffees with different ids both count.
@@ -91,7 +78,7 @@ function findDuplicates(
           (e.payeeKey === key || payeeSimilarity(e.payeeKey, key) >= 0.5),
       )
     if (near) used.add(near.id)
-    return near?.id ?? null
+    return near ? duplicate(near) : null
   })
 }
 
@@ -106,11 +93,14 @@ export function previewImport(ctx: AppContext, input: PreviewInput): ImportPrevi
     const key = `${payeeKeyOf(ctx, row.payee)}|${Math.sign(row.amountMinor)}`
     if (!cache.has(key)) cache.set(key, historySuggestion(ctx, row.payee, row.amountMinor))
     const s = cache.get(key)
+    const dupe = dupes[i]
     return {
       ...row,
       notes: row.notes ?? null,
       category: row.category ?? null,
-      duplicateOf: dupes[i] ?? null,
+      // Another ledger's transaction is a duplicate too, but its id isn't this ledger's to show.
+      duplicateOf: dupe && !dupe.elsewhere ? dupe.id : null,
+      duplicateElsewhere: !!dupe?.elsewhere,
       suggestion: s
         ? { categoryId: s.categoryId, source: s.source, confidence: s.confidence, reason: s.reason }
         : { categoryId: null, source: 'none', confidence: 0, reason: 'No match yet' },

@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto'
 import { addDays, daysBetween, payeeKey, payeeSimilarity, type BankProviderKind, type ISODate, type SwitchResult } from '@chipmunk/shared'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import type { z } from 'zod'
 import { historySuggestion } from '../categorize'
-import type { AppContext } from '../context'
+import type { SwitchRow } from '../account-rows'
+import type { AppContext, CtxOf } from '../context'
 import { deleteTransaction, insertTransaction } from '../transactions'
 import { followBankPayee } from '../payee-names'
 import { logPayloads } from './apply'
@@ -109,47 +109,59 @@ export function planSwitch(local: SwitchLocal[], remote: RemoteTransaction[], ke
   }
 }
 
-/** Changes whenever the account's transactions change in a way a switch's review shows. */
+/**
+ * Changes whenever the account's transactions change in a way a switch's review shows: in every
+ * ledger that holds them, and when one moves between them.
+ */
 export function localStamp(ctx: AppContext, accountId: number): string {
-  const rows = ctx.q
-    .all(
-      `SELECT id, date, amount_minor, payee, name, external_id, deleted_at IS NOT NULL AS deleted
-       FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId ORDER BY id`,
-      { accountId },
-    )
-    .map((r) => Object.values(r))
-  return createHash('sha1').update(JSON.stringify(rows)).digest('hex')
+  return ctx.accountWide.switchStamp(accountId)
 }
 
 type SwitchInput = z.output<typeof accountBankSwitchSchema>
 
+/** What a switch changed, and the ledgers whose rows it changed (its home, where new ones land, always). */
+export type AppliedSwitch = SwitchResult & { newIds: number[]; ledgers: Set<string> }
+
+/** A write by id changes that one row: through the wrong ledger's context it would change none, and look done. */
+function one(result: { changes: number }, what: string, id: number) {
+  if (result.changes !== 1) throw new Error(`The switch's ${what} of transaction ${id} changed ${result.changes} rows, not 1`)
+}
+
 /**
- * Applies what you decided in the review, for the account's transactions from `from` on:
+ * Applies what you decided in the review, for the account's transactions from `from` on, run in
+ * its home (`ctx`). A shared account's rows are paired in every ledger that holds them, and each is
+ * written where it's held, through that ledger's context (`ctxOf`):
  * - paired: yours takes the bank's id, date, time and status (and amount, unless you keep yours,
  *   which syncs then leave alone);
- * - only the bank's: added, or (skipped) kept deleted, so a sync doesn't bring it back;
+ * - only the bank's: added in the home, or (skipped) kept deleted, so a sync doesn't bring it back.
+ *   One whose bank id a row already has, in any ledger, isn't added again;
  * - only yours: deleted (`remove`), or kept as they are, where syncs leave them alone.
  */
-export function applySwitch(ctx: AppContext, accountId: number, provider: BankProviderKind, remote: RemoteTransaction[], input: SwitchInput) {
-  const result: SwitchResult & { newIds: number[] } = { matched: 0, added: 0, skipped: 0, removed: 0, kept: 0, newIds: [] }
-  const local = ctx.q.all<{
-    id: number
-    date: string
-    payee: string
-    payeeKey: string
-    origin: 'manual' | 'import' | 'sync'
-    externalId: string | null
-    deletedAt: string | null
-  }>(
-    `SELECT id, date, payee, payee_key AS payeeKey, origin, external_id AS externalId, deleted_at AS deletedAt
-     FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND date >= @from`,
-    { accountId, from: addDays(input.from, -1) },
-  )
+export function applySwitch(
+  ctx: AppContext,
+  ctxOf: CtxOf,
+  accountId: number,
+  provider: BankProviderKind,
+  remote: RemoteTransaction[],
+  input: SwitchInput,
+): AppliedSwitch {
+  const home = ctx.ledger.id
+  const result: AppliedSwitch = { matched: 0, added: 0, skipped: 0, removed: 0, kept: 0, newIds: [], ledgers: new Set([home]) }
+  // The frozen rows of an account split off from this one are to be paired here too: such a row is
+  // only ever given the new bank id, never changed or removed.
+  const local = ctx.accountWide.switchRows(accountId, addDays(input.from, -1))
   const localById = new Map(local.map((l) => [l.id, l]))
   const byRemote = new Map(remote.map((r) => [r.remoteId, r]))
-  /** Which transaction of this account already has a bank id. */
-  const holder = (remoteId: string) =>
-    ctx.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND external_id = @remoteId', { accountId, remoteId })
+  const contexts = new Map<string, AppContext>([[home, ctx]])
+  /** The context of the ledger that holds a row: every write to it goes through that. */
+  const holderOf = (row: SwitchRow) => {
+    let c = contexts.get(row.ledgerId)
+    if (!c) contexts.set(row.ledgerId, (c = ctxOf(row.ledgerId)))
+    result.ledgers.add(row.ledgerId)
+    return c
+  }
+  /** Which transaction of this account already has a bank id, in any ledger. */
+  const holder = (remoteId: string) => ctx.accountWide.holder(accountId, remoteId)?.id
   const updateFromBank = `UPDATE transactions SET external_id = @externalId,
        date = CASE WHEN corrected_at IS NULL THEN @date ELSE date END,
        datetime = CASE WHEN corrected_at IS NOT NULL THEN datetime WHEN @datetime IS NOT NULL THEN @datetime
@@ -167,7 +179,8 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
       confident: category.confident ? 1 : 0,
     })
   const now = ctx.now().toISOString()
-  const forget = (id: number) => ctx.q.run('UPDATE transactions SET external_id = NULL WHERE id = @id AND ledger_id = @ledger', { id })
+  const forget = (l: SwitchRow) =>
+    one(holderOf(l).q.run('UPDATE transactions SET external_id = NULL WHERE id = @id AND ledger_id = @ledger', { id: l.id }), 'kept bank id', l.id)
   const markDeleted = (id: number) => ctx.q.run('UPDATE transactions SET deleted_at = @now WHERE id = @id AND ledger_id = @ledger', { id, now })
   const skip = new Set(input.skip)
   const remove = new Set(input.remove)
@@ -181,7 +194,8 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
       if (!r || !l || paired.has(l.id) || pairedRemote.has(r.remoteId)) continue
       const held = holder(r.remoteId)
       if (held !== undefined && held !== l.id) continue
-      ctx.q.run(updateFromBank, {
+      const at = holderOf(l)
+      const changed = at.q.run(updateFromBank, {
         id: l.id,
         externalId: r.remoteId,
         date: r.date,
@@ -193,8 +207,9 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
         bankConfident: r.category?.confident ? 1 : 0,
         now,
       })
+      one(changed, 'update', l.id)
       // Its payee is the new service's now.
-      followBankPayee(ctx, l, r.payee)
+      followBankPayee(at, l, r.payee)
       paired.add(l.id)
       pairedRemote.add(r.remoteId)
       result.matched++
@@ -233,11 +248,12 @@ export function applySwitch(ctx: AppContext, accountId: number, provider: BankPr
     for (const l of local) {
       if (paired.has(l.id) || l.deletedAt || l.date < input.from) continue
       if (remove.has(l.id)) {
-        deleteTransaction(ctx, l.id)
+        // Deleted where it's held. A split payment is to be refused here, until its split is undone.
+        deleteTransaction(holderOf(l), l.id)
         result.removed++
       } else {
         // Kept as yours: no other service's id, so syncs leave it alone.
-        if (l.externalId) forget(l.id)
+        if (l.externalId) forget(l)
         result.kept++
       }
     }

@@ -1692,7 +1692,16 @@ export const TOOLS: ToolDef[] = [
       categorized: z.number(),
       needsReview: z.number().optional(),
       preview: z
-        .array(z.object({ date: z.string(), payee: z.string(), amount: z.string(), duplicateOf: z.number().nullable(), category: z.string().nullable() }))
+        .array(
+          z.object({
+            date: z.string(),
+            payee: z.string(),
+            amount: z.string(),
+            duplicateOf: z.number().nullable(),
+            duplicateElsewhere: z.boolean().describe('A duplicate of a transaction another ledger has on this shared account, which isn’t named.'),
+            category: z.string().nullable(),
+          }),
+        )
         .optional(),
     }),
     annotations: WRITE,
@@ -1703,18 +1712,23 @@ export const TOOLS: ToolDef[] = [
       const rows = args.rows.map((r, i) => ({ line: i + 1, date: r.date, payee: r.payee, amountMinor: toMinor(r.amount), notes: r.notes, externalId: r.externalId }))
       if (!args.confirm) {
         const preview = await ctx.api.post<ImportPreviewRow[]>(`/ledgers/${l.slug}/import/preview`, { accountId, rows })
-        const fresh = preview.filter((p) => p.duplicateOf === null)
+        // A duplicate another ledger has (a shared account's) is one too, though it isn't named.
+        const fresh = preview.filter((p) => p.duplicateOf === null && !p.duplicateElsewhere)
         const categorized = fresh.filter((p) => p.suggestion.categoryId !== null).length
         const view = preview.slice(0, 100).map((p) => ({
           date: p.date,
           payee: p.payee,
           amount: money(p.amountMinor),
           duplicateOf: p.duplicateOf,
+          duplicateElsewhere: p.duplicateElsewhere,
           category: lk.categoryName(p.suggestion.categoryId),
         }))
         const text = [
           `Preview for ${lk.accountName(accountId)} in ${l.name}: ${plural(fresh.length, 'new row')}, ${plural(preview.length - fresh.length, 'duplicate')}; ${categorized} of the new rows would get a category from history. Nothing was imported yet: call again with confirm: true.`,
-          ...view.map((p) => `${p.date} ${p.payee} ${p.amount} · ${p.duplicateOf ? `duplicate of #${p.duplicateOf}` : (p.category ?? 'uncategorized')}`),
+          ...view.map(
+            (p) =>
+              `${p.date} ${p.payee} ${p.amount} · ${p.duplicateOf ? `duplicate of #${p.duplicateOf}` : p.duplicateElsewhere ? 'already in another ledger' : (p.category ?? 'uncategorized')}`,
+          ),
         ].join('\n')
         return { text, data: { ledger: l.slug, committed: false, newRows: fresh.length, duplicates: preview.length - fresh.length, categorized, preview: view } }
       }

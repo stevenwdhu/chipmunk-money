@@ -858,7 +858,10 @@ export const importPreviewRowSchema = z
     notes: z.string().nullable(),
     category: z.string().nullable().optional().describe('The category the bank or another app gave it, kept as its bank category.'),
     externalId: z.string().nullable().optional(),
-    duplicateOf: id.nullable().describe('An existing transaction that looks like the same one.'),
+    duplicateOf: id.nullable().describe('An existing transaction that looks like the same one. Null when there’s none, or another ledger has it (`duplicateElsewhere`).'),
+    duplicateElsewhere: z
+      .boolean()
+      .describe('It looks like a transaction another ledger has on this shared account: a duplicate too, so it isn’t imported, but that transaction isn’t named.'),
     suggestion: categorySuggestionSchema,
   })
   .meta({ id: 'ImportPreviewRow' })
@@ -999,7 +1002,17 @@ export const linkableBankAccountSchema = bankAccountSchema
   .meta({ id: 'LinkableBankAccount' })
 export type LinkableBankAccount = z.output<typeof linkableBankAccountSchema>
 
-const previewLocal = z.object({ id, date, payee: z.string(), amountMinor: minor, deleted: z.boolean().describe('You deleted it: matched, it stays deleted.') })
+const previewLocal = z.object({
+  id,
+  date,
+  payee: z.string(),
+  amountMinor: minor,
+  deleted: z.boolean().describe('You deleted it: matched, it stays deleted.'),
+  elsewhere: z
+    .object({ ledger: z.object({ slug: z.string(), name: z.string() }), account: z.string().nullable().describe('The account it’s on there. Null: this one.') })
+    .optional()
+    .describe('Another ledger has it, on this shared account: the switch changes or deletes it there. Left out for this ledger’s own.'),
+})
 const previewRemote = z.object({ remoteId: z.string(), date, payee: z.string(), amountMinor: minor, pending: z.boolean() })
 
 export const linkPreviewSchema = z

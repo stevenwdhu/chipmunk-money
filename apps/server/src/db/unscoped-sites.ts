@@ -22,7 +22,7 @@ export const UNSCOPED_SITES = {
   },
   'one account in every ledger': {
     file: 'src/services/account-rows.ts',
-    why: "A shared account is held by its home and the ledgers it's shared with, so its parts, its total, its own facts and the ledgers that have it are read by account, across those ledgers. One private wrapper makes the call for every read of the module. Sums, counts and names leave it, and the rows a bank sync matches against, with the ledger that holds each, leave it for the bank code only, never for a response.",
+    why: "A shared account is held by its home and the ledgers it's shared with, so its parts, its total, its own facts and the ledgers that have it are read by account, across those ledgers. One private wrapper makes the call for every read of the module. Sums, counts and names leave it, and the account's rows, with the ledger that holds each, leave it for the bank code (what a sync matches against and a switch pairs) and a CSV import's duplicate check only. Of those, only a switch's review shows another ledger's rows, to a caller allowed in every ledger that has the account.",
   },
   'full backup': {
     file: 'src/storage.ts',
