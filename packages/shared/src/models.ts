@@ -985,27 +985,64 @@ export const settingsSchema = z
   .meta({ id: 'Settings' })
 export type Settings = z.output<typeof settingsSchema>
 
+/**
+ * One thing AI was asked to do. The primary provider failing and the fallback answering is one
+ * record, and so is a failure asked again later: the same record is corrected.
+ */
+export const aiRecordSchema = z
+  .object({
+    id,
+    kind: z
+      .enum(['categorize', 'names', 'test'])
+      .nullable()
+      .describe('What was asked: a category for a payee, names for payees, or a connection test. Null on a record from before this was kept: one call to one provider.'),
+    subject: z.string().nullable().describe('The payee as the ledger calls it (`categorize`).'),
+    payees: z.number().int().nullable().describe('How many payees were to be named (`names`).'),
+    ledger: z.string().describe('The name of the ledger it was for.'),
+    ledgerSlug: z.string().describe('That ledger’s slug, for POST /ledgers/{ledger}/ai/usage/{id}/retry.'),
+    slot: z.enum(['primary', 'fallback']).describe('The provider that answered, or the last one tried.'),
+    model: z.string().describe('Its model.'),
+    ok: z.boolean().describe('It was answered.'),
+    status: z
+      .enum(['ok', 'failed', 'unneeded'])
+      .describe(
+        '`ok`: answered. `failed`: not answered. `unneeded`: not answered, and no longer needed: the payee has no uncategorized transaction left, or the payees all have names now.',
+      ),
+    canRetry: z.boolean().describe('It failed, is still needed, and you can ask again (POST /ledgers/{ledger}/ai/usage/{id}/retry).'),
+    retrying: z.boolean().describe('It’s being asked again now.'),
+    outcome: z.string().nullable().describe('The category picked (`categorize`, `test`). Null when it failed, or picked none the ledger uses.'),
+    named: z.number().int().nullable().describe('How many payees got a name (`names`). Null when it failed.'),
+    latencyMs: z.number().int().describe('How long the last try took, every provider asked counted.'),
+    tries: z.number().int().describe('How many times it was asked.'),
+    createdAt: timestamp.describe('When it was first asked.'),
+    triedAt: timestamp.describe('When it was last asked.'),
+    firstFailedAt: timestamp.nullable().describe('When it first failed. Kept when a later try answers, so a record with this that is `ok` was corrected.'),
+    error: z.string().nullable().describe('Why the last try failed.'),
+    primaryError: z.string().nullable().describe('Why the primary provider failed, when the fallback was asked after it.'),
+  })
+  .meta({ id: 'AiRecord' })
+export type AiRecord = z.output<typeof aiRecordSchema>
+
 export const aiUsageSchema = z
   .object({
-    calls: z.number().int(),
-    failures: z.number().int(),
-    inputTokens: z.number().int(),
+    requests: z.number().int().describe('Things AI was asked to do.'),
+    failed: z.number().int().describe('Those that failed and weren’t answered since, the ones no longer needed left out.'),
+    retryable: z.number().int().describe('The failed ones you can ask again: all of them, not only those in `recent`.'),
+    retrying: z.number().int().describe('Those being asked again now. Read this again until it’s 0.'),
+    inputTokens: z.number().int().describe('Of every call to a provider, a failed primary’s and each retry’s too.'),
     outputTokens: z.number().int(),
-    recent: z.array(
-      z.object({
-        id,
-        createdAt: timestamp,
-        slot: z.enum(['primary', 'fallback']),
-        model: z.string(),
-        ok: z.boolean(),
-        latencyMs: z.number().int(),
-        error: z.string().nullable(),
-        ledger: z.string().optional().describe('Which ledger’s categorization made the call (app-wide usage only).'),
-      }),
-    ),
+    recent: z.array(aiRecordSchema).describe('The newest 20.'),
   })
   .meta({ id: 'AiUsage' })
 export type AiUsage = z.output<typeof aiUsageSchema>
+
+export const aiRetrySchema = z
+  .object({
+    started: z.number().int().describe('Records being asked again, in the background. GET /ai/usage says when they’re done (`retrying`).'),
+    working: z.number().int().describe('Records left for now, because AI is already working in their ledger. Try again when it’s done.'),
+  })
+  .meta({ id: 'AiRetry' })
+export type AiRetry = z.output<typeof aiRetrySchema>
 
 export const aiTestResultSchema = z
   .object({

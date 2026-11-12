@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { testContext } from '../test/helpers'
 import { updateSettings } from '../services/settings'
+import type { AiAttempt } from './records'
 
 const calls: string[] = []
 vi.mock('./providers', () => ({
@@ -20,7 +21,7 @@ describe('AI runner', () => {
     calls.length = 0
   })
 
-  it('falls back when the primary provider fails and logs both calls', async () => {
+  it('falls back when the primary provider fails and notes both calls in the request’s log', async () => {
     const ctx = testContext()
     updateSettings(ctx.meta, {
       ai: {
@@ -28,14 +29,24 @@ describe('AI runner', () => {
         fallback: { kind: 'openai-compatible', model: 'llama', baseUrl: 'http://localhost:11434/v1' },
       },
     })
-    const res = await configuredCategorizer(ctx)(req)
+    const log: AiAttempt[] = []
+    const res = await configuredCategorizer(ctx, log)(req)
     expect(res).toMatchObject({ category: 'Coffee', slot: 'fallback', model: 'llama' })
     expect(calls).toEqual(['broken', 'llama'])
-    const logged = ctx.q.all('SELECT slot, ok FROM ai_calls WHERE ledger_id = @ledger ORDER BY id')
-    expect(logged).toEqual([
-      { slot: 'primary', ok: 0 },
-      { slot: 'fallback', ok: 1 },
+    expect(log).toEqual([
+      { slot: 'primary', model: 'broken', ok: false, error: 'boom' },
+      { slot: 'fallback', model: 'llama', ok: true, inputTokens: 10, outputTokens: 5 },
     ])
+    // The record is the caller's to write: the runner writes none.
+    expect(ctx.q.all('SELECT id FROM ai_calls WHERE ledger_id = @ledger')).toEqual([])
+  })
+
+  it('throws why the last one failed when no provider answers', async () => {
+    const ctx = testContext()
+    updateSettings(ctx.meta, { ai: { primary: { kind: 'anthropic', model: 'broken' } } })
+    const log: AiAttempt[] = []
+    await expect(configuredCategorizer(ctx, log)(req)).rejects.toThrow('boom')
+    expect(log).toEqual([{ slot: 'primary', model: 'broken', ok: false, error: 'boom' }])
   })
 
   it('returns null when nothing is configured', async () => {

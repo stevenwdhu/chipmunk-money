@@ -5,6 +5,7 @@ import {
   chatgptFinishSchema,
   chatgptModelSchema,
   chatgptStatusSchema,
+  aiRetrySchema,
   aiUsageSchema,
   apiKeyCreatedSchema,
   apiKeyCreateSchema,
@@ -40,7 +41,6 @@ import {
   plaidLinkTokenRequestSchema,
   plaidLinkTokenSchema,
   syncResultSchema,
-  type AiUsage,
   type BankConnection,
   payeeNamePreviewQuerySchema,
   payeeNamePreviewSchema,
@@ -55,6 +55,7 @@ import {
   payeeTidyStatusSchema,
   payeeTidyUpdateSchema,
 } from '@chipmunk/shared'
+import { recorded } from '../ai/records'
 import { runSlot } from '../ai/runner'
 import { actorName, canUseLedger, createApiKey, listApiKeys, requireLedger, revokeApiKey } from '../api/auth'
 import { ApiRouter, type BaseEnv } from '../api/router'
@@ -62,6 +63,7 @@ import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import type { BankService } from '../services/bank/service'
 import { diff, recordActivity } from '../services/activity'
+import { aiUsage, retryAll } from '../services/ai-requests'
 import * as catalog from '../services/catalog-edit'
 import * as cats from '../services/categories'
 import * as names from '../services/payee-names'
@@ -71,7 +73,7 @@ import { publicSettings, today, updateSettings } from '../services/settings'
 import { env } from '../env'
 import * as setup from '../services/setup'
 import { fullBackup, type Storage } from '../storage'
-import { ledgerAiUsage } from './ledger'
+import { AI_USAGE, aiCaller } from './ledger'
 
 const ledgerParam = z.object({ ledger: z.string().min(1) })
 
@@ -105,6 +107,13 @@ export function appRoutes(storage: Storage, bank: BankService) {
   ) => {
     if (actor.kind === 'key' && actor.key.ledgers) throw new HTTPException(403, { message })
   }
+
+  /** The ledgers this caller can use, each as its context. */
+  const usable = (actor: BaseEnv['Variables']['actor']) =>
+    registry
+      .list()
+      .filter((l) => canUseLedger(actor, l.id))
+      .map((l) => registry.context(l.id))
 
   const DEFAULT_LEDGER = 'Which ledger the app opens, and the ledgers’ order, are for the whole app, so a key limited to some ledgers can’t change them.'
 
@@ -369,7 +378,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
       ...set,
       scope: 'admin',
       summary: 'Test an AI provider',
-      description: 'Asks the provider to categorize a sample transaction using the default ledger’s categories.',
+      description: 'Asks the provider to categorize a sample transaction using the default ledger’s categories. It’s recorded in that ledger’s AI usage as a connection test.',
       body: aiTestSchema,
       response: aiTestResultSchema,
     },
@@ -379,17 +388,29 @@ export function appRoutes(storage: Storage, bank: BankService) {
       const started = Date.now()
       const { categories } = cats.listCategories(ctx)
       try {
-        const res = await runSlot(ctx, body.slot, {
-          payee: 'TIM HORTONS #4410 TORONTO ON',
-          amountMinor: -485,
-          date: today(ctx),
-          accountType: 'credit',
-          notes: null,
-          categories: categories
-            .filter((x) => !x.archived && !x.excludeFromTotals)
-            .map((x) => ({ name: x.name, group: null, isIncome: x.isIncome })),
-          examples: [],
-        })
+        // Recorded with the default ledger's AI usage, as a test: nothing asks it again.
+        const res = await recorded(
+          ctx,
+          { kind: 'test', subject: null, key: null },
+          (log) =>
+            runSlot(
+              ctx,
+              body.slot,
+              {
+                payee: 'TIM HORTONS #4410 TORONTO ON',
+                amountMinor: -485,
+                date: today(ctx),
+                accountType: 'credit',
+                notes: null,
+                categories: categories
+                  .filter((x) => !x.archived && !x.excludeFromTotals)
+                  .map((x) => ({ name: x.name, group: null, isIncome: x.isIncome })),
+                examples: [],
+              },
+              log,
+            ),
+          (res) => ({ outcome: res.category }),
+        )
         return { ok: true, category: res.category, confidence: res.confidence, model: res.model, latencyMs: Date.now() - started }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err), latencyMs: Date.now() - started }
@@ -482,19 +503,32 @@ export function appRoutes(storage: Storage, bank: BankService) {
   )
   r.get(
     '/ai/usage',
-    { ...set, scope: 'read', summary: 'Get AI usage', description: 'AI calls across every ledger you can use, with the most recent ones.', response: aiUsageSchema },
+    {
+      ...set,
+      scope: 'read',
+      summary: 'Get AI usage',
+      description: `Across every ledger you can use. ${AI_USAGE}`,
+      response: aiUsageSchema,
+    },
+    (c) => aiUsage(usable(c.var.actor), aiCaller(c.var.actor, names.worldOf(storage))),
+  )
+  r.post(
+    '/ai/usage/retry',
+    {
+      ...set,
+      scope: 'write',
+      summary: 'Ask AI again about every failed request',
+      description:
+        'Every failed record that can be retried (`retryable`), in each ledger you can use, not only the ones GET /ai/usage lists: as POST /ledgers/{ledger}/ai/usage/{id}/retry does for one, in the background. A ledger where AI is already working is left for now (`working`). A key limited to some ledgers asks about those only, and never for payee names, which are made across every ledger.',
+      response: aiRetrySchema,
+      status: 202,
+    },
     (c) => {
-      const usage: AiUsage = { calls: 0, failures: 0, inputTokens: 0, outputTokens: 0, recent: [] }
-      for (const ledger of registry.list().filter((l) => canUseLedger(c.var.actor, l.id))) {
-        const one = ledgerAiUsage(registry.context(ledger.id))
-        usage.calls += one.calls
-        usage.failures += one.failures
-        usage.inputTokens += one.inputTokens
-        usage.outputTokens += one.outputTokens
-        usage.recent.push(...one.recent.map((x) => ({ ...x, ledger: ledger.name })))
-      }
-      usage.recent = usage.recent.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20)
-      return usage
+      const actor = c.var.actor
+      const by = { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null }
+      return retryAll(usable(actor), aiCaller(actor, names.worldOf(storage)), (ctx, count) =>
+        recordActivity(ctx, by, { action: 'categorize', entity: 'transaction', summary: `Asked AI again about ${count} failed request${count === 1 ? '' : 's'}` }),
+      )
     },
   )
 

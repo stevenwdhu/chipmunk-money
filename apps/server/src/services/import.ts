@@ -9,10 +9,11 @@ import {
 } from '@chipmunk/shared'
 import type { z } from 'zod'
 import type { importCommitSchema, importPreviewSchema } from '@chipmunk/shared'
+import { categorizeKey } from '../ai/records'
 import { aiEnabled } from '../ai/runner'
 import { badRequest } from '../lib/http'
 import { requireHome, saveImportMapping } from './accounts'
-import { aiSuggestion, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
+import { aiSuggestion, directionOf, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
 import type { AppContext } from './context'
 import { payeeKeyOf } from './payee-namer'
 import { isCardReward, matchTransactions } from './matching'
@@ -216,25 +217,25 @@ export function aiJobStatus(ctx: AppContext): AiJobStatus {
   return job
 }
 
+interface Uncategorized {
+  id: number
+  accountId: number
+  date: string
+  amount: number
+  payee: string
+  payeeKey: string
+  notes: string | null
+  bankCategory: string | null
+  bankConfident: number
+}
+
 /**
- * Asks the configured LLM about uncategorized transactions, one request per distinct payee, and
- * applies the answer to every transaction from that payee (flagged for review). Never a split row
- * (a share of a split payment, or what its holder gave): its category is the split's.
+ * The transactions without a category that AI may be asked about, newest first: not a transfer,
+ * money in that follows what it pays back, or a split row. Money onto a credit card is a payment
+ * (or a refund), never a guess for AI, but cash back and rewards are.
  */
-export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[]; limit?: number } = {}) {
-  const aiJob = aiJobStatus(ctx)
-  if (aiJob.running) return aiJob
-  const candidates = ctx.q.all<{
-    id: number
-    accountId: number
-    date: string
-    amount: number
-    payee: string
-    payeeKey: string
-    notes: string | null
-    bankCategory: string | null
-    bankConfident: number
-  }>(
+function uncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[] } = {}): Uncategorized[] {
+  const candidates = ctx.q.all<Uncategorized>(
     `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
        bank_category AS bankCategory, bank_category_confident AS bankConfident
      FROM transactions
@@ -246,9 +247,26 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
     ...(opts.batchId ? [opts.batchId] : []),
     ...(opts.ids ? [JSON.stringify(opts.ids)] : []),
   )
-  // Money onto a credit card is a payment (or a refund), never a guess for AI; cash back and rewards are.
   const cards = new Set(ctx.q.column<number>("SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND type = 'credit'"))
-  const rows = candidates.filter((r) => !(r.amount > 0 && cards.has(r.accountId) && !isCardReward(r.payee)))
+  return candidates.filter((r) => !(r.amount > 0 && cards.has(r.accountId) && !isCardReward(r.payee)))
+}
+
+/** The payees with a transaction waiting for a category that AI may be asked about, as an AI record names them (categorizeKey). */
+export function payeesWaiting(ctx: AppContext): Set<string> {
+  return new Set(uncategorized(ctx).map((r) => categorizeKey(r.payeeKey, directionOf(r.amount))))
+}
+
+/**
+ * Asks the configured LLM about uncategorized transactions, one request per distinct payee, and
+ * applies the answer to every transaction from that payee (flagged for review). Never a split row
+ * (a share of a split payment, or what its holder gave): its category is the split's. With `payees`
+ * (as categorizeKey names them), only theirs, however many.
+ */
+export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[]; limit?: number; payees?: string[] } = {}) {
+  const aiJob = aiJobStatus(ctx)
+  if (aiJob.running) return aiJob
+  const only = opts.payees && new Set(opts.payees)
+  const rows = uncategorized(ctx, opts).filter((r) => !only || only.has(categorizeKey(r.payeeKey, directionOf(r.amount))))
   const groups = new Map<string, typeof rows>()
   for (const r of rows) {
     const key = `${r.payeeKey}|${Math.sign(r.amount)}`
@@ -256,7 +274,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
     list.push(r)
     groups.set(key, list)
   }
-  const work = [...groups.values()].slice(0, opts.limit ?? 150)
+  const work = [...groups.values()].slice(0, only ? undefined : (opts.limit ?? 150))
   Object.assign(aiJob, { running: true, total: work.length, done: 0, categorized: 0, startedAt: new Date().toISOString() })
 
   const update = (...params: unknown[]) =>
@@ -276,6 +294,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
             historySuggestion(ctx, first.payee, first.amount) ??
             (await aiSuggestion(ctx, {
               payee: first.payee,
+              payeeKey: first.payeeKey,
               amountMinor: first.amount,
               accountId: first.accountId,
               date: first.date,
@@ -290,7 +309,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
             aiJob.categorized += list.length
           }
         } catch {
-          // Provider errors are logged in ai_calls; keep going with the next payee.
+          // A failed request is recorded in ai_calls; keep going with the next payee.
         }
         aiJob.done++
       }
@@ -367,6 +386,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
           try {
             const s = await aiSuggestion(ctx, {
               payee: first.payee,
+              payeeKey: first.payeeKey,
               amountMinor: first.amount,
               accountId: first.accountId,
               date: first.date,
@@ -388,7 +408,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
               })
             }
           } catch {
-            // Provider errors are logged in ai_calls; keep going with the next one.
+            // A failed request is recorded in ai_calls; keep going with the next one.
           }
           aiJob.done++
         }

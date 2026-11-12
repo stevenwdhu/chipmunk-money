@@ -364,6 +364,8 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'POST /ledgers/:ledger/categorize/suggest', body: (c) => ({ payee: 'COSTCO WHOLESALE #535', accountId: ids(c).card, amountMinor: -15_000 }) },
     { route: 'POST /ledgers/:ledger/categorize/run' },
     { route: 'POST /ledgers/:ledger/categorize/again', body: (c) => ({ ids: [ids(c).purchase] }) },
+    // Its payee has nothing left to categorize, so there's nothing to ask again.
+    { route: 'POST /ledgers/:ledger/ai/usage/:id/retry', params: (c) => ({ id: ids(c).aiRequest }), status: () => 409 },
     { route: 'PUT /ledgers/:ledger/payees/choice', query: () => ({ dryRun: true }), body: (c) => ({ payee: 'HYDRO ONE', mode: 'always', categoryId: live.category(c) }) },
     { route: 'PUT /ledgers/:ledger/payees/choice', body: () => ({ payee: 'HYDRO ONE', mode: 'review' }) },
     // Payee names are the app's: renaming one renames it in every ledger.
@@ -537,6 +539,7 @@ const segmentKind: Record<string, NumberKind> = {
   tags: 'tag',
   recurring: 'recurring',
   'custom-reports': 'report',
+  usage: 'aiRequest',
 }
 /** Kinds whose ids are the same in both ledgers on the shared list. */
 const CATALOG = new Set<NumberKind>(['category', 'otherCategory', 'group', 'label'])

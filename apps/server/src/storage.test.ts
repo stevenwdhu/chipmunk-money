@@ -196,12 +196,12 @@ describe('app-wide AI usage', () => {
     log(family.slug, false)
     log(family.slug, true)
     const usage = (await (await createApp(storage).request('/api/v1/ai/usage', web)).json()) as {
-      calls: number
-      failures: number
+      requests: number
+      failed: number
       inputTokens: number
       recent: Array<{ ledger: string }>
     }
-    expect(usage).toMatchObject({ calls: 3, failures: 1, inputTokens: 30 })
+    expect(usage).toMatchObject({ requests: 3, failed: 1, retryable: 0, inputTokens: 30 })
     expect(usage.recent.map((r) => r.ledger).sort()).toEqual(['Family', 'Family', 'Personal'])
   })
 })

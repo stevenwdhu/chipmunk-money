@@ -334,6 +334,7 @@ Category suggestions from your history, then AI.
 | POST | `/ledgers/{ledger}/categorize/again` | Ask AI again about transactions’ categories. | write |
 | GET | `/ledgers/{ledger}/categorize/status` | Get the AI categorization status. | read |
 | GET | `/ledgers/{ledger}/ai/usage` | Get this ledger’s AI usage. | read |
+| POST | `/ledgers/{ledger}/ai/usage/{id}/retry` | Ask AI again about a failed request. | write |
 
 ### Activity
 
@@ -373,6 +374,7 @@ App-wide settings: time zone and AI providers.
 | DELETE | `/settings/ai/chatgpt` | Sign out of ChatGPT. | admin |
 | GET | `/settings/ai/chatgpt/models` | List the models your ChatGPT plan offers. | admin |
 | GET | `/ai/usage` | Get AI usage. | read |
+| POST | `/ai/usage/retry` | Ask AI again about every failed request. | write |
 
 ### API keys
 

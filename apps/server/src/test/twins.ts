@@ -60,6 +60,8 @@ export interface TwinIds {
   bankAccount: string
   /** A chequing transaction the bank sent. */
   synced: number
+  /** A failed AI request, for a payee with nothing left to categorize. */
+  aiRequest: number
 }
 
 export interface Twin {
@@ -153,13 +155,19 @@ function seedTwin(storage: Storage, ctx: AppContext, canary: string, own: boolea
     synced,
     JSON.stringify({ id: 'bank-fee-1', description: 'BANK FEE' }),
   )
-  for (const [i, ok] of [true, false].entries()) {
+  // An AI request that was answered, and one that failed for a payee with nothing left to categorize.
+  ctx.q.run(
+    `INSERT INTO ai_calls (ledger_id, created_at, slot, model, ok, latency_ms, input_tokens, output_tokens)
+     VALUES (@ledger, '2026-10-01T12:00:00.000Z', 'primary', 'stub', 1, 120, 300, 20)`,
+  )
+  const aiRequest = Number(
     ctx.q.run(
-      `INSERT INTO ai_calls (ledger_id, created_at, slot, model, ok, latency_ms, input_tokens, output_tokens, error)
-       VALUES (@ledger, @at, 'primary', 'stub', @ok, 120, 300, 20, @error)`,
-      { at: `2026-10-0${i + 1}T12:00:00.000Z`, ok: ok ? 1 : 0, error: ok ? null : 'timed out' },
-    )
-  }
+      `INSERT INTO ai_calls (ledger_id, created_at, slot, model, ok, latency_ms, input_tokens, output_tokens, error, kind, subject, subject_key, first_failed_at, tried_at)
+       VALUES (@ledger, '2026-10-02T12:00:00.000Z', 'primary', 'stub', 0, 120, 300, 20, 'timed out', 'categorize', 'Gone Cafe ' || @canary, 'out:gone cafe',
+         '2026-10-02T12:00:00.000Z', '2026-10-02T12:00:00.000Z')`,
+      { canary },
+    ).lastInsertRowid,
+  )
 
   const recurring = one<number>(ctx, "SELECT id FROM recurring_items WHERE ledger_id = @ledger AND status = 'active' ORDER BY name, id LIMIT 1")
   const ids: TwinIds = {
@@ -189,6 +197,7 @@ function seedTwin(storage: Storage, ctx: AppContext, canary: string, own: boolea
     label: one<number>(ctx, 'SELECT id FROM ledger_labels WHERE ledger_id = @ledger ORDER BY sort, id LIMIT 1'),
     bankAccount,
     synced,
+    aiRequest,
   }
 
   // The canary, in free text of every kind the ledger has.

@@ -12,6 +12,7 @@ import {
   activityPageSchema,
   activityQuerySchema,
   aiJobStatusSchema,
+  aiRetrySchema,
   aiUsageSchema,
   balancePointSchema,
   balanceSnapshotSchema,
@@ -110,7 +111,6 @@ import {
   transactionUpdateSchema,
   trendReportSchema,
   upcomingPaymentSchema,
-  type AiUsage,
   type CustomReport,
   type Transaction,
   filterParam,
@@ -130,6 +130,7 @@ import { joinPreview, requireOwnList, setCategorySharing, usesSharedList, type J
 import * as cats from '../services/categories'
 import * as customReports from '../services/custom-reports'
 import * as labels from '../services/labels'
+import { ledgerAiUsage, retryRecord, type AiCaller } from '../services/ai-requests'
 import * as names from '../services/payee-names'
 import { tidyNewPayees } from '../services/payee-tidy'
 import * as payees from '../services/payees'
@@ -227,6 +228,17 @@ const describe = (t: Transaction) => `${t.payee} ${money(t)} on ${t.date}`
 /** What a key limited to some ledgers is told by the routes that reach another ledger a shared account is in. */
 const ACROSS =
   ' A key limited to some ledgers must be allowed in every ledger this touches (403 otherwise). An id another ledger holds is answered like one that doesn’t exist.'
+
+/** What a list of AI records says, for the ledger's and the app's. */
+export const AI_USAGE =
+  'What AI was asked to do, one record per thing asked: a category for a payee (the payee as the ledger calls it is all that’s kept of the transaction), names for payees, a connection test. The primary provider failing and the fallback answering is one record that is `ok`, with `primaryError`. A failure asked again (a retry, the next sync, by hand) corrects its record, never a second one. A failed record reads `unneeded` once nothing is left to ask: the payee has no uncategorized transaction, or the payees all have names. `recent` is the newest 20, and the totals count every record.'
+
+/** Who asks about AI records: what they may do decides what they can retry. */
+export const aiCaller = (actor: Actor, world: names.PayeeWorld): AiCaller => ({
+  write: actor.kind === 'web' || actor.key.scopes.includes('write'),
+  everyLedger: actor.kind === 'web' || !actor.key.ledgers,
+  world,
+})
 
 /** Routes for one ledger's data, mounted at /api/v1/ledgers/:ledger. */
 export function ledgerRoutes(storage: Storage, bank: BankService) {
@@ -1628,7 +1640,35 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
   r.get('/categorize/status', { ...ai, scope: 'read', summary: 'Get the AI categorization status', response: aiJobStatusSchema }, (c) =>
     imports.aiJobStatus(c.var.ctx),
   )
-  r.get('/ai/usage', { ...ai, scope: 'read', summary: 'Get this ledger’s AI usage', response: aiUsageSchema }, (c) => ledgerAiUsage(c.var.ctx))
+  r.get(
+    '/ai/usage',
+    {
+      ...ai,
+      scope: 'read',
+      summary: 'Get this ledger’s AI usage',
+      description: AI_USAGE,
+      response: aiUsageSchema,
+    },
+    (c) => ledgerAiUsage(c.var.ctx, aiCaller(c.var.actor, names.worldOf(storage))),
+  )
+  r.post(
+    '/ai/usage/:id/retry',
+    {
+      ...ai,
+      scope: 'write',
+      summary: 'Ask AI again about a failed request',
+      description:
+        'For a record that failed and is still needed (`canRetry`). It asks about things as they are now, in the background: the payee’s transactions still uncategorized, as POST /categorize/run does for them, or the payees still without a name. The same record is corrected: answered, it turns `ok` and keeps `firstFailedAt`. GET /ai/usage says when it’s done (`retrying`). 409, saying why, for a record that was answered, is no longer needed, is a connection test or is from before requests were recorded, and while AI is already working in this ledger. Asking for names again is for a caller that can use every ledger (403).',
+      params: z.object({ id: z.coerce.number().int().positive() }),
+      response: aiRetrySchema,
+      status: 202,
+    },
+    (c, { params }) => {
+      const result = retryRecord(c.var.ctx, aiCaller(c.var.actor, names.worldOf(storage)), params.id)
+      log(c, { action: 'categorize', entity: 'transaction', summary: 'Asked AI again about a failed request' })
+      return result
+    },
+  )
 
   // Payees ---------------------------------------------------------------
   const pay = { tag: 'Payees' } as const
@@ -1800,18 +1840,4 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
   )
 
   return r
-}
-
-/** AI calls made while categorizing this ledger's transactions. */
-export function ledgerAiUsage(ctx: AppContext): AiUsage {
-  const totals = ctx.q.get<Omit<AiUsage, 'recent'>>(
-    `SELECT count(*) AS calls, coalesce(sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failures,
-       coalesce(sum(input_tokens), 0) AS inputTokens, coalesce(sum(output_tokens), 0) AS outputTokens
-     FROM ai_calls WHERE ledger_id = @ledger`,
-  )!
-  const recent = ctx.q.all<AiUsage['recent'][number]>(
-    `SELECT id, created_at AS createdAt, slot, model, ok, latency_ms AS latencyMs, error
-     FROM ai_calls WHERE ledger_id = @ledger ORDER BY id DESC LIMIT 20`,
-  )
-  return { ...totals, recent: recent.map((r) => ({ ...r, ok: !!r.ok })) }
 }

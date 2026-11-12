@@ -504,11 +504,11 @@ describe('two ledgers', () => {
     aiCall(family, 'f1', 7, '2026-10-01T11:00:00Z')
 
     const mine = (await call('GET', '/ledgers/family/ai/usage')).body
-    expect(mine).toMatchObject({ calls: 1, inputTokens: 7 })
+    expect(mine).toMatchObject({ requests: 1, inputTokens: 7 })
     expect(mine.recent.map((r: Json) => r.model)).toEqual(['f1'])
 
     const all = (await call('GET', '/ai/usage')).body
-    expect(all).toMatchObject({ calls: 3, inputTokens: 207 })
+    expect(all).toMatchObject({ requests: 3, inputTokens: 207 })
     expect(all.recent.map((r: Json) => [r.model, r.ledger])).toEqual([
       ['p2', 'Personal'],
       ['f1', 'Family'],
@@ -516,7 +516,7 @@ describe('two ledgers', () => {
     ])
     const limited = await key({ scopes: ['read'], ledgers: ['family'] })
     const theirs = (await call('GET', '/ai/usage', undefined, limited.auth)).body
-    expect(theirs).toMatchObject({ calls: 1, inputTokens: 7 })
+    expect(theirs).toMatchObject({ requests: 1, inputTokens: 7 })
     expect(theirs.recent.map((r: Json) => r.ledger)).toEqual(['Family'])
   })
 })

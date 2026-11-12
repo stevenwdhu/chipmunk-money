@@ -1,29 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { aiProviderInfo } from '@chipmunk/shared'
-import type { AppContext } from '../services/context'
+import type { AppContext, MetaStore } from '../services/context'
 import { aiConfig, type AiSlot, type StoredAiConfig } from '../services/settings'
 import { callProvider, callStructured, type StructuredCall } from './providers'
+import type { AiAttempt } from './records'
 import type { LlmCategorizer, LlmCategoryRequest, LlmCategoryResult } from './types'
-
-function logCall(
-  ctx: AppContext,
-  entry: { slot: AiSlot; model: string; latencyMs: number; ok: boolean; error?: string; inputTokens?: number | null; outputTokens?: number | null },
-) {
-  ctx.q.run(
-    `INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, error, input_tokens, output_tokens)
-     VALUES (@ledger, @slot, @model, @latencyMs, @ok, @error, @inputTokens, @outputTokens)`,
-    {
-      slot: entry.slot,
-      model: entry.model,
-      latencyMs: entry.latencyMs,
-      ok: entry.ok ? 1 : 0,
-      error: entry.error?.slice(0, 500) ?? null,
-      inputTokens: entry.inputTokens ?? null,
-      outputTokens: entry.outputTokens ?? null,
-    },
-  )
-}
 
 /**
  * What an HTTP status from a provider means, for a provider at a URL you chose (OpenAI-compatible,
@@ -73,40 +55,41 @@ export function describeError(err: unknown, cfg?: Pick<StoredAiConfig, 'kind' | 
   return err instanceof Error ? err.message : String(err)
 }
 
-/** Calls one configured slot, logging the outcome. Throws on failure. */
-export async function runSlot(ctx: AppContext, slot: AiSlot, req: LlmCategoryRequest): Promise<LlmCategoryResult> {
+/**
+ * Calls one configured slot, noting the call (its tokens, or why it failed) in the request's log.
+ * Throws on failure.
+ */
+export async function runSlot(ctx: AppContext, slot: AiSlot, req: LlmCategoryRequest, log: AiAttempt[]): Promise<LlmCategoryResult> {
   const cfg = aiConfig(ctx.meta, slot)
   if (!cfg) throw new Error(`No ${slot} AI provider is configured`)
-  const started = Date.now()
   try {
     const res = await callProvider(cfg, req, ctx.meta)
-    logCall(ctx, {
-      slot,
-      model: cfg.model,
-      latencyMs: Date.now() - started,
-      ok: true,
-      inputTokens: res.inputTokens,
-      outputTokens: res.outputTokens,
-    })
+    log.push({ slot, model: cfg.model, ok: true, inputTokens: res.inputTokens, outputTokens: res.outputTokens })
     return { category: res.category, confidence: Math.max(0, Math.min(1, res.confidence)), agreesWithBank: res.agreesWithBank ?? false, slot, model: cfg.model }
   } catch (err) {
     const message = describeError(err, cfg)
-    logCall(ctx, { slot, model: cfg.model, latencyMs: Date.now() - started, ok: false, error: message })
+    log.push({ slot, model: cfg.model, ok: false, error: message })
     throw new Error(message, { cause: err })
   }
 }
 
-/** Primary first; on any failure, the fallback; null when neither is configured or both fail. */
-export function configuredCategorizer(ctx: AppContext): LlmCategorizer {
+/**
+ * Primary first; on any failure, the fallback, each call noted in the request's log. Null when
+ * neither is configured; throws why the last one failed when none answered.
+ */
+export function configuredCategorizer(ctx: AppContext, log: AiAttempt[] = []): LlmCategorizer {
   return async (req) => {
+    let last: Error | null = null
     for (const slot of ['primary', 'fallback'] as const) {
       if (!aiConfig(ctx.meta, slot)) continue
       try {
-        return await runSlot(ctx, slot, req)
-      } catch {
+        return await runSlot(ctx, slot, req, log)
+      } catch (err) {
         // try the next slot
+        last = err as Error
       }
     }
+    if (last) throw last
     return null
   }
 }
@@ -117,21 +100,20 @@ export function aiEnabled(ctx: AppContext): boolean {
 
 /**
  * Asks the configured providers one question answered as JSON (the primary, then on any failure the
- * fallback), each call logged in this ledger's AI usage. Throws why the last one failed.
+ * fallback), each call noted in the request's log. Throws why the last one failed.
  */
-export async function askStructured<T>(ctx: AppContext, call: StructuredCall<T>): Promise<{ data: T; model: string }> {
+export async function askStructured<T>(meta: MetaStore, call: StructuredCall<T>, log: AiAttempt[] = []): Promise<{ data: T; model: string }> {
   let last: Error = new Error('No AI provider is set up. Add one in App settings → AI.')
   for (const slot of ['primary', 'fallback'] as const) {
-    const cfg = aiConfig(ctx.meta, slot)
+    const cfg = aiConfig(meta, slot)
     if (!cfg) continue
-    const started = Date.now()
     try {
-      const res = await callStructured(cfg, call, ctx.meta)
-      logCall(ctx, { slot, model: cfg.model, latencyMs: Date.now() - started, ok: true, inputTokens: res.inputTokens, outputTokens: res.outputTokens })
+      const res = await callStructured(cfg, call, meta)
+      log.push({ slot, model: cfg.model, ok: true, inputTokens: res.inputTokens, outputTokens: res.outputTokens })
       return { data: res.data, model: cfg.model }
     } catch (err) {
       const message = describeError(err, cfg)
-      logCall(ctx, { slot, model: cfg.model, latencyMs: Date.now() - started, ok: false, error: message })
+      log.push({ slot, model: cfg.model, ok: false, error: message })
       last = new Error(message, { cause: err })
     }
   }

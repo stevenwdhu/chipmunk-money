@@ -42,7 +42,7 @@ function show(id: number, open: boolean) {
         <CardTitle>Usage</CardTitle>
         <CardDescription>
           <template v-if="usage.data.value">
-            {{ usage.data.value.calls }} requests · {{ usage.data.value.failures }} failed ·
+            {{ usage.data.value.requests }} requests · {{ usage.data.value.failed }} failed ·
             {{ usage.data.value.inputTokens.toLocaleString() }} input / {{ usage.data.value.outputTokens.toLocaleString() }} output tokens
           </template>
         </CardDescription>

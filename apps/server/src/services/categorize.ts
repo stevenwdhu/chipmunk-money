@@ -1,4 +1,5 @@
 import { payeeSimilarity, type CategorySuggestion } from '@chipmunk/shared'
+import { categorizeKey, recorded } from '../ai/records'
 import { aiEnabled, configuredCategorizer } from '../ai/runner'
 import type { LlmCategoryRequest } from '../ai/types'
 import type { AppContext } from './context'
@@ -149,6 +150,8 @@ export function historySuggestion(
 /** What's known about a transaction when asking AI; `bankCategory` is the bank's own (Plaid's), if any. */
 export interface AiInput {
   payee: string
+  /** Which payee it is, as its transaction keeps it. Default: what the payee name rules make of `payee`. */
+  payeeKey?: string
   amountMinor?: number
   accountId?: number
   date?: string
@@ -200,27 +203,38 @@ function buildLlmRequest(ctx: AppContext, input: AiInput): LlmCategoryRequest {
 
 /**
  * AI's pick, to review, unless the bank's own category backs it up: when the bank is sure, the AI
- * agrees with it and is fairly sure itself, it's applied without review.
+ * agrees with it and is fairly sure itself, it's applied without review. The request is recorded in
+ * the ledger's AI usage. Throws when no provider answered, and null when the answer is no category
+ * the ledger uses.
  */
 export async function aiSuggestion(ctx: AppContext, input: AiInput): Promise<SuggestionResult | null> {
   if (!aiEnabled(ctx)) return null
   const req = buildLlmRequest(ctx, input)
   if (!req.categories.length) return null
-  const llm = ctx.llm ?? configuredCategorizer(ctx)
-  const res = await llm(req)
-  if (!res) return null
-  const match = ctx.q.get<{ id: number; isIncome: number }>(
-    'SELECT id, is_income AS isIncome FROM ledger_categories WHERE ledger_id = @ledger AND lower(name) = lower(?) AND archived_at IS NULL',
-    res.category,
+  const payeeKey = input.payeeKey ?? payeeKeyOf(ctx, input.payee)
+  // One record per payee and way the money went: only the payee's name is kept of the transaction.
+  const { res, match } = await recorded(
+    ctx,
+    { kind: 'categorize', subject: payeeNameOf(ctx, input.payee).name, key: categorizeKey(payeeKey, directionOf(input.amountMinor)) },
+    async (log) => {
+      const res = await (ctx.llm ?? configuredCategorizer(ctx, log))(req)
+      if (!res) throw new Error('AI gave no answer.')
+      const match = ctx.q.get<{ id: number; name: string; isIncome: number }>(
+        'SELECT id, name, is_income AS isIncome FROM ledger_categories WHERE ledger_id = @ledger AND lower(name) = lower(?) AND archived_at IS NULL',
+        res.category,
+      )
+      return { res, match: match && signFits(match.isIncome, input.amountMinor) ? match : null }
+    },
+    ({ res, match }) => ({ outcome: match?.name ?? null, slot: res.slot, model: res.model }),
   )
-  if (!match || !signFits(match.isIncome, input.amountMinor)) return null
+  if (!match) return null
   // Not for a payee you always review yourself.
   const backedByBank =
     !!input.bankCategory &&
     !!input.bankConfident &&
     !!res.agreesWithBank &&
     res.confidence >= AGREES_WITH_BANK_CONFIDENCE &&
-    payeeRule(ctx, payeeKeyOf(ctx, input.payee))?.mode !== 'review'
+    payeeRule(ctx, payeeKey)?.mode !== 'review'
   return {
     categoryId: match.id,
     source: 'ai',

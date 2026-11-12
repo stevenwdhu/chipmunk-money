@@ -1,6 +1,7 @@
 import { eq, gte, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { payeeKey, payeeNamer, type PayeeTidyPreview, type PayeeTidyStatus } from '@chipmunk/shared'
+import { namesKey, recorded, type AiAttempt } from '../ai/records'
 import { askStructured } from '../ai/runner'
 import { payeeTidy } from '../db/schema'
 import { badRequest } from '../lib/http'
@@ -26,8 +27,12 @@ export interface KnownNames {
   related: Array<{ name: string; payees: string[] }>
   others: string[]
 }
-/** Names payees as sent, with the names already used for consistency. */
-export type PayeeTidier = (payees: string[], known: KnownNames) => Promise<{ names: Array<{ payee: string; name: string }>; model: string | null }>
+/** Names payees as sent, with the names already used for consistency. Its calls to providers are noted in `log`. */
+export type PayeeTidier = (
+  payees: string[],
+  known: KnownNames,
+  log?: AiAttempt[],
+) => Promise<{ names: Array<{ payee: string; name: string }>; model: string | null }>
 
 const BATCH = 40
 const SAMPLE = 20
@@ -77,12 +82,10 @@ For example:
 
 const answer = z.object({ names: z.array(z.object({ payee: z.string(), name: z.string() })) })
 
-/** The configured AI providers as a tidier, its calls logged with a ledger's AI usage. */
+/** The configured AI providers as a tidier. */
 export function aiTidier(world: PayeeWorld): PayeeTidier {
-  return async (payees, known) => {
-    const ctx = world.ledgers()[0]
-    if (!ctx) throw new Error('There’s no ledger to log AI calls in.')
-    const res = await askStructured(ctx, {
+  return async (payees, known, log) => {
+    const res = await askStructured(world.meta, {
       system: SYSTEM,
       user: JSON.stringify({ payees, related_names: known.related, other_names_already_used: known.others }),
       name: 'payee_names',
@@ -102,7 +105,7 @@ export function aiTidier(world: PayeeWorld): PayeeTidier {
       invalid: 'The model didn’t name the payees as asked',
       maxTokens: 8192,
       timeoutMs: 120_000,
-    })
+    }, log)
     return { names: res.data.names, model: res.model }
   }
 }
@@ -187,11 +190,17 @@ function knownNames(world: PayeeWorld, payees: string[]): KnownNames {
   }
 }
 
-/** Asks for names, keeps them (the payee as sent → its name). Returns the ones kept. */
-async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidier) {
-  const { names, model } = await tidier(payees, knownNames(world, payees))
+/**
+ * Asks for names, keeps them (the payee as sent → its name). Returns the ones kept. One request,
+ * recorded in the first ledger's AI usage as these payees together: asked again after a failure,
+ * the same set corrects its record. `record` is the failed record this asks again, for the payees
+ * of it still without a name.
+ */
+async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidier, record?: number) {
+  const ctx = world.ledgers()[0]
+  if (!ctx) throw new Error('There’s no ledger to record AI requests in.')
   const asked = new Set(payees)
-  const keep = (original: string, tidied: string) =>
+  const keep = (original: string, tidied: string, model: string | null) =>
     world.meta.db
       .insert(payeeTidy)
       .values({ original, tidied, model, prompt: PAYEE_TIDY_PROMPT })
@@ -205,9 +214,68 @@ async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidie
         },
       })
       .run()
-  const kept = names.filter((n) => asked.has(n.payee) && n.name.trim())
-  world.meta.db.transaction(() => kept.forEach((n) => keep(n.payee, n.name.trim().slice(0, 120))))
+  const { kept } = await recorded(
+    ctx,
+    { kind: 'names', subject: null, key: namesKey(payees), record },
+    async (log) => {
+      const { names, model } = await tidier(payees, knownNames(world, payees), log)
+      const kept = names.filter((n) => asked.has(n.payee) && n.name.trim())
+      world.meta.db.transaction(() => kept.forEach((n) => keep(n.payee, n.name.trim().slice(0, 120), model)))
+      return { kept, model }
+    },
+    ({ kept, model }) => ({ outcome: String(kept.length), model }),
+  )
   return kept
+}
+
+/**
+ * Tells which payees still wait for a name: on a live transaction, not named by AI tidying's
+ * current instructions, and not by a rule of yours. Read once, for any number of lists.
+ */
+export function unnamedPayees(world: PayeeWorld): (payees: string[]) => string[] {
+  const tidied = currentNames(world.meta)
+  const byRule = payeeNamer(loadNameRules(world.meta))
+  const sent = payeesSent(world)
+  return (payees) => payees.filter((p) => sent.has(p) && !tidied.has(p) && byRule(p).ruleId === null)
+}
+
+/** Whether an AI provider is set up to name payees. */
+export const tidyAvailable = (world: PayeeWorld) => aiAvailable(world.meta)
+
+/** Whether AI tidying is naming payees now. */
+export const tidyRunning = (world: PayeeWorld) => jobOf(world.meta).running
+
+/**
+ * Asks again, in the background, for the names failed requests didn't get: each record's payees
+ * still without one, together, as its request was, so the record is corrected. One run at a time,
+ * and not while the rest are being named: false then. A request that fails again doesn't stop the
+ * ones after it. `onDone` hears when it's over.
+ */
+export function retryNames(world: PayeeWorld, records: Array<{ id: number; payees: string[] }>, given?: PayeeTidier, onDone?: () => void): boolean {
+  const job = jobOf(world.meta)
+  if (job.running) return false
+  const tidier = tidierFor(world, given)
+  const unnamed = unnamedPayees(world)
+  const work = records.map((r) => ({ id: r.id, payees: unnamed(r.payees) })).filter((r) => r.payees.length)
+  Object.assign(job, { running: true, done: 0, total: work.reduce((n, r) => n + r.payees.length, 0), error: null })
+  void (async () => {
+    try {
+      for (const r of work) {
+        try {
+          await tidyBatch(world, r.payees, tidier, r.id)
+          // Applied as they come, while it's on.
+          if (getAppSetting<boolean>(world.meta, 'payees.aiTidy', false)) renamed(world)
+        } catch (err) {
+          job.error = err instanceof Error ? err.message : String(err)
+        }
+        job.done += r.payees.length
+      }
+    } finally {
+      job.running = false
+      onDone?.()
+    }
+  })()
+  return true
 }
 
 export function tidyStatus(world: PayeeWorld): PayeeTidyStatus {
