@@ -627,7 +627,7 @@ describe('stopping sharing over HTTP', () => {
     expect(dry.body.removed).toMatchObject([{ ledger: { slug: 'family' }, rows: 'keep', moved: 0, kept: 2, account: { name: 'Visa', balanceMinor: -42_000 } }])
     expect(dry.body.parts).toEqual({ before: { personal: OPENING - 28_000, family: -42_000 }, after: { personal: OPENING - 70_000 } })
     expect(dry.body.notices).toEqual([
-      'Family’s new account keeps its balance of $420.00 owed, and Visa’s total is the whole bank balance again, so that amount is also in Personal until you record how it was settled.',
+      'Family’s new account keeps its balance of $420.00 owed, and Visa’s total doesn’t go down by it, so that amount is also in Personal until you record how it was settled.',
     ])
     expect((await w.account(w.family)).sharing).not.toBeNull()
 

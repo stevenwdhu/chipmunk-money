@@ -164,7 +164,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     expect(change.removed[0]!.account!.balanceMinor + -6_000).toBe(before.parts.family)
     expect(change.notices).toEqual([
       '1 pending transaction goes to Personal, because the bank will post it again.',
-      'Family’s new account keeps its balance of $107.50 owed, and Visa’s total is the whole bank balance again, so that amount is also in Personal until you record how it was settled.',
+      'Family’s new account keeps its balance of $107.50 owed, and Visa’s total doesn’t go down by it, so that amount is also in Personal until you record how it was settled.',
     ])
     // Visa's total is as it was, all of it in Personal now.
     expect(change.parts).toEqual({ before: before.parts, after: { personal: before.totalMinor } })
@@ -271,7 +271,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     expect(change.notices).toEqual([
       'Visa’s opening balance and recorded balances move to Family: $15.00 owed of its balance today, and earlier balances shift too.',
       '1 pending transaction goes to Family, because the bank will post it again.',
-      'Personal’s new account keeps its balance of $2.10 owed, and Visa’s total is the whole bank balance again, so that amount is also in Family until you record how it was settled.',
+      'Personal’s new account keeps its balance of $2.10 owed, and Visa’s total doesn’t go down by it, so that amount is also in Family until you record how it was settled.',
     ])
     expect(w.check(own)).toEqual({ parts: { family: before.totalMinor }, totalMinor: before.totalMinor })
     // Family's part at past month-ends takes Personal's base, and the pending row from its date on.
@@ -298,7 +298,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     const own = w.splitOff(trip)
     expect(change.removed).toMatchObject([{ ledger: { slug: 'trip' }, moved: 0, kept: 2, account: { id: own, balanceMinor: -500 } }])
     expect(change.notices).toEqual([
-      'Trip’s new account keeps its balance of $5.00 owed, and Visa’s total is the whole bank balance again, so that amount is also in Personal until you record how it was settled.',
+      'Trip’s new account keeps its balance of $5.00 owed, and Visa’s total doesn’t go down by it, so that amount is also in Personal until you record how it was settled.',
     ])
     // Family's part is its rows, as before. Personal's takes what Trip owed today, and nothing at past dates.
     expect(w.check(own)).toEqual({ parts: { personal: before.totalMinor - before.parts.family!, family: before.parts.family }, totalMinor: before.totalMinor })

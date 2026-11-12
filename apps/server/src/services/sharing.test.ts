@@ -346,6 +346,8 @@ describe('a balance in words', () => {
     expect(changeWords('Personal', -20_000, visa)).toBe('Personal owes $200.00 more on Visa')
     expect(changeWords('Personal', 5_000, visa, true)).toBe('Personal owes $50.00 less on Visa')
     expect(stepWords(-25_500, visa)).toBe('$255.00 more')
+    expect(stepWords(-25_500, visa, true)).toBe('another $255.00 more')
+    expect(stepWords(5_000, visa, true)).toBe('another $50.00 less')
   })
 
   it('is the balance itself on an account that isn’t a debt', () => {
@@ -353,5 +355,6 @@ describe('a balance in words', () => {
     expect(changeWords('Personal', 20_000, savings)).toBe('Personal’s balance on Savings goes up by $200.00')
     expect(changeWords('Personal', -5_000, savings, true)).toBe('Personal’s balance on Savings went down by $50.00')
     expect(stepWords(-5_000, savings)).toBe('down by $50.00')
+    expect(stepWords(5_000, savings, true)).toBe('up by another $50.00')
   })
 })

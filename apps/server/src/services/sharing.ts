@@ -602,9 +602,13 @@ export function balanceWords(minor: number, a: Pick<Worded, 'type' | 'currency'>
   return owed < 0 ? `${formatMoney(0 - owed, a.currency)} in credit` : `${formatMoney(owed, a.currency)} owed`
 }
 
-/** How far a balance moves, by its direction: "$200.00 more" or "$50.00 less" owed, "up by $200.00" or "down by $50.00" otherwise. */
-export function stepWords(minor: number, a: Pick<Worded, 'type' | 'currency'>): string {
-  const money = formatMoney(Math.abs(minor), a.currency)
+/**
+ * How far a balance moves, by its direction: "$200.00 more" or "$50.00 less" owed, "up by $200.00"
+ * or "down by $50.00" otherwise. A step on top of one already said is `another` ("another $200.00
+ * more", "up by another $200.00"), so it isn't read as the whole change.
+ */
+export function stepWords(minor: number, a: Pick<Worded, 'type' | 'currency'>, another = false): string {
+  const money = `${another ? 'another ' : ''}${formatMoney(Math.abs(minor), a.currency)}`
   if (accountTypeInfo(a.type).liability) return `${money} ${minor < 0 ? 'more' : 'less'}`
   return `${minor > 0 ? 'up' : 'down'} by ${money}`
 }
@@ -770,8 +774,10 @@ export function setSharing(
         const go = l.moved === 1 ? 'goes' : 'go'
         notices.push(`${count(l.moved, 'pending transaction')} ${go} to ${homeAfter.ledger.name}, because the bank will post ${l.moved === 1 ? 'it' : 'them'} again.`)
       }
+      // Unlinked, there's no bank balance to speak of: the total just doesn't go down by what was kept.
+      const total = account.bank ? `${account.name}’s total is the whole bank balance again` : `${account.name}’s total doesn’t go down by it`
       notices.push(
-        `${l.ledger.name}’s new account keeps its balance of ${balanceWords(l.account.balanceMinor, account)}, and ${account.name}’s total is the whole bank balance again, so that amount is also in ${sharing.opening.name} until you record how it was settled.`,
+        `${l.ledger.name}’s new account keeps its balance of ${balanceWords(l.account.balanceMinor, account)}, and ${total}, so that amount is also in ${sharing.opening.name} until you record how it was settled.`,
       )
     }
     report = {

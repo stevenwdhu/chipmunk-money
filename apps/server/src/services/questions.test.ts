@@ -652,7 +652,7 @@ describe('a synced account with a recorded balance', () => {
     // it at once, and its share of $150.00 comes back: −300 + 150. The sync then finds Visa −255 short
     // of the bank (−170 − 60 − 25), which Personal takes too.
     expect(w.ask(w.family, 'delete').questions[0]!.note).toBe(
-      'Delete them: Personal owes $150.00 more on Visa now, and $255.00 more at the next sync. Move to Personal: Personal owes $405.00 more on Visa. Move to Trip: Trip owes $405.00 more on Visa.',
+      'Delete them: Personal owes $150.00 more on Visa now, and another $255.00 more at the next sync. Move to Personal: Personal owes $405.00 more on Visa. Move to Trip: Trip owes $405.00 more on Visa.',
     )
     w.act(w.family, 'delete', { rows: 'delete' })
     expect(w.check(w.family)).toEqual({ personal: -120_000, trip: -4_000 })

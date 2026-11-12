@@ -228,7 +228,7 @@ function rowsNote(a: SharedAccount, m: PartsModel, options: Array<{ label: strin
       if (!now && !synced) return []
       const who = l === home ? homeName : l.name
       if (synced === now) return [changeWords(who, now, a.facts)]
-      return [now ? `${changeWords(who, now, a.facts)} now, and ${stepWords(synced - now, a.facts)} at the next sync` : `at the next sync, ${changeWords(who, synced, a.facts)}`]
+      return [now ? `${changeWords(who, now, a.facts)} now, and ${stepWords(synced - now, a.facts, true)} at the next sync` : `at the next sync, ${changeWords(who, synced, a.facts)}`]
     })
     return changed.length ? list(changed) : `no other ledger’s balance on ${a.facts.name} changes`
   }
