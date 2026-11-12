@@ -231,7 +231,7 @@ const ACROSS =
 
 /** What a list of AI records says, for the ledger's and the app's. */
 export const AI_USAGE =
-  'What AI was asked to do, one record per thing asked: a category for a payee (the payee as the ledger calls it is all that’s kept of the transaction), names for payees, a connection test. The primary provider failing and the fallback answering is one record that is `ok`, with `primaryError`. A failure asked again (a retry, the next sync, by hand) corrects its record, never a second one. A failed record reads `unneeded` once nothing is left to ask: the payee has no uncategorized transaction, or the payees all have names. A request to name payees is about the payees of every ledger, so a key limited to some ledgers gets nothing of it: no record, no count, no tokens. `recent` is the newest 20, and the totals count every record.'
+  'What AI was asked to do, one record per thing asked: a category for a payee (the payee as the ledger calls it is all that’s kept of the transaction), names for payees, a connection test. The primary provider failing and the fallback answering is one record that is `ok`, with `primaryError`. A failure asked again (a retry, the next sync, by hand) corrects its record, never a second one. A failed record reads `unneeded` once nothing is left to ask: the payee has no uncategorized transaction, or the payees all have names. One asked with POST /categorize/again about transactions that had a category (`again`) reads `unneeded` once the payee has no such transaction left, is one you always set one way, or had a category set by hand after the last try. A request to name payees is about the payees of every ledger, so a key limited to some ledgers gets nothing of it: no record, no count, no tokens. `recent` is the newest 20, and the totals count every record.'
 
 /** Who asks about AI records: what they may do decides what they can retry. */
 export const aiCaller = (actor: Actor, world: names.PayeeWorld): AiCaller => ({
@@ -1616,7 +1616,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Ask AI again about transactions’ categories',
       description:
-        'AI only, not your history, in the background: poll the status. A different pick replaces the category as a suggestion to review. Transfers, refunds and paybacks that follow their purchase, payments a recurring item categorizes, and payees you always set one way are left as they are.',
+        'AI only, not your history, in the background: poll the status. A different pick replaces the category as a suggestion to review. A request that fails is in GET /ai/usage: one about transactions waiting for a category can be retried there, and one about transactions that had a category is asked again here. Transfers, refunds and paybacks that follow their purchase, payments a recurring item categorizes, and payees you always set one way are left as they are.',
       body: recategorizeSchema,
       response: aiJobStatusSchema,
       status: 202,

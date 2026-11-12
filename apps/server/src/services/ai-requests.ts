@@ -1,10 +1,10 @@
 import type { AiRecord, AiRetry, AiUsage } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
-import { askedAgain, namesOf } from '../ai/records'
+import { askedAgain, namesOf, payeeOf } from '../ai/records'
 import { aiEnabled } from '../ai/runner'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
-import { aiJobStatus, categorizeUncategorized, payeesWaiting } from './import'
+import { aiJobStatus, askedAgainStands, categorizeUncategorized, payeesWaiting } from './import'
 import type { PayeeWorld } from './payee-names'
 import { retryNames, tidyAvailable, tidyRunning, unnamedPayees, type PayeeTidier } from './payee-tidy'
 
@@ -18,8 +18,10 @@ import { retryNames, tidyAvailable, tidyRunning, unnamedPayees, type PayeeTidier
  * Two kinds of record stand apart. A request to name payees sits in one ledger but is about the
  * payees of every ledger, so a caller that can't use every ledger gets nothing of it: no row, no
  * count, no tokens, and its id is unknown to them. And “Ask AI again” about transactions that had a
- * category stays failed until it's asked again there and answered: which transactions were asked
- * about isn't kept, so nothing here can ask about the same ones.
+ * category is never asked again from here: which transactions were asked about isn't kept, so
+ * nothing here can ask about the same ones. It stays failed, to ask again there, until that's
+ * answered or it's no longer needed: the payee has no such transaction left, always gets one
+ * category, or had a category set by hand since (askedAgainStands).
  */
 
 /** Who reads or retries: what they may do decides what can be retried. */
@@ -57,23 +59,31 @@ const COLUMNS = `id, kind, subject, subject_key AS subjectKey, slot, model, ok, 
 const seenBy = (who: AiCaller) => (who.everyLedger ? '' : " AND kind IS NOT 'names'")
 
 const ASKED_AGAIN = 'It was asked with “Ask AI again”, about transactions that had a category. Select them and ask again there.'
+const AGAIN_UNNEEDED =
+  'This is no longer needed: the payee’s transactions that had a category are gone or were changed by hand since, or the payee always gets one category now.'
 const ARCHIVED = 'This ledger is archived. Restore it first, then ask again.'
 
-/** The records being asked again now, by ledger. */
-const retrying = new Map<string, Set<number>>()
+/** The records being asked again now, by ledger, each with its kind. */
+const retrying = new Map<string, Map<number, Row['kind']>>()
 const retryingIn = (ctx: AppContext) => {
   let ids = retrying.get(ctx.ledger.id)
-  if (!ids) retrying.set(ctx.ledger.id, (ids = new Set()))
+  if (!ids) retrying.set(ctx.ledger.id, (ids = new Map()))
   return ids
 }
+/** How many of them the caller sees: a request to name payees only for one that can use every ledger. */
+const retryingSeen = (ctx: AppContext, who: AiCaller) => [...retryingIn(ctx).values()].filter((kind) => who.everyLedger || kind !== 'names').length
 
 /** Tells, for this ledger's records, which failures are still needed. What it reads, it reads once, and only when asked. */
 function needs(ctx: AppContext, who: AiCaller) {
   let waiting: Set<string> | undefined
   let unnamed: ((payees: string[]) => string[]) | undefined
   return (row: Row): boolean => {
-    // Asked about transactions that had a category, it isn't about the uncategorized ones: needed until it's answered.
-    if (row.kind === 'categorize') return askedAgain(row.subjectKey) || (waiting ??= payeesWaiting(ctx)).has(row.subjectKey ?? '')
+    if (row.kind === 'categorize' && askedAgain(row.subjectKey)) {
+      // Asked about transactions that had a category, it isn't about the uncategorized ones.
+      const { payeeKey, direction } = payeeOf(row.subjectKey ?? '')
+      return askedAgainStands(ctx, payeeKey, direction, row.triedAt ?? row.createdAt)
+    }
+    if (row.kind === 'categorize') return (waiting ??= payeesWaiting(ctx)).has(row.subjectKey ?? '')
     if (row.kind === 'names') return (unnamed ??= unnamedPayees(who.world))(namesOf(row.subjectKey)).length > 0
     return true
   }
@@ -81,12 +91,14 @@ function needs(ctx: AppContext, who: AiCaller) {
 
 function recordOf(ctx: AppContext, who: AiCaller, row: Row, needed: (row: Row) => boolean): AiRecord {
   const status = row.ok ? 'ok' : needed(row) ? 'failed' : 'unneeded'
-  const asksAgain = (row.kind === 'categorize' && !askedAgain(row.subjectKey)) || (row.kind === 'names' && who.everyLedger)
-  const noRetry = status !== 'failed' ? null : row.kind === 'categorize' && askedAgain(row.subjectKey) ? ASKED_AGAIN : asksAgain && ctx.ledger.archived ? ARCHIVED : null
+  const again = row.kind === 'categorize' && askedAgain(row.subjectKey)
+  const asksAgain = (row.kind === 'categorize' && !again) || (row.kind === 'names' && who.everyLedger)
+  const noRetry = status !== 'failed' ? null : again ? ASKED_AGAIN : asksAgain && ctx.ledger.archived ? ARCHIVED : null
   return {
     id: row.id,
     kind: row.kind,
     subject: row.kind === 'categorize' ? row.subject : null,
+    again,
     payees: row.kind === 'names' ? namesOf(row.subjectKey).length : null,
     ledger: ctx.ledger.name,
     ledgerSlug: ctx.ledger.slug,
@@ -137,7 +149,7 @@ export function ledgerAiUsage(ctx: AppContext, who: AiCaller): AiUsage {
     // A connection test or a request from before that failed stays failed: nothing can be asked again.
     failed: totals.closed + open.filter((r) => r.status === 'failed').length,
     retryable: open.filter((r) => r.canRetry).length,
-    retrying: retryingIn(ctx).size,
+    retrying: retryingSeen(ctx, who),
     inputTokens: totals.inputTokens,
     outputTokens: totals.outputTokens,
     recent: recent.map((row) => recordOf(ctx, who, row, needed)),
@@ -167,41 +179,58 @@ const conflict = (message: string): never => {
 }
 
 /**
- * Asks again about these records of the ledger, each one the caller can retry: the payees'
- * transactions still uncategorized, as one run of the ledger's AI categorization, and the payees
- * still without a name, as one run of AI tidying. While either is at work already, its records are
- * left (`working`), and nothing second is started. Returns at once, the work going on in the
- * background. `given` stands in for the configured providers when names are asked (a test's).
+ * Asks again about these records, each one the caller can retry: the payees still without a name, as
+ * one run of AI tidying for the records of every ledger given, then in each ledger the payees'
+ * transactions still uncategorized, as one run of its AI categorization. While either is at work
+ * already, its records are left (`working`), and nothing second is started. Returns at once, the
+ * work going on in the background, with what started and what was left in each ledger. `given`
+ * stands in for the configured providers when names are asked (a test's).
  */
-function retry(ctx: AppContext, who: AiCaller, records: Seen[], given?: PayeeTidier): AiRetry {
-  const able = records.filter((x) => x.record.canRetry)
-  const categorize = able.filter((x) => x.record.kind === 'categorize')
-  const names = able.filter((x) => x.record.kind === 'names')
-  if ((categorize.length && !aiEnabled(ctx)) || (names.length && !given && !tidyAvailable(who.world))) {
+function retry(asked: Array<{ ctx: AppContext; records: Seen[] }>, who: AiCaller, given?: PayeeTidier): AiRetry[] {
+  const each = asked.map(({ ctx, records }) => {
+    const able = records.filter((x) => x.record.canRetry)
+    return {
+      ctx,
+      categorize: able.filter((x) => x.record.kind === 'categorize'),
+      names: able.filter((x) => x.record.kind === 'names'),
+      result: { started: 0, working: 0 } as AiRetry,
+    }
+  })
+  // Before anything starts: one ledger's run isn't left going when the next can't start.
+  if (each.some((l) => l.categorize.length && !aiEnabled(l.ctx)) || (each.some((l) => l.names.length) && !given && !tidyAvailable(who.world))) {
     badRequest('Set up an AI provider first, in App settings → AI.')
   }
-  const result: AiRetry = { started: 0, working: 0 }
-  const marked = retryingIn(ctx)
-  const start = (list: Seen[], busy: boolean, run: (done: () => void) => void) => {
-    if (!list.length) return
-    if (busy) {
-      result.working += list.length
-      return
-    }
-    for (const x of list) marked.add(x.row.id)
-    result.started += list.length
-    run(() => list.forEach((x) => marked.delete(x.row.id)))
+  /** Marks them as being asked again, and gives what unmarks them. */
+  const mark = (ctx: AppContext, list: Seen[]) => {
+    const marked = retryingIn(ctx)
+    for (const x of list) marked.set(x.row.id, x.row.kind)
+    return () => list.forEach((x) => marked.delete(x.row.id))
   }
-  start(categorize, aiJobStatus(ctx).running, (done) => void categorizeUncategorized(ctx, { payees: categorize.map((x) => x.row.subjectKey ?? '') }).finally(done))
-  start(names, tidyRunning(who.world), (done) =>
+  // Names are made across every ledger, one run at a time: every ledger's records go in the same one.
+  const naming = each.filter((l) => l.names.length)
+  if (naming.length && tidyRunning(who.world)) {
+    for (const l of naming) l.result.working += l.names.length
+  } else if (naming.length) {
+    const unmark = naming.map((l) => mark(l.ctx, l.names))
+    for (const l of naming) l.result.started += l.names.length
     retryNames(
       who.world,
-      names.map((x) => ({ id: x.row.id, ctx, payees: namesOf(x.row.subjectKey) })),
+      naming.flatMap((l) => l.names.map((x) => ({ id: x.row.id, ctx: l.ctx, payees: namesOf(x.row.subjectKey) }))),
       given,
-      done,
-    ),
-  )
-  return result
+      () => unmark.forEach((done) => done()),
+    )
+  }
+  for (const l of each) {
+    if (!l.categorize.length) continue
+    if (aiJobStatus(l.ctx).running) {
+      l.result.working += l.categorize.length
+      continue
+    }
+    const done = mark(l.ctx, l.categorize)
+    l.result.started += l.categorize.length
+    void categorizeUncategorized(l.ctx, { payees: l.categorize.map((x) => x.row.subjectKey ?? '') }).finally(done)
+  }
+  return each.map((l) => l.result)
 }
 
 /**
@@ -219,13 +248,15 @@ export function retryRecord(ctx: AppContext, who: AiCaller, id: number, given?: 
   if (record.status === 'ok') conflict('This request was answered, so there’s nothing to ask again.')
   if (record.status === 'unneeded') {
     conflict(
-      record.kind === 'categorize'
-        ? 'This is no longer needed: the payee has no uncategorized transaction left.'
-        : 'This is no longer needed: the payees all have names now.',
+      record.again
+        ? AGAIN_UNNEEDED
+        : record.kind === 'categorize'
+          ? 'This is no longer needed: the payee has no uncategorized transaction left.'
+          : 'This is no longer needed: the payees all have names now.',
     )
   }
   if (record.noRetry) conflict(record.noRetry)
-  const result = retry(ctx, who, [{ row, record }], given)
+  const [result] = retry([{ ctx, records: [{ row, record }] }], who, given) as [AiRetry]
   if (result.working) {
     conflict(record.kind === 'names' ? 'AI is already naming payees. Try again when it’s done.' : 'AI is already working in this ledger. Try again when it’s done.')
   }
@@ -234,17 +265,17 @@ export function retryRecord(ctx: AppContext, who: AiCaller, id: number, given?: 
 
 /**
  * Asks again about every failed record the caller can retry, in each of these ledgers that isn't
- * archived. Where AI is already working, its records are left (`working`). `onStarted` hears each
+ * archived: the requests to name payees of all of them as one run, then each ledger's requests to
+ * categorize. Where AI is already working, its records are left (`working`). `onStarted` hears each
  * ledger where something started, and how many records.
  */
 export function retryAll(ledgers: AppContext[], who: AiCaller, onStarted?: (ctx: AppContext, count: number) => void, given?: PayeeTidier): AiRetry {
+  const asked = ledgers.filter((ctx) => !ctx.ledger.archived).map((ctx) => ({ ctx, records: openFailures(ctx, who) }))
   const result: AiRetry = { started: 0, working: 0 }
-  for (const ctx of ledgers) {
-    if (ctx.ledger.archived) continue
-    const one = retry(ctx, who, openFailures(ctx, who), given)
-    if (one.started) onStarted?.(ctx, one.started)
+  retry(asked, who, given).forEach((one, i) => {
+    if (one.started) onStarted?.(asked[i]!.ctx, one.started)
     result.started += one.started
     result.working += one.working
-  }
+  })
   return result
 }

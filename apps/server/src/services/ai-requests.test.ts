@@ -11,12 +11,14 @@ import type { AppContext } from './context'
 import { aiJobStatus } from './import'
 import { followBankPayee, nameWordings, renamePayee, worldOf } from './payee-names'
 import { previewTidy, setAiTidy, tidyNewPayees, tidyStatus, type PayeeTidier } from './payee-tidy'
+import { setPayeeChoice } from './payees'
 import { updateSettings } from './settings'
+import { deleteTransaction, updateTransaction } from './transactions'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
 
-/** The providers' HTTP calls, stood in for: a model named here fails, every other one answers. */
-const provider = { down: new Set<string>(), asked: [] as string[] }
+/** The providers' HTTP calls, stood in for: a model named here fails, every other one answers, and a request for names waits while `hold` is set. */
+const provider = { down: new Set<string>(), asked: [] as string[], hold: null as Promise<void> | null }
 vi.mock('../ai/providers', async (original) => ({
   ...(await original<typeof import('../ai/providers')>()),
   callProvider: vi.fn(async (cfg: { model: string }) => {
@@ -26,6 +28,7 @@ vi.mock('../ai/providers', async (original) => ({
   }),
   callStructured: vi.fn(async (cfg: { model: string }, call: { user: string }) => {
     provider.asked.push(cfg.model)
+    if (provider.hold) await provider.hold
     if (provider.down.has(cfg.model)) throw new Error(`${cfg.model} is down`)
     const { payees } = JSON.parse(call.user) as { payees: string[] }
     return { data: { names: payees.map((payee) => ({ payee, name: `Tidy ${payee.toLowerCase()}` })) }, inputTokens: 100, outputTokens: 40 }
@@ -34,6 +37,7 @@ vi.mock('../ai/providers', async (original) => ({
 beforeEach(() => {
   provider.down.clear()
   provider.asked.length = 0
+  provider.hold = null
 })
 
 /** A stand-in for the AI that answers Groceries, fails while `down`, says nothing while `silent`, waits while `hold` is set, and says what it was asked. */
@@ -549,6 +553,64 @@ describe('AI request records: payees to name', () => {
     expect(provider.asked).toEqual(['claude', 'claude'])
     // A key for every ledger gets it as you do.
     expect(await s.usage(await s.key({ scopes: ['write'] }))).toEqual(all)
+
+    // While it's being asked again, the limited key isn't told so either.
+    provider.down.clear()
+    let release!: () => void
+    provider.hold = new Promise<void>((r) => (release = r))
+    expect((await s.call('POST', `/ledgers/personal/ai/usage/${failed.id}/retry`)).body).toEqual({ started: 1, working: 0 })
+    expect(await s.usage()).toMatchObject({ retrying: 1, recent: expect.arrayContaining([expect.objectContaining({ id: failed.id, retrying: true })]) })
+    expect(await s.usage(limited)).toEqual(none)
+    expect((await s.call('GET', '/ledgers/personal/ai/usage', undefined, limited)).body).toEqual(none)
+    release()
+    await idle(s)
+    expect(await s.usage(limited)).toEqual(none)
+    expect(await s.usage()).toMatchObject({ failed: 0, retrying: 0 })
+  })
+
+  it('asks again in one run for the failed requests of every ledger, each payee once', async () => {
+    const w = world()
+    const ai = fakeTidier()
+    ai.down = true
+    await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
+    // A failed request about other payees is in another ledger.
+    const family = testLedger(w.storage)
+    const acc = makeAccount(family)
+    const OTHERS = ['SHOP X #8', 'SHOP Y #9']
+    OTHERS.forEach((payee, i) => addTx(family, acc, '2026-09-02', -300 - i, payee, { categoryId: categoryId(family, 'Groceries') }))
+    family.q.run(
+      `INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, error, kind, subject_key, tries, first_failed_at)
+       VALUES (@ledger, 'primary', 'fake-model', 5, 0, 'down', 'names', ?, 1, '2026-09-01T10:00:00.000Z')`,
+      JSON.stringify(OTHERS),
+    )
+    expect(aiUsage([w.ctx, family], w.who)).toMatchObject({ requests: 2, failed: 2, retryable: 2 })
+
+    ai.down = false
+    ai.asked.length = 0
+    const started: Array<[string, number]> = []
+    expect(retryAll([w.ctx, family], w.who, (ctx, count) => started.push([ctx.ledger.name, count]), ai.tidier)).toEqual({ started: 2, working: 0 })
+    expect(started).toEqual([
+      ['Personal', 1],
+      ['Family', 1],
+    ])
+    expect(aiUsage([w.ctx, family], w.who).retrying).toBe(2)
+    await settle(() => !tidyStatus(w.all).running && aiUsage([w.ctx, family], w.who).retrying === 0)
+    expect(ai.asked).toEqual([PAYEES, OTHERS])
+    expect(records(w.ctx)).toEqual([expect.objectContaining({ ok: 1, tries: 2, outcome: '3' })])
+    expect(records(family)).toEqual([expect.objectContaining({ ok: 1, tries: 2, outcome: '2' })])
+    expect(aiUsage([w.ctx, family], w.who)).toMatchObject({ requests: 2, failed: 0, retryable: 0 })
+
+    // One at a time, the other ledger's is left while the first is being asked.
+    ai.down = true
+    addTx(w.ctx, makeAccount(w.ctx, 'Visa', 'credit'), '2026-09-03', -700, 'SHOP D #4', { categoryId: categoryId(w.ctx, 'Groceries') })
+    await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
+    const open = aiUsage([w.ctx, family], w.who).recent.filter((r) => r.status === 'failed')
+    expect(open).toHaveLength(1)
+    ai.down = false
+    expect(retryAll([w.ctx, family], w.who, undefined, ai.tidier)).toEqual({ started: 1, working: 0 })
+    expect(retryAll([w.ctx, family], w.who, undefined, ai.tidier)).toEqual({ started: 0, working: 1 })
+    await settle(() => !tidyStatus(w.all).running && aiUsage([w.ctx, family], w.who).retrying === 0)
+    expect(aiUsage([w.ctx, family], w.who)).toMatchObject({ failed: 0 })
   })
 
   it('corrects a retried request in the ledger its record is in, whichever ledger comes first by then', async () => {
@@ -1003,7 +1065,9 @@ describe('AI request records: Ask AI again, and archived ledgers', () => {
     const s = setup({ llm: ai.llm })
     useProviders(s.storage, 'claude')
     const acc = makeAccount(s.personal)
-    const id = addTx(s.personal, acc, '2026-09-01', -500, 'BEAN BAR', { categoryId: categoryId(s.personal, 'Dine out') })
+    // One AI categorized before: you never set its category yourself.
+    const id = addTx(s.personal, acc, '2026-09-01', -500, 'BEAN BAR')
+    s.personal.q.run("UPDATE transactions SET category_id = ?, category_source = 'ai' WHERE ledger_id = @ledger AND id = ?", categoryId(s.personal, 'Dine out'), id)
     const askAgain = async (ids: number[]) => {
       expect((await s.call('POST', '/ledgers/personal/categorize/again', { ids })).status).toBe(202)
       await settle(() => !aiJobStatus(s.personal).running)
@@ -1013,7 +1077,7 @@ describe('AI request records: Ask AI again, and archived ledgers', () => {
     const usage = await s.usage()
     expect(usage).toMatchObject({ requests: 1, failed: 1, retryable: 0 })
     const [failed] = usage.recent
-    expect(failed).toMatchObject({ kind: 'categorize', subject: 'BEAN BAR', status: 'failed', canRetry: false, noRetry: ASKED_AGAIN, tries: 1 })
+    expect(failed).toMatchObject({ kind: 'categorize', subject: 'BEAN BAR', again: true, status: 'failed', canRetry: false, noRetry: ASKED_AGAIN, tries: 1 })
     const retry = await s.call('POST', `/ledgers/personal/ai/usage/${failed!.id}/retry`)
     expect([retry.status, retry.body.error.message]).toEqual([409, ASKED_AGAIN])
     expect((await s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 0, working: 0 })
@@ -1037,6 +1101,129 @@ describe('AI request records: Ask AI again, and archived ledgers', () => {
     expect(records(s.personal)[0]).toMatchObject({ id: failed!.id, ok: 1, tries: 2, outcome: 'Groceries', first_failed_at: failed!.firstFailedAt })
     expect(await s.usage()).toMatchObject({ requests: 2, failed: 1, retryable: 1 })
     expect(categoriesOf(s.personal).map((r: Json) => r.category)).toEqual(['Groceries', null])
+  })
+
+  const AGAIN_UNNEEDED =
+    'This is no longer needed: the payee’s transactions that had a category are gone or were changed by hand since, or the payee always gets one category now.'
+  /** Two BEAN BAR transactions AI categorized before, asked again about while AI is down. */
+  async function askedAgainFailed() {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    useProviders(s.storage, 'claude')
+    const acc = makeAccount(s.personal)
+    const dineOut = categoryId(s.personal, 'Dine out')
+    const ids = [-500, -700].map((amount) => {
+      const id = addTx(s.personal, acc, '2026-09-01', amount, 'BEAN BAR')
+      s.personal.q.run("UPDATE transactions SET category_id = ?, category_source = 'ai' WHERE ledger_id = @ledger AND id = ?", dineOut, id)
+      return id
+    })
+    const askAgain = async (which: number[]) => {
+      expect((await s.call('POST', '/ledgers/personal/categorize/again', { ids: which })).status).toBe(202)
+      await settle(() => !aiJobStatus(s.personal).running)
+    }
+    ai.down = true
+    await askAgain(ids)
+    const usage = await s.usage()
+    expect(usage).toMatchObject({ requests: 1, failed: 1, retryable: 0 })
+    expect(usage.recent).toEqual([expect.objectContaining({ again: true, status: 'failed', noRetry: ASKED_AGAIN, tries: 2 })])
+    // After the try, by the clock the records and the transactions are stamped with.
+    await new Promise((r) => setTimeout(r, 5))
+    /** The record reads as no longer needed, nothing written by reading it, and it can't be retried. */
+    const unneeded = async () => {
+      const changes = () => s.storage.sqlite.prepare('SELECT total_changes()').pluck().get()
+      const kept = records(s.personal)
+      const writes = changes()
+      const read = ledgerAiUsage(s.personal, { write: true, everyLedger: true, world: worldOf(s.storage) })
+      expect(changes()).toBe(writes)
+      expect(records(s.personal)).toEqual(kept)
+      expect(read).toMatchObject({ requests: 1, failed: 0, retryable: 0 })
+      expect(read.recent).toEqual([expect.objectContaining({ id: usage.recent[0]!.id, again: true, ok: false, status: 'unneeded', canRetry: false, noRetry: null })])
+      const retry = await s.call('POST', `/ledgers/personal/ai/usage/${usage.recent[0]!.id}/retry`)
+      expect([retry.status, retry.body.error.message]).toEqual([409, AGAIN_UNNEEDED])
+      expect((await s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 0, working: 0 })
+    }
+    return { ai, s, acc, ids, dineOut, askAgain, unneeded }
+  }
+
+  it('reads a failed “Ask AI again” as no longer needed once the transactions are deleted', async () => {
+    const t = await askedAgainFailed()
+    deleteTransaction(t.s.personal, t.ids[0]!)
+    // One is left to ask about.
+    expect(await t.s.usage()).toMatchObject({ failed: 1, retryable: 0 })
+    deleteTransaction(t.s.personal, t.ids[1]!)
+    await t.unneeded()
+  })
+
+  it('reads a failed “Ask AI again” as no longer needed once the transactions have no category, where the failure to retry is the payee’s own', async () => {
+    const t = await askedAgainFailed()
+    for (const id of t.ids) updateTransaction(t.s.personal, id, { categoryId: null })
+    await t.unneeded()
+  })
+
+  it('reads a failed “Ask AI again” as no longer needed once the payee always gets one category', async () => {
+    const t = await askedAgainFailed()
+    setPayeeChoice(t.s.personal, { payee: 'BEAN BAR', mode: 'always', categoryId: t.dineOut })
+    await t.unneeded()
+    // Back to a suggestion each time, it's a failure again.
+    setPayeeChoice(t.s.personal, { payee: 'BEAN BAR', mode: 'ask' })
+    expect(await t.s.usage()).toMatchObject({ failed: 1, retryable: 0 })
+  })
+
+  it('reads a failed “Ask AI again” as no longer needed once a category is set by hand, until it fails again', async () => {
+    const t = await askedAgainFailed()
+    // A change that sets no category leaves it failed.
+    t.s.personal.q.run("UPDATE transactions SET notes = 'x', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE ledger_id = @ledger AND id = ?", t.ids[1])
+    expect(await t.s.usage()).toMatchObject({ failed: 1 })
+    updateTransaction(t.s.personal, t.ids[0]!, { categoryId: categoryId(t.s.personal, 'Groceries') })
+    await t.unneeded()
+    // Asked again there and failing once more, it's a failure after that change.
+    await new Promise((r) => setTimeout(r, 5))
+    await t.askAgain(t.ids)
+    expect((await t.s.usage()).recent).toEqual([expect.objectContaining({ status: 'failed', noRetry: ASKED_AGAIN, tries: 4 })])
+  })
+
+  it('records the waiting transactions of a group asked again apart from the categorized ones, to retry like any other', async () => {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    useProviders(s.storage, 'claude')
+    const acc = makeAccount(s.personal)
+    // The same payee, amount and notes: one AI categorized before, one waiting.
+    const had = addTx(s.personal, acc, '2026-09-01', -500, 'BEAN BAR')
+    s.personal.q.run("UPDATE transactions SET category_id = ?, category_source = 'ai' WHERE ledger_id = @ledger AND id = ?", categoryId(s.personal, 'Dine out'), had)
+    const waits = addTx(s.personal, acc, '2026-09-02', -500, 'BEAN BAR')
+    ai.down = true
+    expect((await s.call('POST', '/ledgers/personal/categorize/again', { ids: [had, waits] })).status).toBe(202)
+    await settle(() => !aiJobStatus(s.personal).running)
+    expect(await s.usage()).toMatchObject({ requests: 2, failed: 2, retryable: 1 })
+    const byKey = () => Object.fromEntries(records(s.personal).map((r: Json) => [r.subject_key, [r.ok, r.tries]]))
+    expect(byKey()).toEqual({ 'again:out:bean bar': [0, 1], 'out:bean bar': [0, 1] })
+    const open = (await s.usage()).recent.find((r) => !r.again)!
+    expect(open).toMatchObject({ status: 'failed', canRetry: true, noRetry: null })
+
+    // “Categorize uncategorized now” corrects the waiting one's record, and leaves the other transaction alone.
+    ai.down = false
+    await categorize(s)
+    expect(byKey()).toEqual({ 'again:out:bean bar': [0, 1], 'out:bean bar': [1, 2] })
+    expect(categoriesOf(s.personal).map((r: Json) => r.category)).toEqual(['Dine out', 'Groceries'])
+    expect(await s.usage()).toMatchObject({ requests: 2, failed: 1, retryable: 0 })
+
+    // The same with Retry, in a ledger where both failed again.
+    const again = fakeLlm()
+    const other = setup({ llm: again.llm })
+    useProviders(other.storage, 'claude')
+    const account = makeAccount(other.personal)
+    const first = addTx(other.personal, account, '2026-09-01', -500, 'BEAN BAR')
+    other.personal.q.run("UPDATE transactions SET category_id = ?, category_source = 'ai' WHERE ledger_id = @ledger AND id = ?", categoryId(other.personal, 'Dine out'), first)
+    const second = addTx(other.personal, account, '2026-09-02', -500, 'BEAN BAR')
+    again.down = true
+    expect((await other.call('POST', '/ledgers/personal/categorize/again', { ids: [first, second] })).status).toBe(202)
+    await settle(() => !aiJobStatus(other.personal).running)
+    again.down = false
+    const retry = (await other.usage()).recent.find((r) => r.canRetry)!
+    expect((await other.call('POST', `/ledgers/personal/ai/usage/${retry.id}/retry`)).body).toEqual({ started: 1, working: 0 })
+    await idle(other)
+    expect(categoriesOf(other.personal).map((r: Json) => r.category)).toEqual(['Dine out', 'Groceries'])
+    expect(await other.usage()).toMatchObject({ requests: 2, failed: 1, retryable: 0 })
   })
 
   it('leaves an archived ledger’s failures alone until it’s restored', async () => {

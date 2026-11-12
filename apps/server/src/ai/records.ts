@@ -46,6 +46,12 @@ const AGAIN = 'again:'
 export const categorizeKey = (payeeKey: string, direction: 'in' | 'out', again = false) => `${again ? AGAIN : ''}${direction}:${payeeKey}`
 /** Whether a `categorize` record is for a request about transactions that had a category. */
 export const askedAgain = (key: string | null) => !!key?.startsWith(AGAIN)
+/** The payee a `categorize` record is about, and the way the money went. */
+export function payeeOf(key: string): { payeeKey: string; direction: 'in' | 'out' } {
+  const plain = askedAgain(key) ? key.slice(AGAIN.length) : key
+  const direction = plain.startsWith('in:') ? 'in' : 'out'
+  return { payeeKey: plain.slice(direction.length + 1), direction }
+}
 
 /** Which payees a `names` record is about: the payees as sent, in a fixed order. */
 export const namesKey = (payees: string[]) => JSON.stringify([...new Set(payees)].sort())
@@ -117,11 +123,9 @@ function moveRecords(ctx: AppContext, moves: PayeeMove[]) {
   for (const record of open) {
     after.set(record.id, { key: record.key })
     const again = askedAgain(record.key)
-    const plain = again ? record.key.slice(AGAIN.length) : record.key
-    const tos = targets.get(plain)
+    const { payeeKey: from, direction } = payeeOf(record.key)
+    const tos = targets.get(categorizeKey(from, direction))
     if (!tos) continue
-    const direction = plain.startsWith('in:') ? 'in' : 'out'
-    const from = plain.slice(direction.length + 1)
     // The ones it's about that are with the old payee now, less those that just came to it from another: they were never its own.
     const there = ctx.q.pluck<number>(
       `SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND payee_key = ? AND deleted_at IS NULL
@@ -146,15 +150,17 @@ function moveRecords(ctx: AppContext, moves: PayeeMove[]) {
     for (const [key, [keep, ...rest]] of ends) {
       if (!parked.includes(keep!)) continue
       for (const id of rest) {
-        const other = ctx.q.get<{ tries: number; inputTokens: number | null; outputTokens: number | null; firstFailedAt: string | null }>(
-          'SELECT tries, input_tokens AS inputTokens, output_tokens AS outputTokens, first_failed_at AS firstFailedAt FROM ai_calls WHERE ledger_id = @ledger AND id = ?',
+        const other = ctx.q.get<{ tries: number; inputTokens: number | null; outputTokens: number | null; firstFailedAt: string | null; triedAt: string | null }>(
+          `SELECT tries, input_tokens AS inputTokens, output_tokens AS outputTokens, first_failed_at AS firstFailedAt, tried_at AS triedAt
+           FROM ai_calls WHERE ledger_id = @ledger AND id = ?`,
           id,
         )!
         ctx.q.run(
           `UPDATE ai_calls SET tries = tries + @tries,
              input_tokens = CASE WHEN @inputTokens IS NULL THEN input_tokens ELSE coalesce(input_tokens, 0) + @inputTokens END,
              output_tokens = CASE WHEN @outputTokens IS NULL THEN output_tokens ELSE coalesce(output_tokens, 0) + @outputTokens END,
-             first_failed_at = CASE WHEN @firstFailedAt IS NOT NULL AND (first_failed_at IS NULL OR @firstFailedAt < first_failed_at) THEN @firstFailedAt ELSE first_failed_at END
+             first_failed_at = CASE WHEN @firstFailedAt IS NOT NULL AND (first_failed_at IS NULL OR @firstFailedAt < first_failed_at) THEN @firstFailedAt ELSE first_failed_at END,
+             tried_at = CASE WHEN @triedAt IS NOT NULL AND (tried_at IS NULL OR @triedAt > tried_at) THEN @triedAt ELSE tried_at END
            WHERE ledger_id = @ledger AND id = @keep`,
           { ...other, keep },
         )

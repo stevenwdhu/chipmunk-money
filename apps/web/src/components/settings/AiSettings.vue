@@ -49,7 +49,12 @@ function reason(c: AiRecord) {
 }
 
 function unneeded(c: AiRecord) {
-  const left = c.kind === 'names' ? 'the payees all have names now' : 'the payee has no uncategorized transaction left'
+  const left =
+    c.kind === 'names'
+      ? 'the payees all have names now'
+      : c.again
+        ? 'the payee’s transactions that had a category are gone or were changed by hand since, or the payee always gets one category now'
+        : 'the payee has no uncategorized transaction left'
   return `Nothing is left to ask: ${left}\nIt failed: ${c.error ?? 'no reason was given'}`
 }
 

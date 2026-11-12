@@ -257,6 +257,27 @@ export function payeesWaiting(ctx: AppContext): Set<string> {
 }
 
 /**
+ * Whether a failed “Ask AI again” about a payee's transactions that had a category is still
+ * something to ask there: some of them are left (ones it asks about: see recategorize), the payee
+ * isn't one you always set one way, and none had its category set by a person after `since`, when
+ * it was last tried. Which transactions were asked about isn't kept, so any of the payee's that
+ * went the same way count, and one a person categorized that changed since counts as set by hand,
+ * also when the change was its payee being named.
+ */
+export function askedAgainStands(ctx: AppContext, payeeKey: string, direction: 'in' | 'out', since: string): boolean {
+  if (payeeRule(ctx, payeeKey)?.mode === 'always') return false
+  const { left, byHand } = ctx.q.get<{ left: number; byHand: number }>(
+    `SELECT count(*) AS left, coalesce(sum(category_source = 'user' AND updated_at > ?), 0) AS byHand
+     FROM transactions
+     WHERE ledger_id = @ledger AND payee_key = ? AND ${direction === 'in' ? 'amount_minor > 0' : 'amount_minor <= 0'} AND category_id IS NOT NULL
+       AND deleted_at IS NULL AND transfer_pair_id IS NULL AND COALESCE(category_source, '') NOT IN ('linked', 'recurring') AND split_of IS NULL`,
+    since,
+    payeeKey,
+  )!
+  return left > 0 && byHand === 0
+}
+
+/**
  * Asks the configured LLM about uncategorized transactions, one request per distinct payee, and
  * applies the answer to every transaction from that payee (flagged for review). Never a split row
  * (a share of a split payment, or what its holder gave): its category is the split's. With `payees`
@@ -330,7 +351,8 @@ export interface Recategorized {
 
 /**
  * Asks AI again about these transactions' categories, in the background: AI only, not your history,
- * once per payee, amount and notes. A different pick replaces the category as a suggestion to review
+ * once per payee, amount and notes, the ones waiting for a category apart from the ones that have one
+ * (theirs is a failure to retry like any other). A different pick replaces the category as a suggestion to review
  * (applied, when the bank's category backs it). A payee you always set one way isn't asked about: its
  * transactions waiting for a category get yours. Left as they are: transfers, refunds and paybacks that
  * follow their purchase, payments a recurring item categorizes, and split rows (a share of a split
@@ -366,7 +388,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
   const rows = selected.filter((r) => !always.has(r.payeeKey))
   const groups = new Map<string, typeof rows>()
   for (const r of rows) {
-    const key = JSON.stringify([r.payeeKey, r.amount, r.notes ?? ''])
+    const key = JSON.stringify([r.payeeKey, r.amount, r.notes ?? '', r.categoryId !== null])
     groups.set(key, [...(groups.get(key) ?? []), r])
   }
   const work = [...groups.values()]
@@ -394,7 +416,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
               bankCategory: first.bankCategory,
               bankConfident: !!first.bankConfident,
               // About a category that's there, it isn't the payee's uncategorized transactions that were asked about.
-              again: list.some((r) => r.categoryId !== null),
+              again: first.categoryId !== null,
             })
             const pick = s?.categoryId
             if (s && pick) {
