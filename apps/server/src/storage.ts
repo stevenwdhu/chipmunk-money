@@ -113,7 +113,7 @@ export class LedgerRegistry {
       q: new LedgerQuery(this.sqlite, row.id),
       app: this.app,
       meta: this.app,
-      ledger: { id: row.id, name: row.name, slug: row.slug },
+      ledger: { id: row.id, name: row.name, slug: row.slug, archived: !!row.archivedAt },
       accountWide: accountWideOf(this.sqlite, this.accountReads, row.id),
       now: this.now,
       llm: this.llm,

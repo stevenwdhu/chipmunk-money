@@ -519,7 +519,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Ask AI again about every failed request',
       description:
-        'Every failed record that can be retried (`retryable`), in each ledger you can use, not only the ones GET /ai/usage lists: as POST /ledgers/{ledger}/ai/usage/{id}/retry does for one, in the background. A ledger where AI is already working is left for now (`working`). A key limited to some ledgers asks about those only, and never for payee names, which are made across every ledger.',
+        'Every failed record that can be retried (`retryable`), in each ledger you can use that isn’t archived, not only the ones GET /ai/usage lists: as POST /ledgers/{ledger}/ai/usage/{id}/retry does for one, in the background. A ledger where AI is already working is left for now (`working`). A key limited to some ledgers asks about those only, and never for payee names, which are made across every ledger.',
       response: aiRetrySchema,
       status: 202,
     },

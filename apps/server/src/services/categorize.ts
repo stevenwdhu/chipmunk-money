@@ -159,6 +159,8 @@ export interface AiInput {
   bankCategory?: string | null
   /** The bank says it's sure of its category. */
   bankConfident?: boolean
+  /** Asked about transactions that had a category (“Ask AI again”): recorded apart from the payee's uncategorized ones. */
+  again?: boolean
 }
 
 function buildLlmRequest(ctx: AppContext, input: AiInput): LlmCategoryRequest {
@@ -211,11 +213,16 @@ export async function aiSuggestion(ctx: AppContext, input: AiInput): Promise<Sug
   if (!aiEnabled(ctx)) return null
   const req = buildLlmRequest(ctx, input)
   if (!req.categories.length) return null
-  const payeeKey = input.payeeKey ?? payeeKeyOf(ctx, input.payee)
+  const named = payeeKeyOf(ctx, input.payee)
+  const payeeKey = input.payeeKey ?? named
   // One record per payee and way the money went: only the payee's name is kept of the transaction.
   const { res, match } = await recorded(
     ctx,
-    { kind: 'categorize', subject: payeeNameOf(ctx, input.payee).name, key: categorizeKey(payeeKey, directionOf(input.amountMinor)) },
+    () => {
+      // Named otherwise while AI was asked, the payee's open record went with it: this is for the payee as it's called now.
+      const now = payeeNameOf(ctx, input.payee)
+      return { kind: 'categorize', subject: now.name, key: categorizeKey(now.key !== named ? now.key : payeeKey, directionOf(input.amountMinor), input.again) }
+    },
     async (log) => {
       const res = await (ctx.llm ?? configuredCategorizer(ctx, log))(req)
       if (!res) throw new Error('AI gave no answer.')

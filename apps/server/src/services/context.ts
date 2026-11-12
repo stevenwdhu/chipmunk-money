@@ -25,7 +25,7 @@ export interface AppContext {
   app: AppStore
   /** The same object as `app`, under its older name. */
   meta: AppStore
-  ledger: { id: string; name: string; slug: string }
+  ledger: { id: string; name: string; slug: string; archived: boolean }
   /**
    * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
    * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, and

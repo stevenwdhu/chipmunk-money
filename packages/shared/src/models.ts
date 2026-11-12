@@ -1006,9 +1006,15 @@ export const aiRecordSchema = z
     status: z
       .enum(['ok', 'failed', 'unneeded'])
       .describe(
-        '`ok`: answered. `failed`: not answered. `unneeded`: not answered, and no longer needed: the payee has no uncategorized transaction left, or the payees all have names now.',
+        '`ok`: answered. `failed`: not answered. `unneeded`: not answered, and no longer needed: the payee has no uncategorized transaction left, or the payees all have names now. A request made with POST /categorize/again about transactions that had a category stays `failed` until it’s asked again there and answered.',
       ),
     canRetry: z.boolean().describe('It failed, is still needed, and you can ask again (POST /ledgers/{ledger}/ai/usage/{id}/retry).'),
+    noRetry: z
+      .string()
+      .nullable()
+      .describe(
+        'Why a failed record can’t be asked again from here, in words to show: it was asked with POST /categorize/again about transactions that had a category (which ones isn’t kept, so ask again there), or its ledger is archived. Null otherwise.',
+      ),
     retrying: z.boolean().describe('It’s being asked again now.'),
     outcome: z.string().nullable().describe('The category picked (`categorize`, `test`). Null when it failed, or picked none the ledger uses.'),
     named: z.number().int().nullable().describe('How many payees got a name (`names`). Null when it failed.'),
@@ -1027,7 +1033,7 @@ export const aiUsageSchema = z
   .object({
     requests: z.number().int().describe('Things AI was asked to do.'),
     failed: z.number().int().describe('Those that failed and weren’t answered since, the ones no longer needed left out.'),
-    retryable: z.number().int().describe('The failed ones you can ask again: all of them, not only those in `recent`.'),
+    retryable: z.number().int().describe('The failed ones you can ask again: all of them, not only those in `recent`. None in an archived ledger.'),
     retrying: z.number().int().describe('Those being asked again now. Read this again until it’s 0.'),
     inputTokens: z.number().int().describe('Of every call to a provider, a failed primary’s and each retry’s too.'),
     outputTokens: z.number().int(),

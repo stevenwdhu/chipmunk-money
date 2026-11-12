@@ -14,10 +14,11 @@ import {
   type PayeeWordingsName,
 } from '@chipmunk/shared'
 import { eq, sql } from 'drizzle-orm'
+import { movePayeeRecords, type PayeeMove } from '../ai/records'
 import { payeeNameRules } from '../db/schema'
 import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
-import { learn } from './categorize'
+import { directionOf, learn } from './categorize'
 import type { AppContext, MetaStore } from './context'
 import { carryPayeeRefs } from './custom-reports'
 import { aiTidyOn, forgetPayeeNamer, loadNameRules, payeeNamerFor, tidiedNames } from './payee-namer'
@@ -286,6 +287,11 @@ export function followBankPayee(ctx: AppContext, tx: { id: number; payee: string
   )
   if (key !== tx.payeeKey) {
     carryPayeeOver(ctx, tx.id, tx.payeeKey, key, payee)
+    const t = ctx.q.get<{ amount: number; categoryId: number | null; deletedAt: string | null }>(
+      'SELECT amount_minor AS amount, category_id AS categoryId, deleted_at AS deletedAt FROM transactions WHERE ledger_id = @ledger AND id = ?',
+      tx.id,
+    )!
+    movePayeeRecords(ctx, [{ from: tx.payeeKey, to: key, direction: directionOf(t.amount), waiting: t.categoryId === null && !t.deletedAt, name: name(payee).name }])
     applyPayeeChoices(ctx, [key])
     carryPayeeRefs(ctx, [[tx.payeeKey, key]])
   }
@@ -340,26 +346,35 @@ function carryPayeeOver(ctx: AppContext, id: number, from: string, to: string, p
 /**
  * After the payee name rules or AI names change (or how payees are named: PAYEE_RULES_VERSION): each
  * transaction whose payee they now make into another one moves to it, carrying over what was set for
- * the old one. Returns the ones that moved.
+ * the old one, and an open AI request to categorize the old one goes with its transactions
+ * (movePayeeRecords). Returns the ones that moved.
  */
 export function rebuildPayeeKeys(ctx: AppContext): number[] {
   const name = payeeNamerFor(ctx)
-  const rows = ctx.q.all<{ id: number; payee: string; payeeKey: string }>('SELECT id, payee, payee_key AS payeeKey FROM transactions WHERE ledger_id = @ledger ORDER BY id')
+  const rows = ctx.q.all<{ id: number; payee: string; payeeKey: string; amount: number; categoryId: number | null; deletedAt: string | null }>(
+    `SELECT id, payee, payee_key AS payeeKey, amount_minor AS amount, category_id AS categoryId, deleted_at AS deletedAt
+     FROM transactions WHERE ledger_id = @ledger ORDER BY id`,
+  )
   const move = (key: string, id: number) =>
     ctx.q.run(`UPDATE transactions SET payee_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE ledger_id = @ledger AND id = ?`, key, id)
   const moved: number[] = []
   const into = new Set<string>()
   const pairs = new Map<string, [string, string]>()
+  const moves: PayeeMove[] = []
   ctx.q.transaction(() => {
     for (const r of rows) {
-      const key = name(r.payee).key
+      const named = name(r.payee)
+      const key = named.key
       if (key === r.payeeKey) continue
       move(key, r.id)
       carryPayeeOver(ctx, r.id, r.payeeKey, key, r.payee)
       moved.push(r.id)
       into.add(key)
       pairs.set(`${r.payeeKey}\u0000${key}`, [r.payeeKey, key])
+      if (!r.deletedAt) moves.push({ from: r.payeeKey, to: key, direction: directionOf(r.amount), waiting: r.categoryId === null, name: named.name })
     }
+    // Before a payee's choice categorizes them: a failed request about them stays with them.
+    movePayeeRecords(ctx, moves)
     // A payee you always set one way: its new transactions waiting for a category get it.
     if (into.size) applyPayeeChoices(ctx, [...into])
     carryPayeeRefs(ctx, [...pairs.values()])

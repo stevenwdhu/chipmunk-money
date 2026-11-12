@@ -1,11 +1,11 @@
 import { eq, gte, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { payeeKey, payeeNamer, type PayeeTidyPreview, type PayeeTidyStatus } from '@chipmunk/shared'
-import { namesKey, recorded, type AiAttempt } from '../ai/records'
+import { namesKey, openRecord, recorded, type AiAttempt } from '../ai/records'
 import { askStructured } from '../ai/runner'
 import { payeeTidy } from '../db/schema'
 import { badRequest } from '../lib/http'
-import type { MetaStore } from './context'
+import type { AppContext, MetaStore } from './context'
 import { forgetPayeeNamer, loadNameRules, payeeNamerFor } from './payee-namer'
 import { payeesSent, renamed, type PayeeWorld } from './payee-names'
 import { aiConfig, getAppSetting, setAppSetting } from './settings'
@@ -192,12 +192,14 @@ function knownNames(world: PayeeWorld, payees: string[]): KnownNames {
 
 /**
  * Asks for names, keeps them (the payee as sent → its name). Returns the ones kept. One request,
- * recorded in the first ledger's AI usage as these payees together: asked again after a failure,
- * the same set corrects its record. `record` is the failed record this asks again, for the payees
- * of it still without a name.
+ * recorded as these payees together: asked again after a failure, the same set corrects its record,
+ * in whichever ledger's AI usage that is, and a new one goes to the first ledger in use. `record` is
+ * the failed record this asks again, for the payees of it still without a name, and its ledger.
  */
-async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidier, record?: number) {
-  const ctx = world.ledgers()[0]
+async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidier, record?: { id: number; ctx: AppContext }) {
+  const ledgers = world.ledgers()
+  const open = record ?? openRecord(ledgers, 'names', namesKey(payees))
+  const ctx = open?.ctx ?? ledgers.find((l) => !l.ledger.archived) ?? ledgers[0]
   if (!ctx) throw new Error('There’s no ledger to record AI requests in.')
   const asked = new Set(payees)
   const keep = (original: string, tidied: string, model: string | null) =>
@@ -216,7 +218,7 @@ async function tidyBatch(world: PayeeWorld, payees: string[], tidier: PayeeTidie
       .run()
   const { kept } = await recorded(
     ctx,
-    { kind: 'names', subject: null, key: namesKey(payees), record },
+    { kind: 'names', subject: null, key: namesKey(payees), record: open?.id },
     async (log) => {
       const { names, model } = await tidier(payees, knownNames(world, payees), log)
       const kept = names.filter((n) => asked.has(n.payee) && n.name.trim())
@@ -247,28 +249,36 @@ export const tidyRunning = (world: PayeeWorld) => jobOf(world.meta).running
 
 /**
  * Asks again, in the background, for the names failed requests didn't get: each record's payees
- * still without one, together, as its request was, so the record is corrected. One run at a time,
- * and not while the rest are being named: false then. A request that fails again doesn't stop the
- * ones after it. `onDone` hears when it's over.
+ * still without one when its turn comes (an earlier record of the run may have named some),
+ * together, as its request was, so the record is corrected, in its own ledger (`ctx`). A record with
+ * none left isn't asked. One run at a time, and not while the rest are being named: false then. A
+ * request that fails again doesn't stop the ones after it. `onDone` hears when it's over.
  */
-export function retryNames(world: PayeeWorld, records: Array<{ id: number; payees: string[] }>, given?: PayeeTidier, onDone?: () => void): boolean {
+export function retryNames(
+  world: PayeeWorld,
+  records: Array<{ id: number; ctx: AppContext; payees: string[] }>,
+  given?: PayeeTidier,
+  onDone?: () => void,
+): boolean {
   const job = jobOf(world.meta)
   if (job.running) return false
   const tidier = tidierFor(world, given)
-  const unnamed = unnamedPayees(world)
-  const work = records.map((r) => ({ id: r.id, payees: unnamed(r.payees) })).filter((r) => r.payees.length)
-  Object.assign(job, { running: true, done: 0, total: work.reduce((n, r) => n + r.payees.length, 0), error: null })
+  const total = new Set(records.flatMap((r) => unnamedPayees(world)(r.payees))).size
+  Object.assign(job, { running: true, done: 0, total, error: null })
   void (async () => {
     try {
-      for (const r of work) {
+      for (const r of records) {
+        const payees = unnamedPayees(world)(r.payees)
+        if (!payees.length) continue
         try {
-          await tidyBatch(world, r.payees, tidier, r.id)
+          await tidyBatch(world, payees, tidier, { id: r.id, ctx: r.ctx })
           // Applied as they come, while it's on.
           if (getAppSetting<boolean>(world.meta, 'payees.aiTidy', false)) renamed(world)
         } catch (err) {
           job.error = err instanceof Error ? err.message : String(err)
         }
-        job.done += r.payees.length
+        // A payee two records share is asked for twice when the first one fails.
+        job.done = Math.min(job.total, job.done + payees.length)
       }
     } finally {
       job.running = false

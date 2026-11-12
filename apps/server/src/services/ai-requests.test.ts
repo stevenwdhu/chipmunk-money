@@ -6,10 +6,10 @@ import { createApp } from '../app'
 import type { Storage } from '../storage'
 import { categoryId, makeAccount, testLedger, testStorage } from '../test/helpers'
 import { addTx } from '../test/transaction-twins'
-import { ledgerAiUsage, retryAll, retryRecord, type AiCaller } from './ai-requests'
+import { aiUsage, ledgerAiUsage, retryAll, retryRecord, type AiCaller } from './ai-requests'
 import type { AppContext } from './context'
 import { aiJobStatus } from './import'
-import { renamePayee, worldOf } from './payee-names'
+import { nameWordings, renamePayee, worldOf } from './payee-names'
 import { previewTidy, setAiTidy, tidyNewPayees, tidyStatus, type PayeeTidier } from './payee-tidy'
 import { updateSettings } from './settings'
 
@@ -50,6 +50,20 @@ function fakeLlm() {
       if (ai.silent) return null
       return { category: 'Groceries', confidence: 0.8, slot: 'primary', model: 'fake-model' }
     }) as LlmCategorizer,
+  }
+  return ai
+}
+
+/** A stand-in for the AI that names payees, fails while `down`, and says what it was asked. */
+function fakeTidier() {
+  const ai = {
+    down: false,
+    asked: [] as string[][],
+    tidier: (async (payees) => {
+      ai.asked.push(payees)
+      if (ai.down) throw new Error('The provider took too long to answer.')
+      return { names: payees.map((payee) => ({ payee, name: `Tidy ${payee.toLowerCase()}` })), model: 'fake-model' }
+    }) as PayeeTidier,
   }
   return ai
 }
@@ -417,19 +431,6 @@ describe('AI request records: connection tests and requests from before', () => 
 })
 
 describe('AI request records: payees to name', () => {
-  /** A stand-in for the AI that names payees, fails while `down`, and says what it was asked. */
-  function fakeTidier() {
-    const ai = {
-      down: false,
-      asked: [] as string[][],
-      tidier: (async (payees) => {
-        ai.asked.push(payees)
-        if (ai.down) throw new Error('The provider took too long to answer.')
-        return { names: payees.map((payee) => ({ payee, name: `Tidy ${payee.toLowerCase()}` })), model: 'fake-model' }
-      }) as PayeeTidier,
-    }
-    return ai
-  }
   const PAYEES = ['SHOP A #1', 'SHOP B #2', 'SHOP C #3']
   function world() {
     const storage = testStorage()
@@ -515,21 +516,119 @@ describe('AI request records: payees to name', () => {
     expect(retryAll([w.ctx], w.who, undefined, ai.tidier)).toEqual({ started: 0, working: 0 })
   })
 
-  it('leaves names to a caller that can use every ledger', async () => {
+  it('gives a caller that can’t use every ledger nothing of a request to name payees', async () => {
+    const s = setup()
+    useProviders(s.storage, 'claude')
+    const family = testLedger(s.storage)
+    const acc = makeAccount(family)
+    // Payees of Family only, and the record sits in Personal, the first ledger.
+    PAYEES.forEach((payee, i) => addTx(family, acc, '2026-09-01', -100 - i, payee, { categoryId: categoryId(family, 'Groceries') }))
+    expect((await s.call('POST', '/payees/tidy/preview', { page: 0 })).status).toBe(200)
+    addTx(family, acc, '2026-09-04', -900, 'SHOP D #4', { categoryId: categoryId(family, 'Groceries') })
+    provider.down.add('claude')
+    expect((await s.call('POST', '/payees/tidy/preview', { page: 0 })).status).toBe(400)
+    expect(records(s.personal).map((r: Json) => [r.kind, r.ok])).toEqual([['names', 1], ['names', 0]])
+    expect(records(family)).toEqual([])
+    const all = await s.usage()
+    expect(all).toMatchObject({ requests: 2, failed: 1, retryable: 1, inputTokens: 100, outputTokens: 40 })
+    const failed = all.recent[0]!
+
+    const none = { requests: 0, failed: 0, retryable: 0, retrying: 0, inputTokens: 0, outputTokens: 0, recent: [] }
+    for (const ledger of [s.personal, family]) {
+      const limited = await s.key({ scopes: ['write'], ledgers: [ledger.ledger.id] })
+      expect(await s.usage(limited)).toEqual(none)
+      expect((await s.call('GET', `/ledgers/${ledger.ledger.slug}/ai/usage`, undefined, limited)).body).toEqual(none)
+      expect((await s.call('POST', '/ai/usage/retry', undefined, limited)).body).toEqual({ started: 0, working: 0 })
+    }
+    // Its id is answered like one that doesn't exist.
+    const limited = await s.key({ scopes: ['write'], ledgers: [s.personal.ledger.id] })
+    const theirs = await s.call('POST', `/ledgers/personal/ai/usage/${failed.id}/retry`, undefined, limited)
+    const unknown = await s.call('POST', '/ledgers/personal/ai/usage/999999/retry', undefined, limited)
+    expect(theirs.status).toBe(404)
+    expect(theirs).toEqual(unknown)
+    expect(provider.asked).toEqual(['claude', 'claude'])
+    // A key for every ledger gets it as you do.
+    expect(await s.usage(await s.key({ scopes: ['write'] }))).toEqual(all)
+  })
+
+  it('corrects a retried request in the ledger its record is in, whichever ledger comes first by then', async () => {
     const w = world()
     const ai = fakeTidier()
     ai.down = true
     await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
-    const limited: AiCaller = { ...w.who, everyLedger: false }
-    const usage = ledgerAiUsage(w.ctx, limited)
-    expect(usage).toMatchObject({ requests: 1, failed: 1, retryable: 0 })
-    // How many, never which.
-    expect(usage.recent[0]).toMatchObject({ kind: 'names', payees: 3, subject: null, status: 'failed', canRetry: false })
-    expect(JSON.stringify(usage)).not.toContain('SHOP')
+    const [first] = records(w.ctx)
+    // Another ledger now comes first.
+    const family = testLedger(w.storage)
+    w.storage.sqlite.prepare('UPDATE ledgers SET sort = -1 WHERE id = ?').run(family.ledger.id)
+    expect(w.all.ledgers()[0]!.ledger.id).toBe(family.ledger.id)
+
+    expect(retryRecord(w.ctx, w.who, first.id, ai.tidier)).toEqual({ started: 1, working: 0 })
+    await w.done()
+    // The same payees asked for anew (a preview, the next sync) correct it too, where it is.
+    await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
+    expect(records(w.ctx)).toEqual([expect.objectContaining({ id: first.id, ok: 0, tries: 3 })])
+    expect(records(family)).toEqual([])
+    expect(aiUsage([family, w.ctx], w.who)).toMatchObject({ requests: 1, failed: 1, retryable: 1 })
+
+    ai.down = false
+    expect(retryAll([family, w.ctx], w.who, undefined, ai.tidier)).toEqual({ started: 1, working: 0 })
+    await w.done()
+    expect(records(w.ctx)).toEqual([expect.objectContaining({ id: first.id, ok: 1, tries: 4, outcome: '3', first_failed_at: first.first_failed_at })])
+    expect(records(family)).toEqual([])
+    // A new request, with no open record anywhere, goes to the first ledger.
+    addTx(w.ctx, makeAccount(w.ctx, 'Visa', 'credit'), '2026-09-03', -700, 'SHOP D #4', { categoryId: categoryId(w.ctx, 'Groceries') })
+    await previewTidy(w.all, 0, ai.tidier)
+    expect(records(family)).toEqual([expect.objectContaining({ kind: 'names', ok: 1, outcome: '1' })])
+  })
+
+  it('asks once for a payee that several failed requests share', async () => {
+    const w = world()
+    const ai = fakeTidier()
+    ai.down = true
+    await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
+    addTx(w.ctx, makeAccount(w.ctx, 'Visa', 'credit'), '2026-09-03', -700, 'SHOP D #4', { categoryId: categoryId(w.ctx, 'Groceries') })
+    await expect(previewTidy(w.all, 0, ai.tidier)).rejects.toThrow()
+    const [three, four] = w.recent().reverse()
+    expect([three!.payees, four!.payees]).toEqual([3, 4])
+    expect(ledgerAiUsage(w.ctx, w.who)).toMatchObject({ requests: 2, failed: 2, retryable: 2 })
+
+    ai.down = false
     ai.asked.length = 0
-    expect(() => retryRecord(w.ctx, limited, usage.recent[0]!.id, ai.tidier)).toThrow('Payees are named across every ledger, so a key limited to some ledgers can’t ask for names again.')
-    expect(retryAll([w.ctx], limited, undefined, ai.tidier)).toEqual({ started: 0, working: 0 })
-    expect(ai.asked).toEqual([])
+    expect(retryAll([w.ctx], w.who, undefined, ai.tidier)).toEqual({ started: 2, working: 0 })
+    await w.done()
+    // The second is asked only for what the first didn't just name.
+    expect(ai.asked).toEqual([PAYEES, ['SHOP D #4']])
+    expect(w.recent().reverse()).toEqual([
+      expect.objectContaining({ id: three!.id, ok: true, named: 3, tries: 2 }),
+      expect.objectContaining({ id: four!.id, ok: true, named: 1, tries: 2 }),
+    ])
+
+    // With nothing left for the second, it isn't asked: it reads as no longer needed.
+    const again = world()
+    ai.down = true
+    await expect(previewTidy(again.all, 0, ai.tidier)).rejects.toThrow()
+    const [open] = records(again.ctx)
+    again.ctx.q.run(`UPDATE ai_calls SET subject_key = ? WHERE ledger_id = @ledger AND id = ?`, JSON.stringify(PAYEES.slice(0, 2)), open.id)
+    again.ctx.q.run(
+      `INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, error, kind, subject_key, tries, first_failed_at)
+       VALUES (@ledger, 'primary', 'fake-model', 5, 0, 'down', 'names', ?, 1, '2026-09-01T10:00:00.000Z')`,
+      JSON.stringify(PAYEES),
+    )
+    again.ctx.q.run(
+      `INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, error, kind, subject_key, tries, first_failed_at)
+       VALUES (@ledger, 'primary', 'fake-model', 5, 0, 'down', 'names', ?, 1, '2026-09-01T10:00:00.000Z')`,
+      JSON.stringify(PAYEES.slice(1)),
+    )
+    ai.down = false
+    ai.asked.length = 0
+    expect(retryAll([again.ctx], again.who, undefined, ai.tidier)).toEqual({ started: 3, working: 0 })
+    await again.done()
+    expect(ai.asked).toEqual([PAYEES.slice(0, 2), ['SHOP C #3']])
+    expect(again.recent().reverse().map((r) => [r.status, r.tries, r.named])).toEqual([
+      ['ok', 2, 2],
+      ['ok', 2, 1],
+      ['unneeded', 1, null],
+    ])
   })
 
   it('records the primary failing and the fallback naming them as one request, through the API', async () => {
@@ -558,5 +657,187 @@ describe('AI request records: payees to name', () => {
     await idle(s)
     expect((await s.usage()).recent[0]).toMatchObject({ id: failed!.id, ok: true, named: 1, slot: 'primary', model: 'broken', primaryError: null, tries: 2, firstFailedAt: failed!.firstFailedAt })
     expect(records(s.personal)).toHaveLength(2)
+  })
+})
+
+describe('AI request records: a payee named after its request failed', () => {
+  /** One uncategorized METRO #412 whose request failed, the provider back since. */
+  async function failedOnce() {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    const acc = makeAccount(s.personal)
+    addTx(s.personal, acc, '2026-09-01', -4_200, 'METRO #412')
+    ai.down = true
+    await categorize(s)
+    ai.down = false
+    const [failed] = (await s.usage()).recent
+    expect(failed).toMatchObject({ subject: 'METRO #412', status: 'failed', canRetry: true })
+    return { ai, s, acc, failed: failed!, world: worldOf(s.storage) }
+  }
+  /** It's still a failure to retry, under the payee's new name, and the retry categorizes the transaction and corrects the same record. */
+  async function retried(t: Awaited<ReturnType<typeof failedOnce>>, name: string, key: string, retry: () => Promise<Json>, requests = 1) {
+    const asked = () => records(t.s.personal).filter((r: Json) => r.kind === 'categorize')
+    expect(asked()).toEqual([expect.objectContaining({ id: t.failed.id, ok: 0, tries: 1, subject: name, subject_key: `out:${key}` })])
+    expect(await t.s.usage()).toMatchObject({ requests, failed: 1, retryable: 1 })
+    expect((await t.s.usage()).recent.filter((r) => r.kind === 'categorize')).toEqual([expect.objectContaining({ id: t.failed.id, subject: name, status: 'failed', canRetry: true })])
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual([null])
+    expect((await retry()).body).toEqual({ started: 1, working: 0 })
+    await idle(t.s)
+    expect(categoriesOf(t.s.personal)).toEqual([{ payee: 'METRO #412', category: 'Groceries', source: 'ai', confidence: 0.8, review: 1 }])
+    expect(asked()).toEqual([
+      expect.objectContaining({ id: t.failed.id, ok: 1, tries: 2, outcome: 'Groceries', subject: name, first_failed_at: t.failed.firstFailedAt }),
+    ])
+    expect(await t.s.usage()).toMatchObject({ requests, failed: 0, retryable: 0 })
+  }
+
+  it('keeps the failure with the payee when AI tidying names it', async () => {
+    const t = await failedOnce()
+    const tidy = fakeTidier()
+    setAiTidy(t.world, true, tidy.tidier)
+    await settle(() => !tidyStatus(t.world).running)
+    expect(t.s.personal.q.column('SELECT payee_key FROM transactions WHERE ledger_id = @ledger')).toEqual(['tidy metro 412'])
+    // The request that named it is a record too.
+    await retried(t, 'Tidy metro #412', 'tidy metro 412', () => t.s.call('POST', '/ai/usage/retry'), 2)
+  })
+
+  it('keeps the failure with the payee when a rule of yours names it, and when it goes back to its own name', async () => {
+    const t = await failedOnce()
+    renamePayee(t.world, { payee: 'METRO #412', name: 'Metro' })
+    expect((await t.s.usage()).recent[0]).toMatchObject({ id: t.failed.id, subject: 'Metro', status: 'failed', canRetry: true })
+    renamePayee(t.world, { payee: 'METRO #412', name: null })
+    expect((await t.s.usage()).recent[0]).toMatchObject({ id: t.failed.id, subject: 'METRO #412', status: 'failed', canRetry: true })
+    renamePayee(t.world, { payee: 'METRO #412', name: 'Metro' })
+    await retried(t, 'Metro', 'metro', () => t.s.call('POST', `/ledgers/personal/ai/usage/${t.failed.id}/retry`))
+  })
+
+  it('corrects the same record when the payee is named while AI is being asked again', async () => {
+    const t = await failedOnce()
+    let release!: () => void
+    t.ai.hold = new Promise<void>((r) => (release = r))
+    expect((await t.s.call('POST', `/ledgers/personal/ai/usage/${t.failed.id}/retry`)).body).toEqual({ started: 1, working: 0 })
+    renamePayee(t.world, { payee: 'METRO #412', name: 'Metro' })
+    release()
+    await idle(t.s)
+    expect(records(t.s.personal)).toEqual([expect.objectContaining({ id: t.failed.id, ok: 1, tries: 2, subject: 'Metro', subject_key: 'out:metro' })])
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries'])
+  })
+
+  it('keeps one record when two payees that both failed become one', async () => {
+    const t = await failedOnce()
+    addTx(t.s.personal, t.acc, '2026-09-02', -900, 'METRO #7')
+    // Money in from the same payee is another thing asked, and stays one.
+    addTx(t.s.personal, t.acc, '2026-09-03', 500, 'METRO #7')
+    t.ai.down = true
+    await categorize(t.s)
+    await categorize(t.s)
+    expect(records(t.s.personal).map((r: Json) => [r.subject_key, r.tries])).toEqual([
+      ['out:metro 412', 3],
+      ['in:metro 7', 2],
+      ['out:metro 7', 2],
+    ])
+    const [first, moneyIn] = records(t.s.personal)
+
+    nameWordings(t.world, { payees: ['METRO #412', 'METRO #7'], name: 'Metro' })
+    expect(records(t.s.personal)).toEqual([
+      expect.objectContaining({ id: first.id, ok: 0, subject: 'Metro', subject_key: 'out:metro', tries: 5, first_failed_at: first.first_failed_at }),
+      expect.objectContaining({ id: moneyIn.id, ok: 0, subject: 'Metro', subject_key: 'in:metro', tries: 2 }),
+    ])
+    expect(await t.s.usage()).toMatchObject({ requests: 2, failed: 2, retryable: 2 })
+
+    t.ai.down = false
+    t.ai.asked.length = 0
+    expect((await t.s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 2, working: 0 })
+    await idle(t.s)
+    expect(t.ai.asked).toHaveLength(2)
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries', 'Groceries'])
+    expect(records(t.s.personal).map((r: Json) => [r.id, r.ok, r.tries])).toEqual([
+      [first.id, 1, 6],
+      [moneyIn.id, 1, 3],
+    ])
+    expect(await t.s.usage()).toMatchObject({ requests: 2, failed: 0, retryable: 0 })
+  })
+
+  it('leaves the record where it is while some of the payee’s transactions wait under the old name', async () => {
+    const t = await failedOnce()
+    // Two wordings one rule called the same, failed as one payee: one of them leaves the rule.
+    addTx(t.s.personal, t.acc, '2026-09-02', -900, 'METRO #7')
+    nameWordings(t.world, { payees: ['METRO #412', 'METRO #7'], name: 'Metro' })
+    expect(records(t.s.personal)).toEqual([expect.objectContaining({ id: t.failed.id, subject_key: 'out:metro' })])
+    nameWordings(t.world, { payees: ['METRO #7'], name: null })
+    expect(records(t.s.personal)).toEqual([expect.objectContaining({ id: t.failed.id, subject: 'Metro', subject_key: 'out:metro' })])
+    expect((await t.s.usage()).recent[0]).toMatchObject({ status: 'failed', canRetry: true })
+  })
+})
+
+describe('AI request records: Ask AI again, and archived ledgers', () => {
+  const ASKED_AGAIN = 'It was asked with “Ask AI again”, about transactions that had a category. Select them and ask again there.'
+
+  it('keeps a failed “Ask AI again” about categorized transactions failed, to ask again there', async () => {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    useProviders(s.storage, 'claude')
+    const acc = makeAccount(s.personal)
+    const id = addTx(s.personal, acc, '2026-09-01', -500, 'BEAN BAR', { categoryId: categoryId(s.personal, 'Dine out') })
+    const askAgain = async (ids: number[]) => {
+      expect((await s.call('POST', '/ledgers/personal/categorize/again', { ids })).status).toBe(202)
+      await settle(() => !aiJobStatus(s.personal).running)
+    }
+    ai.down = true
+    await askAgain([id])
+    const usage = await s.usage()
+    expect(usage).toMatchObject({ requests: 1, failed: 1, retryable: 0 })
+    const [failed] = usage.recent
+    expect(failed).toMatchObject({ kind: 'categorize', subject: 'BEAN BAR', status: 'failed', canRetry: false, noRetry: ASKED_AGAIN, tries: 1 })
+    const retry = await s.call('POST', `/ledgers/personal/ai/usage/${failed!.id}/retry`)
+    expect([retry.status, retry.body.error.message]).toEqual([409, ASKED_AGAIN])
+    expect((await s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 0, working: 0 })
+
+    // The payee named since, the record goes with it.
+    renamePayee(worldOf(s.storage), { payee: 'BEAN BAR', name: 'Bean Bar Café' })
+    expect((await s.usage()).recent[0]).toMatchObject({ id: failed!.id, subject: 'Bean Bar Café', status: 'failed', noRetry: ASKED_AGAIN })
+
+    // An uncategorized transaction of the payee is another thing asked: a record of its own, to retry.
+    const waiting = addTx(s.personal, acc, '2026-09-02', -700, 'BEAN BAR')
+    await askAgain([waiting])
+    expect((await s.usage()).recent.map((r) => [r.subject, r.status, r.canRetry, r.noRetry])).toEqual([
+      ['Bean Bar Café', 'failed', true, null],
+      ['Bean Bar Café', 'failed', false, ASKED_AGAIN],
+    ])
+    expect(await s.usage()).toMatchObject({ requests: 2, failed: 2, retryable: 1 })
+
+    // Asked again there and answered, the same record is corrected.
+    ai.down = false
+    await askAgain([id])
+    expect(records(s.personal)[0]).toMatchObject({ id: failed!.id, ok: 1, tries: 2, outcome: 'Groceries', first_failed_at: failed!.firstFailedAt })
+    expect(await s.usage()).toMatchObject({ requests: 2, failed: 1, retryable: 1 })
+    expect(categoriesOf(s.personal).map((r: Json) => r.category)).toEqual(['Groceries', null])
+  })
+
+  it('leaves an archived ledger’s failures alone until it’s restored', async () => {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    const family = testLedger(s.storage)
+    addTx(family, makeAccount(family), '2026-09-01', -4_200, 'METRO #412')
+    ai.down = true
+    await categorize(s, family)
+    ai.down = false
+    ai.asked.length = 0
+    s.storage.registry.update(family.ledger.id, { archived: true })
+
+    const usage = await s.usage()
+    expect(usage).toMatchObject({ requests: 1, failed: 1, retryable: 0 })
+    const [failed] = usage.recent
+    expect(failed).toMatchObject({ subject: 'METRO #412', ledger: 'Family', status: 'failed', canRetry: false, noRetry: 'This ledger is archived. Restore it first, then ask again.' })
+    expect((await s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 0, working: 0 })
+    const one = await s.call('POST', `/ledgers/family/ai/usage/${failed!.id}/retry`)
+    expect([one.status, one.body.error.message]).toEqual([409, 'This ledger is archived. Restore it first, then ask again.'])
+    expect(ai.asked).toEqual([])
+    expect(records(family)).toEqual([expect.objectContaining({ ok: 0, tries: 1 })])
+
+    s.storage.registry.update(family.ledger.id, { archived: false })
+    expect(await s.usage()).toMatchObject({ failed: 1, retryable: 1 })
+    expect((await s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 1, working: 0 })
+    await idle(s)
+    expect(records(family)).toEqual([expect.objectContaining({ id: failed!.id, ok: 1, tries: 2 })])
   })
 })
