@@ -22,6 +22,7 @@ import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
 import { payeeKeyOf, payeeNameOf } from './payee-namer'
 import { recurringDetection, today } from './settings'
+import { checkSplitEdit, splitPartOf } from './splits'
 
 type CreateInput = z.output<typeof recurringCreateSchema>
 type UpdateInput = z.output<typeof recurringUpdateSchema>
@@ -168,7 +169,7 @@ function suggestedPayments(ctx: AppContext, r: ItemRow): Array<{ id: number; dat
     .all<{ id: number; date: string; amount: number }>(
       `SELECT id, date, amount_minor AS amount FROM transactions
        WHERE ledger_id = @ledger AND payee_key IN (SELECT value FROM json_each(@keys))
-         AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL
+         AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL
        ORDER BY date DESC, id DESC`,
       { keys: JSON.stringify([r.payee_key, ...(JSON.parse(r.other_keys) as string[])]) },
     )
@@ -281,7 +282,7 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
   const unlinked = (from: ISODate, to: ISODate) =>
     ctx.q.all<{ id: number; date: string; payee: string; payeeKey: string; amount: number }>(
       `SELECT id, date, payee, payee_key AS payeeKey, amount_minor AS amount FROM transactions
-       WHERE ledger_id = @ledger AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND date BETWEEN @from AND @to
+       WHERE ledger_id = @ledger AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL AND date BETWEEN @from AND @to
          AND (@account IS NULL OR account_id = @account)
          AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')})`,
       { from, to, account: r.account_id, item: r.id },
@@ -376,7 +377,7 @@ function possiblePayment(ctx: AppContext, r: ItemRow, todayDate: ISODate): Recur
   return null
 }
 
-/** A payment to link to an item: one that isn't another item's, or a transfer. */
+/** A payment to link to an item: one that isn't another item's, a transfer, or a split row (409). */
 function paymentToLink(ctx: AppContext, txId: number) {
   const tx = ctx.q.mustGet<{
     payee: string
@@ -386,13 +387,16 @@ function paymentToLink(ctx: AppContext, txId: number) {
     amount: number
     recurringItemId: number | null
     transferPairId: number | null
+    splitOf: number | null
   }>(
     `SELECT payee, payee_key AS payeeKey, date, account_id AS accountId, amount_minor AS amount, recurring_item_id AS recurringItemId,
-       transfer_pair_id AS transferPairId
+       transfer_pair_id AS transferPairId, split_of AS splitOf
      FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL`,
     'Transaction not found',
     { id: txId },
   )
+  // A split row is its split's, never a recurring item's.
+  if (tx.splitOf !== null) checkSplitEdit(ctx, splitPartOf(ctx, txId)!, { recurringItem: true })
   if (tx.recurringItemId) badRequest('That payment already belongs to a recurring item')
   if (tx.transferPairId) badRequest('That’s a transfer, not a payment')
   return tx
@@ -629,7 +633,7 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
   }>(
     `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey, category_id AS categoryId,
        recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
-     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL`,
+     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL AND split_of IS NULL`,
     { id: txId },
   )
   if (!tx || tx.recurringItemId || tx.transferPairId) return null
@@ -744,7 +748,7 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
   // Its payees' payments: linked to it, or to nothing yet.
   const txs = ctx.q.all<{ id: number; date: string; amount: number; payeeKey: string; accountId: number; itemId: number | null }>(
     `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, account_id AS accountId, recurring_item_id AS itemId FROM transactions
-     WHERE ledger_id = @ledger AND deleted_at IS NULL AND transfer_pair_id IS NULL AND (recurring_item_id IS NULL OR recurring_item_id = @item)
+     WHERE ledger_id = @ledger AND deleted_at IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL AND (recurring_item_id IS NULL OR recurring_item_id = @item)
        AND payee_key IN (SELECT value FROM json_each(@keys))
        AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')})
      ORDER BY date, id`,

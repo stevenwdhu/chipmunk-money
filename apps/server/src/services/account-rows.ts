@@ -10,21 +10,27 @@ import type { AppContext } from './context'
  * account's rows are held by its home and by the ledgers it's shared with. Everything that reads an
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
  * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and the
- * account's rows, each with the ledger that holds it, for four users only. The bank code: sync
+ * account's rows, each with the ledger that holds it, for a few users only. The bank code: sync
  * matches against them and writes each row through its holder's context (bankRows, bankIds,
  * holder), and a switch pairs them the same way (switchRows), its review showing them only to a
  * caller allowed in every ledger that has the account. A CSV import's duplicate check
  * (importedRows), whose preview names no other ledger's row. And the all-ledgers list
  * (accountTransactions), for a caller allowed in every ledger that has the account, which shows
  * names and amounts but no other ledger's category, tag or link ids. Other than that list and the
- * switch's review, those never reach a response. And deleting a split-off account (splitOffHistory,
+ * switch's review, those never reach a response. Deleting a split-off account (splitOffHistory,
  * for accounts.ts), which leaves the account it was split off from the bank ids it must keep knowing.
+ * And a split payment's rows in every ledger (splitRows, for splits.ts), which it writes each through
+ * its holder's context: a split's shares reach a response only as ledger names and amounts (splitShares).
  *
  * The reads a bank or a CSV matches against also cover the rows a ledger kept when it stopped
  * sharing the account: the rows of the accounts split off from it, at any depth (each names the one
  * it was split off from in accounts.split_from_id), that were the account's before they left it,
  * marked `frozen` (FROZEN). They still carry the bank's ids, so the account's sync and imports know
  * them and never add them again, and never change them either. Sums never count them.
+ *
+ * Those reads leave out split rows (NOT_SPLIT): the pieces of a card payment split between the
+ * ledgers. They carry no bank id, and to a bank or a CSV each would look like a payment or a
+ * purchase of its own. Sums count them, since they're in each ledger's part.
  *
  * A service reaches these through ctx.accountWide: the reads bound to the connection once
  * (accountReadsOn), shared by every context. To add a read, add a function to READS: it takes the
@@ -180,6 +186,24 @@ export interface SplitOffHistoryRow {
   createdAt: string
 }
 
+/** A split row of a payment (transactions.split_of), in whichever ledger holds it. For splits.ts only. */
+export interface SplitRowHeld {
+  id: number
+  /** The ledger that holds it: the one its writes go through. */
+  ledgerId: string
+  amountMinor: number
+}
+
+/** A split row of a payment as anyone may see it: the ledger that holds it and its amount, and the ledger that holds the payment. */
+export interface SplitShare {
+  paymentId: number
+  holder: { ledgerId: string; slug: string; name: string }
+  ledgerId: string
+  slug: string
+  name: string
+  amountMinor: number
+}
+
 /**
  * A row of a shared account as the all-ledgers list shows it, in whichever ledger holds it: its
  * category by name only, and no ids of what it's linked to there. For listAccountTransactions only.
@@ -224,6 +248,9 @@ const SPLIT_OFFS = `WITH RECURSIVE split_offs(id, bound) AS (
  */
 const MATCHED = `(t.account_id = @accountId
   OR EXISTS (SELECT 1 FROM split_offs b WHERE b.id = t.account_id AND t.created_at <= b.bound))`
+
+/** `t` isn't a split row (the piece of a split payment a ledger has): what a bank or a CSV matches against. */
+const NOT_SPLIT = 't.split_of IS NULL'
 
 /** Of MATCHED, whether `t` is a frozen row (1) or the account's own (0). */
 const FROZEN = '(t.account_id <> @accountId)'
@@ -338,7 +365,8 @@ const READS = {
   /**
    * The account's rows a sync can touch, in every ledger, deleted ones included: each with a bank
    * id, and each dated on or after `since` (what can be adopted, or matched to a bank's row under a
-   * new id). And the frozen rows with a bank id (MATCHED), which a sync only knows. For the bank code only.
+   * new id). And the frozen rows with a bank id (MATCHED), which a sync only knows. No split row
+   * (NOT_SPLIT). For the bank code only.
    */
   bankRows(db: UnscopedQuery, accountId: number, since: ISODate): BankRow[] {
     return db
@@ -348,7 +376,7 @@ const READS = {
            t.external_id AS externalId, t.corrected_at AS correctedAt, t.deleted_at AS deletedAt, t.removed_at AS removedAt,
            t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen
          FROM transactions t
-         WHERE ${MATCHED} AND (t.external_id IS NOT NULL OR (t.account_id = @accountId AND t.date >= @since))
+         WHERE ${MATCHED} AND ${NOT_SPLIT} AND (t.external_id IS NOT NULL OR (t.account_id = @accountId AND t.date >= @since))
          ORDER BY t.id`,
         { accountId, since },
       )
@@ -381,7 +409,8 @@ const READS = {
 
   /**
    * The account's rows a CSV import can duplicate, in every ledger, frozen ones too (MATCHED): each
-   * with one of these bank ids (deleted ones too), and each live one dated from `from` to `to`. For
+   * with one of these bank ids (deleted ones too), and each live one dated from `from` to `to`. No
+   * split row (NOT_SPLIT): a share has the payment's payee and would pass for the next one. For
    * import.ts only.
    */
   importedRows(db: UnscopedQuery, accountId: number, opts: { externalIds: readonly string[]; from: ISODate; to: ISODate }): ImportedRow[] {
@@ -391,7 +420,7 @@ const READS = {
          SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, t.external_id AS externalId,
            t.deleted_at IS NOT NULL AS deleted, ${FROZEN} AS frozen
          FROM transactions t
-         WHERE ${MATCHED}
+         WHERE ${MATCHED} AND ${NOT_SPLIT}
            AND (t.external_id IN (SELECT value FROM json_each(@externalIds)) OR (t.deleted_at IS NULL AND t.date BETWEEN @from AND @to))
          ORDER BY t.id`,
         { accountId, externalIds: JSON.stringify(opts.externalIds), from: opts.from, to: opts.to },
@@ -406,12 +435,12 @@ const READS = {
    * purchase went to an account of its own with a ledger that stopped sharing the account.
    */
   purchasePayees(db: UnscopedQuery, accountId: number, from: ISODate, to: ISODate): Array<{ payee: string; payeeKey: string }> {
-    // Split rows (the shares a payment gives other ledgers) are to be left out here: a share is a
-    // debit, and counted as a purchase it would keep every later card payment from being filed as one.
+    // No split row (NOT_SPLIT): what a payment's holder gave is a debit, and counted as a purchase
+    // it would keep every later card payment from being filed as one.
     return db.all<{ payee: string; payeeKey: string }>(
       `${SPLIT_OFFS}
        SELECT DISTINCT t.payee, t.payee_key AS payeeKey FROM transactions t
-       WHERE ${MATCHED} AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
+       WHERE ${MATCHED} AND ${NOT_SPLIT} AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
          AND t.date BETWEEN @from AND @to
        ORDER BY t.payee_key, t.payee`,
       { accountId, from, to },
@@ -420,7 +449,7 @@ const READS = {
 
   /**
    * The account's rows dated on or after `from`, in every ledger, deleted ones and frozen ones
-   * (MATCHED) too: what a bank switch pairs. For the switch only.
+   * (MATCHED) too, and no split row (NOT_SPLIT): what a bank switch pairs. For the switch only.
    */
   switchRows(db: UnscopedQuery, accountId: number, from: ISODate): SwitchRow[] {
     return db.all<SwitchRow>(
@@ -429,7 +458,7 @@ const READS = {
          t.external_id AS externalId, t.deleted_at AS deletedAt,
          CASE WHEN ${FROZEN} THEN (SELECT s.name FROM accounts s WHERE s.id = t.account_id) END AS splitOff
        FROM transactions t
-       WHERE ${MATCHED} AND t.date >= @from
+       WHERE ${MATCHED} AND ${NOT_SPLIT} AND t.date >= @from
        ORDER BY t.id`,
       { accountId, from },
     )
@@ -437,15 +466,15 @@ const READS = {
 
   /**
    * A hash of the account's rows in every ledger, each with its ledger and account, deleted ones and
-   * frozen ones (MATCHED) too: it changes when one is added, edited in a way a switch's review shows,
-   * deleted or moved.
+   * frozen ones (MATCHED) too, as switchRows has them: it changes when one is added, edited in a way
+   * a switch's review shows, deleted or moved.
    */
   switchStamp(db: UnscopedQuery, accountId: number): string {
     const rows = db
       .all(
         `${SPLIT_OFFS}
          SELECT t.id, t.ledger_id, t.account_id, t.date, t.amount_minor, t.payee, t.name, t.external_id, t.deleted_at IS NOT NULL AS deleted
-         FROM transactions t WHERE ${MATCHED} ORDER BY t.id`,
+         FROM transactions t WHERE ${MATCHED} AND ${NOT_SPLIT} ORDER BY t.id`,
         { accountId },
       )
       .map((r) => Object.values(r as Record<string, unknown>))
@@ -489,6 +518,37 @@ const READS = {
     )
     const seen = new Set<string>()
     return { parent, rows: rows.filter((r) => !seen.has(r.externalId) && !!seen.add(r.externalId)) }
+  },
+
+  /**
+   * A payment's split rows on the account (split_of), in every ledger, each with the ledger that
+   * holds it, in id order. For splits.ts only, which writes each through its holder's context.
+   */
+  splitRows(db: UnscopedQuery, accountId: number, paymentId: number): SplitRowHeld[] {
+    return db.all<SplitRowHeld>(
+      `SELECT t.id, t.ledger_id AS ledgerId, t.amount_minor AS amountMinor FROM transactions t
+       WHERE t.account_id = @accountId AND t.split_of = @paymentId ORDER BY t.id`,
+      { accountId, paymentId },
+    )
+  },
+
+  /**
+   * The split rows of these payments, in every ledger, as anyone may see them: the ledger that holds
+   * each and its amount, and the ledger that holds the payment. Names and amounts only. In the
+   * ledgers' order, the payment's holder first.
+   */
+  splitShares(db: UnscopedQuery, paymentIds: readonly number[]): SplitShare[] {
+    return db
+      .all<{ paymentId: number; holderId: string; holderSlug: string; holderName: string; ledgerId: string; slug: string; name: string; amountMinor: number }>(
+        `SELECT t.split_of AS paymentId, h.id AS holderId, h.slug AS holderSlug, h.name AS holderName,
+           l.id AS ledgerId, l.slug, l.name, t.amount_minor AS amountMinor
+         FROM transactions t JOIN transactions p ON p.id = t.split_of AND p.account_id = t.account_id
+           JOIN ledgers l ON l.id = t.ledger_id JOIN ledgers h ON h.id = p.ledger_id
+         WHERE t.split_of IN (SELECT value FROM json_each(?))
+         ORDER BY t.split_of, t.ledger_id <> p.ledger_id, l.sort, l.created_at`,
+        JSON.stringify(paymentIds),
+      )
+      .map(({ holderId, holderSlug, holderName, ...r }) => ({ ...r, holder: { ledgerId: holderId, slug: holderSlug, name: holderName } }))
   },
 
   /**

@@ -33,6 +33,7 @@ import { payeeKeyOf, payeeNamerFor } from './payee-namer'
 import { linksFor } from './links'
 import { isPersonTransfer, releaseLinks } from './matching'
 import { cadenceInfo, getRecurring, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
+import { checkSplitEdit, refuseSplitDelete, splitPartOf, splitsFor, type SplitEdit } from './splits'
 
 type CreateInput = z.output<typeof transactionCreateSchema>
 type UpdateInput = z.output<typeof transactionUpdateSchema>
@@ -68,6 +69,10 @@ interface TxRow {
   external_id: string | null
   corrected_at: string | null
   deleted_at: string | null
+  /** The payment it's a split row of (see ROW for `split_payment`). */
+  split_of: number | null
+  /** It's a payment that's split: its given row is beside it (see ROW). */
+  split_payment: number
   created_at: string
   updated_at: string
 }
@@ -88,10 +93,15 @@ const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN
 
 /**
  * A transaction row with its transfer's other side's origin, which says whether the two are kept in step,
- * its recurring item's name, and its place in the list (SORT_KEY).
+ * its recurring item's name, its place in the list (SORT_KEY), and whether it's a payment that's split
+ * between ledgers (its given row is held where it is: splits.ts).
  */
 const ROW = `t.*, (SELECT p.origin FROM transactions p WHERE p.id = t.transfer_pair_id AND p.ledger_id = t.ledger_id) AS pair_origin,
-  (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id) AS item_name, ${SORT_KEY} AS sort_key`
+  (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id) AS item_name, ${SORT_KEY} AS sort_key,
+  EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id) AS split_payment`
+
+/** Not a split row, nor a payment that's split: the rows a link or a recurring item can take. */
+const UNSPLIT = 't.split_of IS NULL AND NOT EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id)'
 
 /**
  * A transfer you entered as one (both sides made here) keeps its sides in step. A matched one (a card
@@ -123,7 +133,7 @@ function tagsFor(ctx: AppContext, ids: number[]): Map<number, Tag[]> {
   return map
 }
 
-function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNaming): Transaction {
+function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNaming, split: Transaction['split']): Transaction {
   return {
     id: r.id,
     accountId: r.account_id,
@@ -153,18 +163,23 @@ function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNami
     externalId: r.external_id,
     correctedAt: r.corrected_at,
     tags,
+    split,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
 }
 
-/** Transactions as the API shows them: with their tags, links and payee names. */
+/** Transactions as the API shows them: with their tags, links, payee names and splits. */
 function dtos(ctx: AppContext, rows: TxRow[]): Transaction[] {
   const ids = rows.map((r) => r.id)
   const tags = tagsFor(ctx, ids)
   const links = linksFor(ctx, ids)
   const name = payeeNamerFor(ctx)
-  return rows.map((r) => toDTO(r, tags.get(r.id) ?? [], links.get(r.id) ?? [], name(r.payee)))
+  const splits = splitsFor(
+    ctx,
+    rows.filter((r) => r.split_of !== null || r.split_payment).map((r) => ({ id: r.id, amount: r.amount_minor, splitOf: r.split_of, isPayment: !!r.split_payment })),
+  )
+  return rows.map((r) => toDTO(r, tags.get(r.id) ?? [], links.get(r.id) ?? [], name(r.payee), splits.get(r.id) ?? null))
 }
 
 function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
@@ -213,7 +228,7 @@ function isShare(bill: number, share: number) {
 
 /**
  * What a transaction could be linked to, with something left to link (not money moving between
- * accounts, in a category left out of totals), in the same currency and any account:
+ * accounts, in a category left out of totals, nor part of a split), in the same currency and any account:
  * - money in, as a refund: purchases from the 6 months before it, of any amount (all of a refund
  *   refunds one, even more than it has left). The same or a similar payee first (the same amount
  *   first), then the most recent.
@@ -233,13 +248,14 @@ const AROUND_ROWS = 300
 const LOOKING_ROWS = 5000
 export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKind; q?: string; categoryId?: Array<number | 'none'> }): LinkCandidate[] {
   const self = getRow(ctx, id)
-  if (!self.amount_minor || self.transfer_pair_id) return []
+  if (!self.amount_minor || self.transfer_pair_id || self.split_of !== null || self.split_payment) return []
   const isIn = self.amount_minor > 0
   const refund = isIn && opts.kind === 'refund'
   const where = [
     't.ledger_id = @ledger',
     't.deleted_at IS NULL',
     't.transfer_pair_id IS NULL',
+    UNSPLIT,
     '(t.category_id IS NULL OR t.category_id NOT IN (SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND exclude_from_totals = 1))',
     't.currency = ?',
     't.id != ?',
@@ -307,7 +323,7 @@ export function linkCandidates(ctx: AppContext, id: number, opts: { kind: LinkKi
 
 /**
  * Payments you could add to a recurring item by hand (`addPayment`): not linked to an item, not
- * transfers, the same way as it (money out or in), from its account if it has one, at any amount.
+ * transfers or split rows, the same way as it (money out or in), from its account if it has one, at any amount.
  * From around its dates: its first payment (or next due date) back 3 periods, until a period after
  * its next due date. Searched, at any date. Its payees' and ones like them first, then the newest.
  */
@@ -318,6 +334,7 @@ export function recurringPaymentCandidates(ctx: AppContext, itemId: number, opts
     't.deleted_at IS NULL',
     't.transfer_pair_id IS NULL',
     't.recurring_item_id IS NULL',
+    't.split_of IS NULL',
     item.expectedAmountMinor < 0 ? 't.amount_minor < 0' : 't.amount_minor > 0',
   ]
   const params: unknown[] = []
@@ -799,6 +816,26 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   const unlinksTransfer = input.transferPairId === null && row.transfer_pair_id !== null
   const mirrored = isMirroredTransfer(row)
 
+  // A split payment and its split rows keep what the split goes by (splits.ts), and so does a split
+  // payment on the other side of a transfer you entered, which follows this one.
+  const amountChanges = input.amountMinor !== undefined && input.amountMinor !== row.amount_minor
+  const dateChanges = (input.date !== undefined && input.date !== row.date) || (datetime !== undefined && datetime !== row.datetime)
+  const payeeChanges = input.payee !== undefined && input.payee !== row.payee
+  const part = row.split_of !== null || row.split_payment ? splitPartOf(ctx, id) : null
+  if (part) {
+    checkSplitEdit(ctx, part, {
+      amountMinor: amountChanges ? input.amountMinor : undefined,
+      date: dateChanges,
+      account: input.accountId !== undefined && input.accountId !== row.account_id,
+      payee: payeeChanges,
+      status: input.status !== undefined && input.status !== row.status,
+      recurringItem: input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id,
+      categoryId: categoryChanged ? (input.categoryId ?? null) : undefined,
+    })
+  }
+  const pairPart = mirrored && !unlinksTransfer ? splitPartOf(ctx, row.transfer_pair_id!) : null
+  if (pairPart) checkSplitEdit(ctx, pairPart, { amountMinor: amountChanges ? -input.amountMinor! : undefined, date: dateChanges, payee: payeeChanges })
+
   ctx.q.transaction(() => {
     if (sets.length) {
       sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
@@ -839,7 +876,8 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   // And one name: naming this one renames the item.
   if (newName !== undefined && nameItemId && newName !== row.item_name) updateRecurring(ctx, nameItemId, { name: newName })
 
-  if (!row.transfer_pair_id) {
+  // A split row is the split's: nothing learns from it, and no recurring item takes it.
+  if (!row.transfer_pair_id && row.split_of === null) {
     if (categoryChanged) {
       if (row.category_source === 'user' && row.category_id) learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
       learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, input.categoryId ?? null)
@@ -899,9 +937,14 @@ export function acceptAllSuggestions(ctx: AppContext): number {
   return rows.length
 }
 
-/** Deletes it (soft, so it can be restored), with the other side of a transfer you entered as one. */
+/**
+ * Deletes it (soft, so it can be restored), with the other side of a transfer you entered as one.
+ * Not a split payment or a split row, nor a transfer you entered with a split payment on its other
+ * side: 409 (refuseSplitDelete).
+ */
 export function deleteTransaction(ctx: AppContext, id: number) {
   const row = getRow(ctx, id)
+  refuseSplitDeletes(ctx, row)
   const itemWasPaidOff = row.recurring_item_id ? paidOff(ctx, row.recurring_item_id) : false
   const stamp = new Date().toISOString()
   if (row.transfer_pair_id && !isMirroredTransfer(row)) {
@@ -923,7 +966,25 @@ export function restoreTransaction(ctx: AppContext, id: number): Transaction {
   return getTransaction(ctx, id)
 }
 
+/** Refuses (409) deleting a split payment or a split row, or a transfer you entered whose other side is a split payment. */
+function refuseSplitDeletes(ctx: AppContext, row: TxRow) {
+  refuseSplitDelete(ctx, row.id)
+  if (row.transfer_pair_id && isMirroredTransfer(row)) refuseSplitDelete(ctx, row.transfer_pair_id)
+}
+
 export function bulkUpdate(ctx: AppContext, input: BulkInput): { updated: number } {
+  // What a split refuses, for any of them, before anything changes: deleting, or a split row's category counted in totals.
+  if (input.delete || input.categoryId !== undefined) {
+    for (const id of input.ids) {
+      const row = ctx.q.get<TxRow>(`SELECT ${ROW} FROM transactions t WHERE t.id = ? AND t.ledger_id = @ledger AND t.deleted_at IS NULL`, id)
+      if (!row) continue
+      if (input.delete) refuseSplitDeletes(ctx, row)
+      else if (row.split_of !== null && row.category_source !== 'linked') {
+        const edit: SplitEdit = { categoryId: input.categoryId ?? null }
+        checkSplitEdit(ctx, splitPartOf(ctx, id)!, edit)
+      }
+    }
+  }
   let updated = 0
   for (const id of input.ids) {
     const row = ctx.q.get<{ id: number; deleted_at: string | null; category_source: string | null }>(

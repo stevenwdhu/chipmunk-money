@@ -63,11 +63,16 @@ const MOVES_MONEY = 't.category_id IN (SELECT id FROM ledger_categories WHERE le
  */
 const PAID = `${LINKABLE} AND a.type = 'credit' AND ${MOVES_MONEY}`
 
+/**
+ * Every read of the rules starts here. Split rows (the pieces of a card payment split between the
+ * ledgers that share its account) are left out: none is a refund, a payment or a purchase, and what
+ * the payment's holder gave would otherwise count as a purchase from a merchant of its own.
+ */
 const SELECT = `SELECT t.id, t.account_id AS accountId, a.type AS accountType, t.date, t.amount_minor AS amount,
   t.payee, t.payee_key AS payeeKey, t.category_id AS categoryId, t.category_source AS source, t.needs_review AS needsReview,
   (${OPEN}) AS open
   FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
-  WHERE t.ledger_id = @ledger`
+  WHERE t.ledger_id = @ledger AND t.split_of IS NULL`
 
 /**
  * A withdrawal that could have paid a card: not already a transfer, and categorized by the app, or

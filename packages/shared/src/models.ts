@@ -301,6 +301,36 @@ export const transactionLinkSchema = z
   .meta({ id: 'TransactionLink' })
 export type TransactionLink = z.output<typeof transactionLinkSchema>
 
+export const transactionSplitShareSchema = z
+  .object({
+    ledger: ledgerRef.describe('The ledger it’s given to.'),
+    amountMinor: minor.describe('What that ledger counts as paid onto the account, as a positive number.'),
+  })
+  .meta({ id: 'TransactionSplitShare' })
+export type TransactionSplitShare = z.output<typeof transactionSplitShareSchema>
+
+export const transactionSplitSchema = z
+  .discriminatedUnion('part', [
+    z.object({
+      part: z.literal('payment'),
+      keptMinor: minor.describe('What this ledger keeps of the payment: its amount less the shares.'),
+      shares: z.array(transactionSplitShareSchema).describe('What each other ledger gets of it.'),
+    }),
+    z.object({
+      part: z.literal('given'),
+      shares: z.array(transactionSplitShareSchema).describe('The shares this row gives the other ledgers, of the payment beside it.'),
+    }),
+    z.object({
+      part: z.literal('share'),
+      from: ledgerRef.describe('The ledger that holds the payment.'),
+    }),
+  ])
+  .meta({ id: 'TransactionSplit' })
+  .describe(
+    'A card payment on a shared account split between the ledgers that have it. `payment`: the payment itself, as the bank sent it. `given`: the row beside it, in the same ledger, for everything given to the other ledgers. `share`: another ledger’s share of a payment, as a payment onto the account. Split rows are in a category left out of totals, and change with the split only.',
+  )
+export type TransactionSplit = z.output<typeof transactionSplitSchema>
+
 export const transactionSchema = z
   .object({
     id,
@@ -340,6 +370,7 @@ export const transactionSchema = z
     externalId: z.string().nullable().describe('Your own id for this transaction, unique per account.'),
     correctedAt: timestamp.nullable().describe('When you corrected its amount or date after it came from the bank; syncs leave those alone from then on.'),
     tags: z.array(tagSchema),
+    split: transactionSplitSchema.nullable().describe('How it’s split between the ledgers that share its account, or null when it isn’t part of a split.'),
     createdAt: timestamp,
     updatedAt: timestamp,
   })

@@ -1,6 +1,7 @@
 import { formatMoney, type LinkKind, type TransactionLink, type TransactionLinksSet } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
 import type { AppContext } from './context'
+import { refuseSplitLink } from './splits'
 
 /**
  * Links between money in and the money out it pays back (`transaction_links`): a refund from the
@@ -24,6 +25,8 @@ interface Side {
   recurring_item_id: number | null
   category_id: number | null
   category_source: string | null
+  /** Part of a split between ledgers: a split row, or a payment that's split. */
+  split: number
 }
 
 const WORD: Record<LinkKind, string> = { refund: 'refund', payback: 'pay back' }
@@ -51,22 +54,28 @@ export function linksFor(ctx: AppContext, ids: number[]): Map<number, Transactio
 
 function side(ctx: AppContext, id: number): Side {
   return ctx.q.mustGet<Side>(
-    `SELECT id, amount_minor, currency, payee, name, date, transfer_pair_id, recurring_item_id, category_id, category_source
-     FROM transactions WHERE id = ? AND ledger_id = @ledger AND deleted_at IS NULL`,
+    `SELECT t.id, t.amount_minor, t.currency, t.payee, t.name, t.date, t.transfer_pair_id, t.recurring_item_id, t.category_id, t.category_source,
+       (t.split_of IS NOT NULL OR EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id)) AS split
+     FROM transactions t WHERE t.id = ? AND t.ledger_id = @ledger AND t.deleted_at IS NULL`,
     'Transaction not found',
     id,
   )
 }
 
-/** Money in that can pay something back: not a transfer, nor a recurring item's payment (which has the item's category). */
-function checkMoneyIn(t: Side) {
+/**
+ * Money in that can pay something back: not a transfer, nor a recurring item's payment (which has the
+ * item's category), nor part of a split between ledgers (409).
+ */
+function checkMoneyIn(ctx: AppContext, t: Side) {
+  if (t.split) refuseSplitLink(ctx, t.id)
   if (t.amount_minor <= 0) badRequest('Only money in can pay back a purchase or bill.')
   if (t.transfer_pair_id) badRequest('A transfer can’t pay anything back. Say it’s not a transfer first.')
   if (t.recurring_item_id) badRequest('A recurring item’s payment can’t pay anything back. Take it out of the item first.')
 }
 
-/** What can be paid back: money out that isn't a transfer. */
-function checkBill(t: Side) {
+/** What can be paid back: money out that isn't a transfer, nor part of a split between ledgers (409). */
+function checkBill(ctx: AppContext, t: Side) {
+  if (t.split) refuseSplitLink(ctx, t.id)
   if (t.amount_minor >= 0 || t.transfer_pair_id) badRequest('Only a purchase or bill can be paid back: money out that isn’t a transfer.')
 }
 
@@ -93,15 +102,15 @@ function linkedAmount(ctx: AppContext, t: Side, except: number) {
 export function setLinks(ctx: AppContext, id: number, input: TransactionLinksSet['links']) {
   const self = side(ctx, id)
   const isIn = self.amount_minor > 0
-  if (isIn) checkMoneyIn(self)
-  else checkBill(self)
+  if (isIn) checkMoneyIn(ctx, self)
+  else checkBill(ctx, self)
   const seen = new Set<number>()
   const others = input.map((l) => {
     if (seen.has(l.transactionId) || l.transactionId === id) badRequest('Link each transaction once.')
     seen.add(l.transactionId)
     const other = side(ctx, l.transactionId)
-    if (isIn) checkBill(other)
-    else checkMoneyIn(other)
+    if (isIn) checkBill(ctx, other)
+    else checkMoneyIn(ctx, other)
     if (other.currency !== self.currency) badRequest(`${describe(other)} is in another currency.`)
     const left = Math.abs(other.amount_minor) - linkedAmount(ctx, other, id)
     const overRefund = l.kind === 'refund' && isIn && left > 0
@@ -142,7 +151,7 @@ export function setLinks(ctx: AppContext, id: number, input: TransactionLinksSet
  */
 export function setLinksTogether(ctx: AppContext, sets: Array<{ id: number; links: TransactionLinksSet['links'] }>) {
   if (new Set(sets.map((s) => s.id)).size !== sets.length) badRequest('Set each transaction once.')
-  for (const s of sets) checkMoneyIn(side(ctx, s.id))
+  for (const s of sets) checkMoneyIn(ctx, side(ctx, s.id))
   ctx.q.transaction(() => {
     for (const s of sets) ctx.q.run('DELETE FROM transaction_links WHERE money_in_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?)', s.id)
     for (const s of sets) setLinks(ctx, s.id, s.links)
