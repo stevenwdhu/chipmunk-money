@@ -4,6 +4,9 @@ import { UNGROUPED_COLOR } from '@chipmunk/shared'
 import type {
   Account,
   AccountCreate,
+  AccountSharing,
+  AccountSharingSet,
+  AccountTransactionPage,
   ActivityPage,
   AiJobStatus,
   ApiKey,
@@ -50,8 +53,14 @@ import type {
   Institution,
   InstitutionUpdate,
   Ledger,
+  LedgerAction,
+  LedgerActionResult,
+  LedgerAnswers,
   LedgerCreate,
+  LedgerQuestions,
   LedgerUpdate,
+  LedgerUpdateResult,
+  MoveResult,
   MonthSummary,
   NetWorthReport,
   PayeeChoice,
@@ -81,15 +90,19 @@ import type {
   Settings,
   SettingsUpdate,
   SetupStatus,
+  SharingChange,
+  SplitResult,
   SuggestCategoryInput,
   SwitchResult,
   Tag,
   Transaction,
   TransactionCreate,
   TransactionListItem,
+  TransactionMove,
   TransactionPage,
   TransactionQuery,
   TransactionSpan,
+  TransactionSplitSet,
   TransactionUpdate,
   TrendReport,
   CustomReport,
@@ -102,7 +115,7 @@ import type {
   WealthsimpleConnectResult,
 } from '@chipmunk/shared'
 import { api } from '@/lib/api'
-import { currentLedger, lapi } from '@/lib/ledger'
+import { currentLedger, lapi, ledgerPath } from '@/lib/ledger'
 
 /** Query keys. Ledger data is keyed by the ledger's slug so caches for different ledgers never mix. */
 const lk = (...parts: string[]) => ['l', currentLedger.value, ...parts]
@@ -149,6 +162,18 @@ export function useInvalidateLedger() {
       qc.invalidateQueries({ queryKey: keys.payees() }),
     ])
 }
+
+/**
+ * What changes more than one ledger refreshes everything: a move, a split, a change to how an
+ * account is shared, and deleting, erasing or archiving a ledger.
+ */
+export function useInvalidateAll() {
+  const qc = useQueryClient()
+  return () => qc.invalidateQueries()
+}
+
+/** The same request as a dry run: the server works it all out, answers it, and changes nothing. */
+const dry = (path: string) => `${path}?dryRun=true`
 
 // Settings ------------------------------------------------------------------
 
@@ -215,18 +240,25 @@ export function useAccounts() {
   const q = useQuery({ queryKey: computed(() => keys.accounts()), queryFn: () => lapi.get<Account[]>('/accounts') })
   const byId = computed(() => new Map((q.data.value ?? []).map((a) => [a.id, a])))
   const active = computed(() => (q.data.value ?? []).filter((a) => !a.archived))
-  return { ...q, byId, active }
+  /** The open accounts this ledger looks after: its own, and the shared ones it's the home of (CSV and the bank go there). */
+  const managed = computed(() => active.value.filter(managedHere))
+  return { ...q, byId, active, managed }
 }
+
+/** This ledger is the account's home, or the only ledger that has it. */
+export const managedHere = (a: Pick<Account, 'sharing'>) => !a.sharing || a.sharing.isHome
 
 export function useAccountMutations() {
   const invalidate = useInvalidateLedger()
+  const invalidateAll = useInvalidateAll()
   return {
     create: useMutation({ mutationFn: (input: AccountCreate) => lapi.post<Account>('/accounts', input), onSuccess: invalidate }),
     update: useMutation({
       mutationFn: ({ id, ...input }: AccountUpdate & { id: number }) => lapi.patch<Account>(`/accounts/${id}`, input),
       onSuccess: invalidate,
     }),
-    remove: useMutation({ mutationFn: (id: number) => lapi.del(`/accounts/${id}`), onSuccess: invalidate }),
+    // A split-off account leaves its bank ids with the account it came from, in another ledger.
+    remove: useMutation({ mutationFn: (id: number) => lapi.del(`/accounts/${id}`), onSuccess: invalidateAll }),
     setBalance: useMutation({
       mutationFn: ({ id, ...input }: BalanceUpdate & { id: number }) => lapi.post<Account>(`/accounts/${id}/balance`, input),
       onSuccess: invalidate,
@@ -277,14 +309,119 @@ export function useInstitutionMutations() {
   }
 }
 
-export function useSnapshots(accountId: MaybeRefOrGetter<number>) {
+/** An account's recorded balances. They're its home's: a ledger it's shared with doesn't ask (`enabled`). */
+export function useSnapshots(accountId: MaybeRefOrGetter<number>, enabled: MaybeRefOrGetter<boolean> = true) {
   return useQuery({
     queryKey: computed(() => [...keys.accounts(), toValue(accountId), 'snapshots']),
     queryFn: () =>
       lapi.get<Array<{ id: number; date: string; balanceMinor: number; source: string }>>(
         `/accounts/${toValue(accountId)}/snapshots`,
       ),
+    enabled: computed(() => toValue(enabled)),
   })
+}
+
+/** What recording a balance would give, with nothing recorded: the account as it would be. */
+export function previewBalance({ id, ...input }: BalanceUpdate & { id: number }) {
+  return lapi.post<Account>(dry(`/accounts/${id}/balance`), input)
+}
+
+// Shared accounts -------------------------------------------------------------
+
+/**
+ * How an account is shared: its home, the ledger that carries its opening balance, and each ledger
+ * that has it with what it holds and its balance on it. Asked in the account's home only (a ledger
+ * it's shared with gets a 409), so `enabled` says when.
+ */
+export function useAccountSharing(accountId: MaybeRefOrGetter<number | null>, enabled: MaybeRefOrGetter<boolean> = true) {
+  return useQuery({
+    queryKey: computed(() => [...keys.accounts(), toValue(accountId), 'sharing']),
+    queryFn: () => lapi.get<AccountSharing>(`/accounts/${toValue(accountId)}/sharing`),
+    enabled: computed(() => toValue(accountId) !== null && toValue(enabled)),
+    retry: false,
+  })
+}
+
+/** What a change to how an account is shared would do, with nothing changed. */
+export function previewAccountSharing(id: number, input: AccountSharingSet) {
+  return lapi.put<SharingChange>(dry(`/accounts/${id}/sharing`), input)
+}
+
+/**
+ * The same, kept while the dialog shows it, so each choice's answer is asked for once (nothing
+ * while `input` is null). Under the accounts key: whatever changes a balance asks again.
+ */
+export function useAccountSharingPreview(accountId: MaybeRefOrGetter<number | null>, input: MaybeRefOrGetter<AccountSharingSet | null>) {
+  return useQuery({
+    queryKey: computed(() => [...keys.accounts(), toValue(accountId), 'sharing', 'preview', toValue(input)]),
+    queryFn: () => previewAccountSharing(toValue(accountId)!, toValue(input)!),
+    enabled: computed(() => toValue(accountId) !== null && toValue(input) !== null),
+    retry: false,
+  })
+}
+
+/**
+ * Changes which ledgers have an account and which one is its home. It doesn't wait for the refresh:
+ * this ledger may no longer have the account, and the page that showed it goes elsewhere first.
+ */
+export function useSetAccountSharing() {
+  const invalidateAll = useInvalidateAll()
+  return useMutation({
+    mutationFn: ({ id, ...input }: AccountSharingSet & { id: number }) => lapi.put<SharingChange>(`/accounts/${id}/sharing`, input),
+    onSuccess: () => void invalidateAll(),
+  })
+}
+
+/** A move goes through the ledger that holds the transactions: `from`, by slug, or this one. */
+export type MoveInput = TransactionMove & { from?: string }
+
+/** What moving transactions to another ledger would let go of and match there, with nothing moved. */
+export function previewMove({ from, ...input }: MoveInput) {
+  return api.post<MoveResult>(dry(ledgerPath('/transactions/move', from)), input)
+}
+
+/** Moves transactions to another ledger that has their account. */
+export function useMoveTransactions() {
+  return useMutation({
+    mutationFn: ({ from, ...input }: MoveInput) => api.post<MoveResult>(ledgerPath('/transactions/move', from), input),
+    onSuccess: useInvalidateAll(),
+  })
+}
+
+/** What splitting a card payment between the ledgers would give each, with nothing changed. */
+export function previewSplit({ id, ...input }: TransactionSplitSet & { id: number }) {
+  return lapi.put<SplitResult>(dry(`/transactions/${id}/split`), input)
+}
+
+/** Splits a card payment between the ledgers that have its account. No shares: the split is undone. */
+export function useSplitTransaction() {
+  return useMutation({
+    mutationFn: ({ id, ...input }: TransactionSplitSet & { id: number }) => lapi.put<SplitResult>(`/transactions/${id}/split`, input),
+    onSuccess: useInvalidateAll(),
+  })
+}
+
+/**
+ * A shared account's transactions in every ledger that has it, newest first, a page at a time
+ * (`rows`), each with the ledger that holds it and the account's total after it. Under the
+ * transactions key, so it refreshes with them.
+ */
+export function useAccountTransactions(
+  accountId: MaybeRefOrGetter<number>,
+  range: MaybeRefOrGetter<{ from?: string; to?: string }> = {},
+  opts: { pageSize?: number; enabled?: MaybeRefOrGetter<boolean> } = {},
+) {
+  const pageSize = opts.pageSize ?? 100
+  const q = useInfiniteQuery({
+    queryKey: computed(() => [...keys.transactions(), 'account', toValue(accountId), toValue(range), pageSize]),
+    queryFn: ({ pageParam }) =>
+      lapi.get<AccountTransactionPage>(`/accounts/${toValue(accountId)}/transactions`, { ...toValue(range), limit: pageSize, cursor: pageParam ?? undefined }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+    placeholderData: keepPreviousData,
+    enabled: computed(() => toValue(opts.enabled) ?? true),
+  })
+  return { ...q, rows: computed(() => q.data.value?.pages.flatMap((p) => p.items) ?? []) }
 }
 
 // Categories & tags -----------------------------------------------------------
@@ -1006,8 +1143,9 @@ export function useSetupMutations() {
       mutationFn: () => lapi.post<{ transactions: number; recurringSuggestions: number }>('/setup/demo'),
       onSuccess: refreshAll,
     }),
+    /** With the answers to what the ledger asks first, when it has a shared account (useLedgerQuestions). */
     erase: useMutation({
-      mutationFn: () => lapi.post<{ backup: string | null }>('/erase', { confirm: 'erase' }),
+      mutationFn: (answers: LedgerAnswers | void) => lapi.post<LedgerActionResult>('/erase', { confirm: 'erase', answers: answers ?? undefined }),
       onSuccess: refreshAll,
     }),
   }
@@ -1027,18 +1165,47 @@ export function useLedgers() {
 export function useLedgerMutations() {
   const qc = useQueryClient()
   const refresh = () => qc.invalidateQueries({ queryKey: keys.ledgers })
+  const refreshAll = useInvalidateAll()
   return {
     create: useMutation({ mutationFn: (input: LedgerCreate) => api.post<Ledger>('/ledgers', input), onSuccess: refresh }),
+    /** Archiving a ledger that has a shared account takes `answers`, and changes other ledgers. */
     update: useMutation({
-      mutationFn: ({ id, ...input }: LedgerUpdate & { id: string }) => api.patch<Ledger>(`/ledgers/${id}`, input),
-      onSuccess: refresh,
+      mutationFn: ({ id, ...input }: LedgerUpdate & { id: string }) => api.patch<LedgerUpdateResult>(`/ledgers/${id}`, input),
+      onSuccess: (_d, input) => (input.archived === undefined ? refresh() : refreshAll()),
     }),
+    /** Deleting one that has a shared account takes `answers`, and changes other ledgers. */
     remove: useMutation({
-      mutationFn: ({ id, confirm }: { id: string; confirm: string }) =>
-        api.del<{ backup: string | null }>(`/ledgers/${id}`, { confirm }),
-      onSuccess: refresh,
+      mutationFn: ({ id, confirm, answers }: { id: string; confirm: string; answers?: LedgerAnswers }) =>
+        api.del<LedgerActionResult>(`/ledgers/${id}`, { confirm, answers }),
+      onSuccess: refreshAll,
     }),
   }
+}
+
+/**
+ * What must be answered before a ledger (by slug) is deleted, erased or archived, what happens
+ * without a choice, and why it can't be done at all. All empty for a ledger with no shared account.
+ */
+export function useLedgerQuestions(ledger: MaybeRefOrGetter<string | null>, action: MaybeRefOrGetter<LedgerAction>, enabled: MaybeRefOrGetter<boolean> = true) {
+  return useQuery({
+    queryKey: computed(() => ['l', toValue(ledger), 'questions', toValue(action)]),
+    queryFn: () => api.get<LedgerQuestions>(ledgerPath('/questions', toValue(ledger)!), { action: toValue(action) }),
+    enabled: computed(() => toValue(ledger) !== null && toValue(enabled)),
+    // Asked each time: what the ledgers hold may have changed.
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  })
+}
+
+/**
+ * What deleting, erasing or archiving a ledger would do with these answers, in words, in every
+ * ledger it touches. Nothing changes and no copy is saved.
+ */
+export function previewLedgerAction(ledger: Pick<Ledger, 'id' | 'slug' | 'name'>, action: LedgerAction, answers: LedgerAnswers = {}): Promise<{ changes: string[]; dryRun: boolean }> {
+  if (action === 'delete') return api.del<LedgerActionResult>(dry(`/ledgers/${ledger.id}`), { confirm: ledger.name, answers })
+  if (action === 'erase') return api.post<LedgerActionResult>(dry(ledgerPath('/erase', ledger.slug)), { confirm: 'erase', answers })
+  return api.patch<LedgerUpdateResult>(dry(`/ledgers/${ledger.id}`), { archived: true, answers })
 }
 
 // API keys ------------------------------------------------------------------------
