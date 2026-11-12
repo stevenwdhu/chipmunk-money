@@ -8,7 +8,10 @@ import type { AppContext } from './context'
  * Reads of one account in every ledger that has it (by account_id, not by ledger): a shared
  * account's rows are held by its home and by the ledgers it's shared with. Everything that reads an
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
- * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, never a row.
+ * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and for the
+ * bank code only, the account's rows the bank's data can touch, each with the ledger that holds it
+ * (bankRows, bankIds, holder): sync matches against them and writes each row through its holder's
+ * context. Those never reach a response.
  *
  * A service reaches these through ctx.accountWide: the reads bound to the connection once
  * (accountReadsOn), shared by every context. To add a read, add a function to READS: it takes the
@@ -63,6 +66,36 @@ export interface Holdings {
   deletedTransactions: number
   recurringItems: number
   importBatches: number
+}
+
+/**
+ * A row of the account as bank sync matches it, in whichever ledger holds it (deleted ones too).
+ * For the bank code only: it never reaches a response.
+ */
+export interface BankRow {
+  id: number
+  /** The ledger that holds it: the one its writes go through. */
+  ledgerId: string
+  date: ISODate
+  amount: number
+  payee: string
+  payeeKey: string
+  status: 'cleared' | 'pending'
+  origin: 'manual' | 'import' | 'sync'
+  externalId: string | null
+  /** You corrected its amount or date: the bank's don't replace them, and it isn't removed. */
+  correctedAt: string | null
+  deletedAt: string | null
+  /** When a sync deleted it because the bank no longer has it. Null when a person deleted it, or it's live. */
+  removedAt: string | null
+  transferPairId: number | null
+}
+
+/** Which row of the account has a bank id, wherever it's held. For the bank code and findByExternalId only. */
+export interface BankIdHolder {
+  id: number
+  ledgerId: string
+  deleted: boolean
 }
 
 /** The module's one unscoped call: every read in READS runs through it. */
@@ -161,6 +194,43 @@ const READS = {
        WHERE m.ledger_id = @ledgerId OR a.ledger_id = @ledgerId ORDER BY m.account_id`,
       { ledgerId },
     )
+  },
+
+  /**
+   * The account's rows a sync can touch, in every ledger, deleted ones included: each with a bank
+   * id, and each dated on or after `since` (what can be adopted, or matched to a bank's row under a
+   * new id). For the bank code only.
+   */
+  bankRows(db: UnscopedQuery, accountId: number, since: ISODate): BankRow[] {
+    return db.all<BankRow>(
+      `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
+         t.external_id AS externalId, t.corrected_at AS correctedAt, t.deleted_at AS deletedAt, t.removed_at AS removedAt,
+         t.transfer_pair_id AS transferPairId
+       FROM transactions t
+       WHERE t.account_id = @accountId AND (t.date >= @since OR t.external_id IS NOT NULL)
+       ORDER BY t.id`,
+      { accountId, since },
+    )
+  },
+
+  /** The bank ids the account's rows carry, in every ledger, deleted ones included. For the bank code only. */
+  bankIds(db: UnscopedQuery, accountId: number): string[] {
+    return db.column<string>('SELECT t.external_id FROM transactions t WHERE t.account_id = ? AND t.external_id IS NOT NULL ORDER BY t.id', accountId)
+  },
+
+  /** The row of the account that has this bank id, in whichever ledger holds it (deleted or not), or undefined. */
+  holder(db: UnscopedQuery, accountId: number, externalId: string): BankIdHolder | undefined {
+    const row = db.get<{ id: number; ledgerId: string; deleted: number }>(
+      'SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted FROM transactions t WHERE t.account_id = ? AND t.external_id = ?',
+      accountId,
+      externalId,
+    )
+    return row ? { ...row, deleted: !!row.deleted } : undefined
+  },
+
+  /** The date of the account's oldest live row in any ledger, or null when it has none. */
+  firstDate(db: UnscopedQuery, accountId: number): ISODate | null {
+    return db.pluck<ISODate | null>('SELECT min(t.date) FROM transactions t WHERE t.account_id = ? AND t.deleted_at IS NULL', accountId) ?? null
   },
 }
 

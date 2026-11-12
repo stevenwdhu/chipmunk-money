@@ -36,10 +36,11 @@ export interface SharedWorld {
 /**
  * Three ledgers, Personal, Family and Trip, and Personal's credit card Visa (at TD, opening balance
  * `opening`) shared with the ledgers in `shareWith` (Family by default). Trip has the card only
- * when it's listed, so it is also the ledger that doesn't share. With `llm`, AI categorizes.
+ * when it's listed, so it is also the ledger that doesn't share. With `llm`, AI categorizes. With
+ * `fetch`, a fake bank answers.
  */
-export function sharedWorld(opts: { shareWith?: Other[]; opening?: number; now?: string; llm?: LlmCategorizer } = {}): SharedWorld {
-  const storage = testStorage({ now: opts.now, llm: opts.llm })
+export function sharedWorld(opts: { shareWith?: Other[]; opening?: number; now?: string; llm?: LlmCategorizer; fetch?: typeof fetch } = {}): SharedWorld {
+  const storage = testStorage({ now: opts.now, llm: opts.llm, fetch: opts.fetch })
   const personal = storage.registry.defaultContext()
   const family = testLedger(storage, 'Family')
   const trip = testLedger(storage, 'Trip')

@@ -89,9 +89,8 @@ const MAX_HISTORY_DAYS = 90
  * far as it goes) Wealthsimple's whole history.
  */
 const HISTORY_DAYS: Record<BankProviderKind, number> = { simplefin: MAX_HISTORY_DAYS, plaid: 730, wealthsimple: 3650 }
-/** The date of an account's oldest transaction (not deleted ones), if any. */
-const firstDate = (ctx: AppContext, accountId: number) =>
-  ctx.q.pluck<string | null>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND deleted_at IS NULL', { accountId }) ?? null
+/** The date of an account's oldest transaction (not deleted ones), if any: in any ledger, for a shared one. */
+const firstDate = (ctx: AppContext, accountId: number) => ctx.accountWide.firstDate(accountId)
 /** Who the activity log says made a change. */
 const actor = (provider: BankProviderKind) => ({ name: { simplefin: 'SimpleFIN sync', plaid: 'Plaid sync', wealthsimple: 'Wealthsimple sync' }[provider], apiKeyId: null })
 /** Plaid's error code for a bank that wants you to sign in again. */
@@ -506,9 +505,18 @@ export class BankService {
     if (!acct?.fetchedAt || acct.lastSyncedAt) return null
     const provider = this.row(acct.connectionId).provider
     const from = acct.syncFrom ?? oldestStored(this.app, acct.id) ?? this.localDate(this.now())
-    const applied = applyRemoteTransactions(ctx, accountId, storedTransactions(this.app, acct.id, acct.syncFrom), { from, to: this.localDate(this.now()), floor: acct.syncFrom }, provider)
+    const applied = applyRemoteTransactions(
+      ctx,
+      this.storage.ctxOf,
+      accountId,
+      storedTransactions(this.app, acct.id, acct.syncFrom),
+      { from, to: this.localDate(this.now()), floor: acct.syncFrom },
+      provider,
+    )
     this.caughtUp(ctx, accountId, acct)
     this.settle(ctx, applied.newIds)
+    // The ledgers the account is shared with whose rows changed settle too.
+    for (const ledgerId of applied.byLedger.keys()) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [])
     return { added: applied.added, adopted: applied.adopted }
   }
 
@@ -664,11 +672,10 @@ export class BankService {
       // Linked: to an account that's still there, so in a ledger.
       if (!a.ledgerId || a.accountId === null || !this.storage.registry.find(a.ledgerId)) continue
       const ctx = this.storage.registry.context(a.ledgerId)
-      const ids = new Set(
-        ctx.q.column<string>('SELECT external_id FROM transactions WHERE ledger_id = @ledger AND account_id = @accountId AND external_id IS NOT NULL', { accountId: a.accountId }),
-      )
+      // The bank ids the account's rows have, in every ledger that holds them.
+      const ids = new Set(ctx.accountWide.bankIds(a.accountId))
       const remote = storedTransactions(this.app, a.id, a.syncFrom).filter((r) => ids.has(r.remoteId))
-      changed += applyRemoteTransactions(ctx, a.accountId, remote, { removed: [], floor: a.syncFrom }, providers.get(a.connectionId)!).updated
+      changed += applyRemoteTransactions(ctx, this.storage.ctxOf, a.accountId, remote, { removed: [], floor: a.syncFrom }, providers.get(a.connectionId)!).updated
     }
     return changed
   }
@@ -987,27 +994,30 @@ export class BankService {
       }
 
       const { transactions, scope } = changesFor(acct, remote)
-      const applied = applyRemoteTransactions(ctx, target.id, transactions, scope, row.provider)
+      const applied = applyRemoteTransactions(ctx, this.storage.ctxOf, target.id, transactions, scope, row.provider)
       Object.assign(summary, { added: applied.added, updated: applied.updated, adopted: applied.adopted, removed: applied.removed })
       if (!providerError) this.alignWithBank(ctx, target.id, remote)
       const entry = touched.get(ledger.id) ?? { ctx, newIds: [] }
       entry.newIds.push(...applied.newIds)
       touched.set(ledger.id, entry)
 
-      const changed = summary.added + summary.updated + summary.adopted + summary.removed
-      if (changed) {
+      // One entry in each ledger whose rows changed: the home's new and changed ones, and those of
+      // the ledgers it's shared with, where their rows are. Each of those settles too.
+      for (const [ledgerId, changes] of applied.byLedger) {
+        const at = touched.get(ledgerId)?.ctx ?? this.storage.ctxOf(ledgerId)
+        if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: at, newIds: [] })
         const parts = [
-          summary.added && `${summary.added} new`,
-          summary.updated && `${summary.updated} updated`,
-          summary.adopted && `${summary.adopted} matched`,
-          summary.removed && `${summary.removed} removed`,
+          changes.added && `${changes.added} new`,
+          changes.updated && `${changes.updated} updated`,
+          changes.adopted && `${changes.adopted} matched`,
+          changes.removed && `${changes.removed} removed`,
         ].filter(Boolean)
-        recordActivity(ctx, actor(row.provider), {
+        recordActivity(at, actor(row.provider), {
           action: 'sync',
           entity: 'account',
           entityId: target.id,
           summary: `Synced ${target.name} from ${acct.institution ?? acct.name}: ${parts.join(', ')}`,
-          after: { added: summary.added, updated: summary.updated, adopted: summary.adopted, removed: summary.removed, bankBalance: formatMoney(remote.balanceMinor, remote.currency) },
+          after: { ...changes, bankBalance: formatMoney(remote.balanceMinor, remote.currency) },
         })
       }
       this.db

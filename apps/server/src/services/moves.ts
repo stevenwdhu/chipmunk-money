@@ -382,6 +382,8 @@ export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: n
     if (held.length !== ids.length) throw new Error(`${fromCtx.ledger.name} holds ${held.length} of the ${ids.length} transactions to send as deleted`)
     const stamp = fromCtx.now().toISOString()
     fromCtx.q.run(`UPDATE transactions SET deleted_at = ? WHERE ledger_id = @ledger AND deleted_at IS NULL AND ${THESE}`, stamp, these)
+    // Deleted for good by the ledger leaving, not by the bank: a sync never brings one back.
+    fromCtx.q.run(`UPDATE transactions SET removed_at = NULL WHERE ledger_id = @ledger AND removed_at IS NOT NULL AND ${THESE}`, these)
 
     releaseTransactionLinks(fromCtx, THESE, these)
     // Both sides of each pair, the other one whichever account or state it's in.

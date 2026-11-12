@@ -171,14 +171,21 @@ function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
   return row
 }
 
-/** The transaction in `accountId` that has this external id, if any (deleted ones included). */
+/**
+ * The transaction in `accountId` that has this external id, if any (deleted ones included). An
+ * external id is the account's, in every ledger that has it: when another ledger holds that
+ * transaction (a shared account's), it's a 409 that doesn't say which one it is.
+ */
 export function findByExternalId(ctx: AppContext, accountId: number, externalId: string) {
   const row = ctx.q.get<{ id: number; deletedAt: string | null }>(
     'SELECT id, deleted_at AS deletedAt FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND external_id = ?',
     accountId,
     externalId,
   )
-  return row ? { id: row.id, deleted: !!row.deletedAt } : null
+  if (row) return { id: row.id, deleted: !!row.deletedAt }
+  const held = ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', accountId) ? ctx.accountWide.holder(accountId, externalId) : undefined
+  if (held) throw new HTTPException(409, { message: 'Another ledger has this transaction' })
+  return null
 }
 
 /** The dates of the earliest and latest transactions (deleted ones aside). */
@@ -850,7 +857,7 @@ export function deleteTransaction(ctx: AppContext, id: number) {
 
 export function restoreTransaction(ctx: AppContext, id: number): Transaction {
   const row = getRow(ctx, id, true)
-  ctx.q.run('UPDATE transactions SET deleted_at = NULL WHERE ledger_id = @ledger AND id IN (?, ?)', id, row.transfer_pair_id ?? -1)
+  ctx.q.run('UPDATE transactions SET deleted_at = NULL, removed_at = NULL WHERE ledger_id = @ledger AND id IN (?, ?)', id, row.transfer_pair_id ?? -1)
   if (row.recurring_item_id) recalculateRecurring(ctx, row.recurring_item_id, { followAmount: true })
   return getTransaction(ctx, id)
 }

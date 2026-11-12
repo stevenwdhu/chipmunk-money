@@ -28,8 +28,9 @@ export interface AppContext {
   ledger: { id: string; name: string; slug: string }
   /**
    * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
-   * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, never
-   * another ledger's rows. And the two writes that span two ledgers, bound to this ledger: a move's
+   * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, and,
+   * for the bank code only, the rows a sync matches against, which never reach a response (bankRows,
+   * bankIds, holder). And the two writes that span two ledgers, bound to this ledger: a move's
    * UPDATE of this ledger's rows (moveRows), and a home change of an account this ledger is the home
    * of (changeHome), the other ledger a context from ctxOf.
    */
