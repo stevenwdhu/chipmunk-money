@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { ArchiveRestore, FileInput, FileOutput, FolderArchive, Loader2, Trash2 } from '@lucide/vue'
+import type { LedgerAnswers } from '@chipmunk/shared'
+import LedgerQuestions from '@/components/ledger/LedgerQuestions.vue'
 import RestoreBackupDialog from '@/components/RestoreBackupDialog.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,13 +23,22 @@ const restoreOpen = ref(false)
 const eraseOpen = ref(false)
 const eraseWord = ref('')
 watch(eraseOpen, (v) => v && (eraseWord.value = ''))
+// What a ledger with a shared account asks first, and whether it's all answered.
+const questions = ref<InstanceType<typeof LedgerQuestions> | null>(null)
+const answers = ref<LedgerAnswers>({})
+const ready = ref(false)
+const canErase = computed(() => ready.value && eraseWord.value === 'erase' && !m.erase.isPending.value)
 async function erase() {
+  if (!canErase.value) return
   try {
-    const { backup } = await m.erase.mutateAsync()
+    const { backup, changes } = await m.erase.mutateAsync(answers.value)
     eraseOpen.value = false
-    toast.success(backup ? `All data erased. A copy was saved as data/backups/${backup}.` : 'All data erased.')
+    toast.success(backup ? `All data erased. A copy was saved as data/backups/${backup}.` : 'All data erased.', {
+      description: changes.length ? changes.join(' ') : undefined,
+    })
   } catch (err) {
-    toast.error(errorMessage(err))
+    // Refused because the questions changed: they're asked again in the dialog.
+    if (!questions.value?.refused(err)) toast.error(errorMessage(err))
   }
 }
 </script>
@@ -85,7 +96,7 @@ async function erase() {
     <RestoreBackupDialog v-model:open="restoreOpen" />
 
     <Dialog v-model:open="eraseOpen">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent class="max-h-[90svh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Erase {{ current?.name ?? 'this ledger' }}'s data?</DialogTitle>
           <DialogDescription>
@@ -93,13 +104,14 @@ async function erase() {
             <code class="text-xs">data/backups</code> first. Afterwards you'll see the welcome screen again.
           </DialogDescription>
         </DialogHeader>
-        <form class="grid gap-1.5" @submit.prevent="eraseWord === 'erase' && erase()">
+        <LedgerQuestions ref="questions" v-model:answers="answers" v-model:ready="ready" :ledger="current ?? null" action="erase" :active="eraseOpen" />
+        <form class="grid gap-1.5" @submit.prevent="erase()">
           <Label for="erase-confirm">Type <span class="font-mono">erase</span> to confirm</Label>
           <Input id="erase-confirm" v-model="eraseWord" autocomplete="off" autocapitalize="off" />
         </form>
         <DialogFooter>
           <Button variant="outline" @click="eraseOpen = false">Cancel</Button>
-          <Button variant="destructive" :disabled="eraseWord !== 'erase' || m.erase.isPending.value" @click="erase">
+          <Button variant="destructive" :disabled="!canErase" @click="erase">
             <Loader2 v-if="m.erase.isPending.value" class="animate-spin" />Erase everything
           </Button>
         </DialogFooter>

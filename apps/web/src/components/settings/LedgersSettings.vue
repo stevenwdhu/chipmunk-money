@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Ellipsis, FolderArchive, Pencil, Plus, Star, Trash2 } from '@lucide/vue'
 import type { Ledger } from '@chipmunk/shared'
+import ArchiveLedgerDialog from '@/components/ledger/ArchiveLedgerDialog.vue'
 import DeleteLedgerDialog from '@/components/ledger/DeleteLedgerDialog.vue'
 import LedgerEditDialog from '@/components/ledger/LedgerEditDialog.vue'
 import LedgerMark from '@/components/ledger/LedgerMark.vue'
@@ -19,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useLedgerMutations, useLedgers } from '@/composables/queries'
+import { useArchiveLedger } from '@/composables/useArchiveLedger'
 import { errorMessage } from '@/lib/api'
 import { currentLedger } from '@/lib/ledger'
 
@@ -38,6 +40,8 @@ function askDelete(l: Ledger) {
   deleting.value = l
   deleteOpen.value = true
 }
+const archived = (l: Ledger, changes: string[]) => toast.success(`Archived ${l.name}`, { description: changes.length ? changes.join(' ') : undefined })
+const archiving = useArchiveLedger(archived)
 async function run(p: Promise<unknown>, message: string) {
   try {
     await p
@@ -110,7 +114,7 @@ function move(l: Ledger, dir: -1 | 1) {
               <DropdownMenuItem
                 v-if="!l.archived"
                 :disabled="ledgers.active.value.length < 2"
-                @select="run(m.update.mutateAsync({ id: l.id, archived: true }), `Archived ${l.name}`)"
+                @select="archiving.archive(l)"
               >
                 <Archive />Archive
               </DropdownMenuItem>
@@ -130,5 +134,6 @@ function move(l: Ledger, dir: -1 | 1) {
     <NewLedgerDialog v-model:open="newOpen" />
     <LedgerEditDialog v-model:open="editOpen" :ledger="editing" />
     <DeleteLedgerDialog v-model:open="deleteOpen" :ledger="deleting" />
+    <ArchiveLedgerDialog v-model:open="archiving.open.value" :ledger="archiving.ledger.value" @archived="archived" />
   </div>
 </template>

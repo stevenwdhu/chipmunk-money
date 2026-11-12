@@ -1198,6 +1198,9 @@ export function useLedgerQuestions(ledger: MaybeRefOrGetter<string | null>, acti
   })
 }
 
+/** The same, asked once: whether archiving a ledger has anything to ask or say before it's done. */
+export const askLedger = (ledger: string, action: LedgerAction) => api.get<LedgerQuestions>(ledgerPath('/questions', ledger), { action })
+
 /**
  * What deleting, erasing or archiving a ledger would do with these answers, in words, in every
  * ledger it touches. Nothing changes and no copy is saved.

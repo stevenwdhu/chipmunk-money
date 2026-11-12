@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import type { Ledger } from '@chipmunk/shared'
 import { useQueryClient } from '@tanstack/vue-query'
 import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { Archive, Pencil, Sparkles, Star, Trash2 } from '@lucide/vue'
+import ArchiveLedgerDialog from '@/components/ledger/ArchiveLedgerDialog.vue'
 import DeleteLedgerDialog from '@/components/ledger/DeleteLedgerDialog.vue'
 import LedgerEditDialog from '@/components/ledger/LedgerEditDialog.vue'
 import LedgerMark from '@/components/ledger/LedgerMark.vue'
@@ -11,6 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { keys, useAiJobStatus, useLedgerMutations, useLedgers, useSettings } from '@/composables/queries'
+import { useArchiveLedger } from '@/composables/useArchiveLedger'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { errorMessage } from '@/lib/api'
 import { lapi } from '@/lib/ledger'
@@ -37,16 +40,11 @@ async function makeDefault() {
   }
 }
 
-async function archive() {
-  if (!ledger.value) return
-  try {
-    await m.update.mutateAsync({ id: ledger.value.id, archived: true })
-    toast.success(`Archived ${ledger.value.name}. Restore it from App settings → Ledgers.`)
-    router.replace('/')
-  } catch (err) {
-    toast.error(errorMessage(err))
-  }
+function archived(l: Ledger, changes: string[]) {
+  toast.success(`Archived ${l.name}. Restore it from App settings → Ledgers.`, { description: changes.length ? changes.join(' ') : undefined })
+  router.replace('/')
 }
+const archiving = useArchiveLedger(archived)
 
 async function categorizeNow() {
   try {
@@ -102,7 +100,7 @@ async function categorizeNow() {
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap gap-2">
-        <Button variant="outline" :disabled="ledgers.active.value.length < 2" @click="archive"><Archive />Archive ledger</Button>
+        <Button variant="outline" :disabled="ledgers.active.value.length < 2" @click="archiving.archive(ledger)"><Archive />Archive ledger</Button>
         <Button
           variant="outline"
           class="text-destructive hover:text-destructive"
@@ -119,5 +117,6 @@ async function categorizeNow() {
 
     <LedgerEditDialog v-model:open="editOpen" :ledger="ledger" />
     <DeleteLedgerDialog v-model:open="deleteOpen" :ledger="ledger" />
+    <ArchiveLedgerDialog v-model:open="archiving.open.value" :ledger="archiving.ledger.value" @archived="archived" />
   </div>
 </template>
