@@ -18,7 +18,9 @@ import { SHARES_OVER } from '@/lib/sharing'
  * Splits a card payment on a shared account between the ledgers that have it: one amount for each
  * ledger other than the account's home, which gets the rest. When this ledger holds the payment and
  * isn't the home, its own amount is what it keeps. The server checks the amounts in a dry run before
- * they can be saved. No amounts, or Undo split: the payment is whole again.
+ * they can be saved. No amounts, or Undo split: the payment is whole again, and the ledger that holds
+ * it keeps all of it. So a ledger that isn't the home can't give the home the whole payment here:
+ * that's a move.
  */
 const props = defineProps<{ tx: Transaction }>()
 const open = defineModel<boolean>('open', { default: false })
@@ -90,10 +92,27 @@ watch([open, shares, typo], ([isOpen]) => {
     }
   }, 300)
 })
+/**
+ * In a ledger that isn't the home, no amounts (or all of it as this ledger's own) leave the whole
+ * payment here, with no split: the home gets nothing, so the line for it gives way to saying so.
+ */
+const keepsAll = computed(() => !holdsAsHome.value && !typo.value && (!shares.value.length || (!!checked.value && !checked.value.shares.length)))
+const here = computed(() => sharing.value?.ledgers.find((l) => l.slug === currentLedger.value)?.name ?? 'This ledger')
+const keepsAllNote = computed(() => {
+  const home = sharing.value?.home.name
+  if (!shares.value.length)
+    return split.value
+      ? `With no amounts, the split is undone and ${here.value} keeps the whole payment. To give ${home} all of it, undo the split, then use Move to… on the payment.`
+      : `With no amounts, ${here.value} keeps the whole payment. To give ${home} all of it, use Move to… on the payment.`
+  return split.value
+    ? `${here.value} keeps the whole payment, so the split is undone. To give ${home} all of it, undo the split, then use Move to… on the payment.`
+    : `${here.value} keeps the whole payment, so there’s nothing to split. To give ${home} all of it, use Move to… on the payment.`
+})
 const waiting = computed(() => !typo.value && !nothing.value && !checked.value && !problem.value)
 
 async function save(undo = false) {
   error.value = ''
+  const wasSplit = !!split.value
   try {
     const r = await m.mutateAsync({ id: props.tx.id, shares: undo ? [] : shares.value })
     if (r.shares.length) {
@@ -101,7 +120,7 @@ async function save(undo = false) {
       toast.success('Payment split', {
         description: [...r.shares.map((s) => `${s.ledger.name} ${money(s.amountMinor)}`), who && `${who} keeps ${money(r.keptMinor)}`].filter(Boolean).join(' · '),
       })
-    } else toast.success('Split undone', { description: 'The whole payment counts here again.' })
+    } else if (wasSplit) toast.success('Split undone', { description: 'The whole payment counts here again.' })
     open.value = false
     emit('saved', r)
   } catch (err) {
@@ -141,7 +160,8 @@ async function save(undo = false) {
               />
             </div>
           </div>
-          <div class="flex items-center justify-between gap-3 border-t pt-3 text-sm">
+          <p v-if="keepsAll" class="border-t pt-3 text-sm text-muted-foreground">{{ keepsAllNote }}</p>
+          <div v-else class="flex items-center justify-between gap-3 border-t pt-3 text-sm">
             <span class="min-w-0 truncate">{{ sharing.home.name }} {{ holdsAsHome ? 'keeps' : 'gets' }}</span>
             <span class="tabular font-medium" :class="rest < 0 && 'text-destructive'">{{ money(rest) }}</span>
           </div>
@@ -151,12 +171,13 @@ async function save(undo = false) {
         <p v-if="typo" class="text-sm text-destructive">Enter each amount as a number above zero, or leave it empty</p>
         <p v-else-if="problem || error" class="text-sm text-destructive">{{ problem || error }}</p>
         <DialogFooter>
-          <Button v-if="split" type="button" variant="ghost" class="text-destructive hover:text-destructive sm:mr-auto" :disabled="m.isPending.value" @click="save(true)">
+          <Button v-if="split && !keepsAll" type="button" variant="ghost" class="text-destructive hover:text-destructive sm:mr-auto" :disabled="m.isPending.value" @click="save(true)">
             Undo split
           </Button>
           <Button type="button" variant="outline" @click="open = false">Cancel</Button>
-          <Button type="submit" :disabled="m.isPending.value || typo || nothing || !checked">
-            <Loader2 v-if="waiting || m.isPending.value" class="animate-spin" />Save
+          <!-- Saving amounts that leave it all here is undoing the split, so the button says that. -->
+          <Button type="submit" :disabled="m.isPending.value || typo || nothing || !checked || (keepsAll && !split)">
+            <Loader2 v-if="waiting || m.isPending.value" class="animate-spin" />{{ keepsAll && split ? 'Undo split' : 'Save' }}
           </Button>
         </DialogFooter>
       </form>

@@ -16,7 +16,8 @@ import { dropsAnything, moveDrops, moveSummary } from '@/lib/sharing'
  * "Move to…": a menu of the other ledgers that have the transactions' account, around the button in
  * its slot. Picking one asks the server what the move would let go of (a dry run). When it's
  * something, that's said first, to confirm. Otherwise they move right away. Nothing shows when there
- * is no ledger to move them to.
+ * is no ledger to move them to. When they can't move for another reason (`blocked`), that's said in
+ * place of the button.
  */
 const props = withDefaults(
   defineProps<{
@@ -26,8 +27,10 @@ const props = withDefaults(
     /** The ledger that holds them, by slug: this one unless said. */
     from?: string
     align?: 'start' | 'center' | 'end'
+    /** Why they can't move as they are, in a sentence. */
+    blocked?: string | null
   }>(),
-  { align: 'start' },
+  { align: 'start', blocked: null },
 )
 const emit = defineEmits<{ moved: [MoveResult] }>()
 
@@ -73,7 +76,8 @@ async function move(ids: number[], to: Ledger) {
 </script>
 
 <template>
-  <template v-if="targets.length">
+  <span v-if="targets.length && blocked" class="text-sm text-muted-foreground">{{ blocked }}</span>
+  <template v-else-if="targets.length">
     <DropdownMenu>
       <DropdownMenuTrigger as-child :disabled="busy"><slot :busy="busy" /></DropdownMenuTrigger>
       <DropdownMenuContent :align="align" class="w-56">

@@ -4,6 +4,7 @@ import { ArrowRightFromLine } from '@lucide/vue'
 import { formatDateLong, type Account, type AccountTransaction, type MoveResult } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 import { Button } from '@/components/ui/button'
+import { MOVE_SPLIT } from '@/lib/sharing'
 import MoveToMenu from './MoveToMenu.vue'
 
 /**
@@ -42,7 +43,7 @@ const title = computed(() => props.row.name ?? props.row.payeeName)
         <dd class="break-words whitespace-pre-line">{{ row.notes }}</dd>
       </template>
     </dl>
-    <MoveToMenu v-slot="{ busy }" :ids="[row.id]" :ledgers="account.sharing?.ledgers ?? []" :from="row.ledger.slug" @moved="emit('moved', $event)">
+    <MoveToMenu v-slot="{ busy }" :ids="[row.id]" :ledgers="account.sharing?.ledgers ?? []" :from="row.ledger.slug" :blocked="row.split ? MOVE_SPLIT : null" @moved="emit('moved', $event)">
       <Button type="button" variant="outline" class="justify-self-start" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
     </MoveToMenu>
   </div>

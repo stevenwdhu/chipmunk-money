@@ -36,6 +36,7 @@ import {
   useAiJobStatus,
   useCategories,
   useInvalidateLedger,
+  useLedgers,
   useRecurring,
   useSettings,
   useTransactionMutations,
@@ -51,7 +52,7 @@ import { shortDate } from '@/lib/format'
 import { currentLedger } from '@/lib/ledger'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
-import { commonLedgers, givenUnder, sharedNote, sharesFor, SHARES_OVER, splitTitle } from '@/lib/sharing'
+import { commonLedgers, foldGiven, MOVE_SPLIT, MOVE_SPLIT_SELECTED, sharedNote, sharesFor, SHARES_OVER, splitTitle } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore } from '@/stores/ui'
 
@@ -82,12 +83,8 @@ const all = computed<Item[]>(() => props.list.rows.value)
  * muted line, not as a row of its own, wherever the payment is listed too. With a filter that leaves
  * the payment out, the given row is a row like any other.
  */
-const under = computed(() => givenUnder(all.value))
-const items = computed<Item[]>(() => {
-  if (!under.value.size) return all.value
-  const hidden = new Set([...under.value.values()].map((t) => t.id))
-  return all.value.filter((t) => !hidden.has(t.id))
-})
+const folded = computed(() => foldGiven(all.value))
+const items = computed<Item[]>(() => folded.value.items)
 /** The server sends running balances for one account's list with no filter but dates. */
 const hasBalances = computed(() => items.value.some((t) => t.balanceAfterMinor !== null))
 /** Changed so it no longer matches the filters: still listed, faded, until they change. */
@@ -98,10 +95,12 @@ const balanceOf = (tx: Item) => {
   const after = balanceAfter(tx)
   return after === null ? null : statementBalance(after, accounts.value.get(tx.accountId)?.type ?? 'chequing')
 }
-/** A split payment with its given row under it shows the balance after both: the one listed first is the later one. */
+/**
+ * The hidden given row counts as coming right after its payment: the payment shows the balance after
+ * both, and so does every row listed between the two, which the server's balance has without it.
+ */
 function balanceAfter(tx: Item) {
-  const given = under.value.get(tx.id)
-  return given && all.value.indexOf(given) < all.value.indexOf(tx) ? given.balanceAfterMinor : tx.balanceAfterMinor
+  return tx.balanceAfterMinor === null ? null : tx.balanceAfterMinor + (folded.value.shift.get(tx.id) ?? 0)
 }
 const overdrawn = (tx: Item) => !accounts.value.get(tx.accountId)?.isLiability && (balanceAfter(tx) ?? 0) < 0
 
@@ -175,7 +174,9 @@ watch(
 // then it's scrolled to and flashed, and the URL goes back to the list's.
 const route = useRoute()
 const router = useRouter()
-const jumpId = computed(() => (typeof route.query.jump === 'string' ? Number(route.query.jump) : null))
+const jumpTo = computed(() => (typeof route.query.jump === 'string' ? Number(route.query.jump) : null))
+/** A given row under its payment isn't a row here: going to it goes to its payment. */
+const jumpId = computed(() => (jumpTo.value ? (folded.value.paymentOf.get(jumpTo.value) ?? jumpTo.value) : null))
 function jumped() {
   const query = { ...route.query }
   delete query.jump
@@ -326,6 +327,21 @@ watch(aiRunning, (running, was) => {
 const selectedItems = computed(() => items.value.filter((t) => selected.value.has(t.id)))
 /** The ledgers the selection can move to: the ones every selected row's account is shared with. */
 const moveLedgers = computed(() => commonLedgers(selectedItems.value.map((t) => accounts.value.get(t.accountId))))
+const ledgers = useLedgers()
+/**
+ * Why a selection with a shared account's transactions in it has no ledger they can all move to,
+ * when it hasn't: said where Move to… would be. Nothing for a selection with none of those.
+ */
+const moveRefused = computed(() => {
+  const of = selectedItems.value.map((t) => accounts.value.get(t.accountId))
+  if (!of.some((a) => a?.sharing)) return null
+  if (of.some((a) => !a?.sharing)) return 'Only transactions on a shared account can move to another ledger.'
+  const open = (slug: string) => slug !== currentLedger.value && !ledgers.all.value.find((l) => l.slug === slug)?.archived
+  const several = new Set(of.map((a) => a!.id)).size > 1
+  return several && !moveLedgers.value.some((l) => open(l.slug)) ? 'Their accounts aren’t shared with the same ledger, so they can’t move together.' : null
+})
+/** A split payment, and the rows of its split, stay where they are until the split is undone. */
+const moveBlocked = computed(() => (selectedItems.value.some((t) => t.split) ? (selectedItems.value.length === 1 ? MOVE_SPLIT : MOVE_SPLIT_SELECTED) : null))
 const payback = ref<{ tx: Transaction; together: Transaction[]; preselect: Transaction[] } | null>(null)
 const paybackOpen = ref(false)
 function markPayback() {
@@ -394,7 +410,8 @@ async function accept(tx: Transaction) {
       <Button size="sm" variant="outline" @click="markPayback"><HandCoins />Mark as payback</Button>
       <FilterOutOfReport :transactions="items.filter((t) => selected.has(t.id))" variant="button" @done="selected = new Set()" />
       <!-- On a shared account: to another ledger that has it. -->
-      <MoveToMenu v-slot="{ busy }" :ids="[...selected]" :ledgers="moveLedgers" @moved="selected = new Set()">
+      <span v-if="moveRefused" class="text-sm text-muted-foreground">{{ moveRefused }}</span>
+      <MoveToMenu v-else v-slot="{ busy }" :ids="[...selected]" :ledgers="moveLedgers" :blocked="moveBlocked" @moved="selected = new Set()">
         <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
       </MoveToMenu>
       <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" @click="bulk('delete')"><Trash2 />Delete</Button>

@@ -38,7 +38,7 @@ import { errorMessage } from '@/lib/api'
 import { money } from '@/lib/format'
 import { currentLedger, lapi } from '@/lib/ledger'
 import { titleOf } from '@/lib/payee'
-import { SHARES_OVER, sharedNote, sharesFor, splitLock } from '@/lib/sharing'
+import { MOVE_SPLIT, SHARES_OVER, sharedNote, sharesFor, splitLock } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore, type QuickAddDefaults } from '@/stores/ui'
 
@@ -254,6 +254,8 @@ watch([() => props.transaction?.id, () => props.defaults], () => reset())
 // be split between them.
 const editedAccount = computed(() => (editing.value ? accountsById.value.get(editing.value.accountId) : undefined))
 const moveLedgers = computed(() => editedAccount.value?.sharing?.ledgers ?? [])
+/** A split payment and the rows of its split stay until the split is undone. What's typed here and not saved wouldn't go along. */
+const moveBlocked = computed(() => (split.value ? MOVE_SPLIT : dirty.value ? 'Save your changes first to move it.' : null))
 /** A card payment: money onto the account that's a transfer or in a category left out of totals, linked to nothing. One that's split already stays one. */
 const canSplit = computed(() => {
   const tx = editing.value
@@ -649,7 +651,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
     <FilterOutOfReport v-if="editing" :transactions="[editing]" />
     <!-- On a shared account: to another ledger that has it, and a card payment between them. -->
     <template v-if="editing">
-      <MoveToMenu v-slot="{ busy }" :ids="[editing.id]" :ledgers="moveLedgers" @moved="emit('done')">
+      <MoveToMenu v-slot="{ busy }" :ids="[editing.id]" :ledgers="moveLedgers" :blocked="moveBlocked" @moved="emit('done')">
         <button type="button" class="self-start text-sm text-muted-foreground underline-offset-4 hover:underline" :disabled="busy">Move to…</button>
       </MoveToMenu>
       <template v-if="canSplit">

@@ -5,6 +5,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useAccountSharingPreview } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { money } from '@/lib/format'
+import { balanceText } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 type Part = AccountSharing['home']
@@ -38,8 +39,9 @@ const options = computed(
     ] as const,
 )
 
-/** As the bank's statement shows it: for a credit card, what's owed. */
+/** As the bank's statement shows it: for a credit card, what's owed, and said so after the last amount of a line. */
 const shown = (minor: number) => money(statementBalance(minor, props.account.type))
+const owed = (minor: number) => balanceText(minor, props.account)
 
 /** Each ledger's balance on the account before and after, then the new account's when the transactions stay. */
 function balances(r: SharingChange) {
@@ -48,10 +50,10 @@ function balances(r: SharingChange) {
     .map((l) => {
       const before = r.parts.before[l.slug]
       const after = r.parts.after[l.slug]!
-      return { name: l.name, before: before === undefined || before === after ? null : shown(before), after: shown(after) }
+      return { name: l.name, before: before === undefined || before === after ? null : shown(before), after: owed(after) }
     })
   const kept = r.removed.find((l) => l.ledger.slug === props.leaving.slug)?.account
-  if (kept) lines.push({ name: `${props.leaving.name}’s new account`, before: null, after: shown(kept.balanceMinor) })
+  if (kept) lines.push({ name: `${props.leaving.name}’s new account`, before: null, after: owed(kept.balanceMinor) })
   return lines
 }
 </script>

@@ -19,7 +19,7 @@ import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { shortDate } from '@/lib/format'
 import { lapi } from '@/lib/ledger'
-import { SHARES_OVER } from '@/lib/sharing'
+import { MOVE_SPLIT, MOVE_SPLIT_SELECTED, SHARES_OVER } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore } from '@/stores/ui'
 import AccountRowDetails from './AccountRowDetails.vue'
@@ -92,7 +92,10 @@ function toggle(id: number, on: boolean) {
   selected.value = next
 }
 /** The ledgers that hold the selected rows: a move takes rows out of one ledger. */
-const holders = computed(() => [...new Set(items.value.filter((t) => selected.value.has(t.id)).map((t) => t.ledger.slug))])
+const selectedRows = computed(() => items.value.filter((t) => selected.value.has(t.id)))
+const holders = computed(() => [...new Set(selectedRows.value.map((t) => t.ledger.slug))])
+/** A split payment stays where it is until its split is undone. */
+const moveBlocked = computed(() => (selectedRows.value.some((t) => t.split) ? (selectedRows.value.length === 1 ? MOVE_SPLIT : MOVE_SPLIT_SELECTED) : null))
 </script>
 
 <template>
@@ -108,6 +111,7 @@ const holders = computed(() => [...new Set(items.value.filter((t) => selected.va
           :ids="[...selected]"
           :ledgers="account.sharing?.ledgers ?? []"
           :from="holders[0]"
+          :blocked="moveBlocked"
           @moved="selected = new Set()"
         >
           <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>

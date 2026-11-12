@@ -1,4 +1,4 @@
-import type { Account, MoveResult, Transaction, TransactionSplitShare } from '@chipmunk/shared'
+import { statementBalance, type Account, type MoveResult, type Transaction, type TransactionSplitShare } from '@chipmunk/shared'
 import { money } from './format'
 
 type LedgerRef = { slug: string; name: string }
@@ -37,6 +37,22 @@ export function commonLedgers(accounts: Array<Account | undefined>): LedgerRef[]
   return first.sharing.ledgers.filter((l) => rest.every((a) => a?.sharing?.ledgers.some((x) => x.slug === l.slug)))
 }
 
+/**
+ * A balance in words, as the account's page and the server's notices say it: "$200.00 owed" on a
+ * credit card or a loan ("$5.00 in credit" when it's the other way), the balance itself otherwise.
+ */
+export function balanceText(minor: number, account: Pick<Account, 'type' | 'isLiability'>): string {
+  if (!account.isLiability) return money(minor)
+  const owed = statementBalance(minor, account.type)
+  return owed < 0 ? `${money(0 - owed)} in credit` : `${money(owed)} owed`
+}
+
+/**
+ * What a ledger's delete, erase or archive did besides the action itself, for the toast under its
+ * title: the server's list ends with the action's own line, which the title already says.
+ */
+export const alsoDone = (changes: string[]) => changes.slice(0, -1).join(' ') || undefined
+
 /** Whether a move lets go of anything: said before it's confirmed. */
 export const dropsAnything = (r: MoveResult) => r.dropped.links.length + r.dropped.partlyLinked.length + r.dropped.pairs.length + r.dropped.recurring.length > 0
 
@@ -51,6 +67,11 @@ export function moveDrops(r: MoveResult, from: string, ledgerName: (slug: string
     recurring.length && `${count(recurring.length, 'payment')} ${recurring.length === 1 ? 'comes' : 'come'} off ${listOf(items)}, which ${items.length === 1 ? 'stays' : 'stay'} in ${from}.`,
   ].filter((s): s is string => !!s)
 }
+
+/** Why a split payment and the rows of its split can't move: said where Move to… would be. */
+export const MOVE_SPLIT = 'Undo the split to move it.'
+/** The same, for a selection of several with one of those in it. */
+export const MOVE_SPLIT_SELECTED = 'A split payment is selected. Undo the split to move it.'
 
 /** After a move: what was let go of, and what the ledger they went to matched them with. */
 export function moveSummary(r: MoveResult, to: string): string | undefined {
@@ -114,4 +135,27 @@ export function givenUnder<T extends Pick<Transaction, 'id' | 'accountId' | 'dat
     if (row) out.set(t.id, row)
   }
   return out
+}
+
+/**
+ * A list, newest first, with each split payment's given row folded under its payment: the rows to
+ * show, the given row under each payment, the payment each hidden given row sits under, and what to
+ * add to a row's running balance. The hidden given row counts as coming right after its payment, so
+ * the payment and every row listed between the two show a balance with the given amount in it.
+ */
+export function foldGiven<T extends Pick<Transaction, 'id' | 'accountId' | 'date' | 'split' | 'amountMinor'>>(all: T[]) {
+  const under = givenUnder(all)
+  const paymentOf = new Map<number, number>()
+  const shift = new Map<number, number>()
+  if (!under.size) return { items: all, under, paymentOf, shift }
+  const at = new Map(all.map((t, i) => [t.id, i]))
+  for (const [paymentId, given] of under) {
+    paymentOf.set(given.id, paymentId)
+    const [p, g] = [at.get(paymentId)!, at.get(given.id)!]
+    // Listed above its payment, the given row is missing from the payment's balance and the ones
+    // between. Listed below it, it's in the ones between, which come before it now.
+    const [from, to, by] = g < p ? [g + 1, p, given.amountMinor] : [p + 1, g - 1, -given.amountMinor]
+    for (let i = from; i <= to; i++) shift.set(all[i]!.id, (shift.get(all[i]!.id) ?? 0) + by)
+  }
+  return { items: all.filter((t) => !paymentOf.has(t.id)), under, paymentOf, shift }
 }

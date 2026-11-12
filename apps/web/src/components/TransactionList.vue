@@ -2,13 +2,15 @@
 import { computed } from 'vue'
 import type { Transaction } from '@chipmunk/shared'
 import TransactionListItem from '@/components/TransactionListItem.vue'
+import { foldGiven } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
  * Transactions as rows that share one grid, so their columns line up and fit their contents. A wide
  * list has Date · Payee · Category · Account · Amount, each as wide as its longest entry, with the
  * payee taking the rest (and the first to be cut short). In a narrow one, each row shows the
- * category under the payee, then date and account.
+ * category under the payee, then date and account. What a split payment gave the other ledgers shows
+ * under the payment when both are listed, not as a row of its own.
  */
 const props = withDefaults(
   defineProps<{
@@ -25,6 +27,8 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ open: [Transaction]; accept: [Transaction] }>()
 
+const shown = computed(() => foldGiven(props.items).items)
+
 // Written out in full so Tailwind sees each one.
 const WIDE: Record<string, string> = {
   'date,account': '@xl:grid-cols-[auto_minmax(8rem,1fr)_auto_auto_auto]',
@@ -40,7 +44,7 @@ const columns = computed(() => WIDE[[props.showDate && 'date', props.showAccount
     <!-- Narrow, each row sizes itself (a long category shouldn't squeeze every payee); wide, they share columns. -->
     <ul :class="cn('grid grid-cols-1 gap-x-3 [&>li:first-child>div]:border-t-0', columns)">
       <TransactionListItem
-        v-for="tx in items"
+        v-for="tx in shown"
         :key="tx.id"
         :tx="tx"
         :today="today"

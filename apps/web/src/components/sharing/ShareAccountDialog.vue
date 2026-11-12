@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Loader2 } from '@lucide/vue'
-import { statementBalance, type Account, type AccountSharing, type AccountSharingSet, type SharingChange } from '@chipmunk/shared'
+import type { Account, AccountSharing, AccountSharingSet, SharingChange } from '@chipmunk/shared'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Skeleton } from '@/components/ui/skeleton'
 import { useAccountSharing, useAccountSharingPreview, useLedgers, useSetAccountSharing } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
-import { money } from '@/lib/format'
+import { balanceText } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import SharingRowsChoice from './SharingRowsChoice.vue'
 
@@ -85,11 +85,9 @@ const inputsFor = (p: Part) => ({ home: request({ ...rows.value, [p.slug]: 'home
 const input = computed(() => (changed.value && asked.value.every((p) => rows.value[p.slug]) ? request(rows.value) : null))
 const preview = useAccountSharingPreview(() => props.account.id, input)
 
-/** As the bank's statement shows it: for a credit card, what's owed. */
-const shown = (minor: number) => money(statementBalance(minor, props.account.type))
 const holds = (p: Part) => {
   if (p.transactionCount === null || p.balanceMinor === null) return ''
-  return `${p.transactionCount} transaction${p.transactionCount === 1 ? '' : 's'} · ${shown(p.balanceMinor)}`
+  return `${p.transactionCount} transaction${p.transactionCount === 1 ? '' : 's'} · ${balanceText(p.balanceMinor, props.account)}`
 }
 
 const listed = (names: string[]) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
