@@ -74,8 +74,8 @@ A credit card [shared between ledgers](features.md#shared-accounts) is still one
 - **After a ledger stopped sharing the card and kept its transactions** on an account of its own, the card still knows them. A sync never adds them to the card again, and never updates or removes them on the account they're on now, which isn't synced.
 - Each ledger a sync changed has it in its own **Activity**.
 
-**Switching the bank account** a shared card syncs from is allowed, in the home. **Review before switching** compares every ledger's transactions with the bank's and names the ledger beside each one another ledger holds ("Family", or "Family · Visa" for one on an account a ledger kept when it stopped sharing). Paired transactions take the bank's ids where they are, the bank's others are added in the home, and one you choose to remove is removed in its own ledger. A split payment can be paired but not removed until its split is undone, and a transaction on a kept account always stays.
+**Switching the bank account** a shared account syncs from is allowed, in the home. **Review before switching** compares every ledger's transactions with the bank's and names the ledger beside each one another ledger holds ("Family", or "Family · Visa" for one on an account a ledger kept when it stopped sharing). Paired transactions take the bank's ids where they are, the bank's others are added in the home, and one you choose to remove is removed in its own ledger. A split payment can be paired but not removed until its split is undone, and a transaction on a kept account always stays.
 
-**CSV import** into a shared card is done in the home, and the rows land there. A row that's already a transaction in another ledger is a duplicate too: it's unticked, marked **Already in another ledger**, and skipped.
+**CSV import** into a shared account is done in the home, and the rows land there. A row that's already a transaction in another ledger is a duplicate too: it's unticked, marked **Already in another ledger**, and skipped.
 
 What an API key limited to some ledgers can do with a shared account is in [Security](security.md).

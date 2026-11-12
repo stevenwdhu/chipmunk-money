@@ -73,7 +73,7 @@ Personal keeps $20.00 of the payment. The total stays what the bank says, becaus
 - Each ledger counts its share as a card payment, not as spending or income. So every ledger in the split needs a category for card payments.
 - Only a card payment can be split: money onto the card that's a transfer, or in a category left out of totals, with no refund or payback link.
 - **Change the split…** opens it again, and **Undo split** gives the whole payment back to the ledger that holds it.
-- While it's split, the payment's date, account and payee can't be changed by hand and it can't be deleted or moved. The share rows are changed through the split, not on their own. Notes, tags and names can still change.
+- While it's split, the payment's date, status, account and payee can't be changed by hand, its amount can't go below its shares, and it can't be deleted or moved. The share rows are changed through the split, not on their own. Notes, tags and names can still change.
 - A payment held by a ledger that isn't the home (it was moved there) splits the same way: that ledger types what it keeps and what the others get, and the home gets the rest.
 - When the bank changes the payment's date or pending status, the shares follow. When it changes the amount, the shares stay as typed and the ledger that holds the payment takes the difference. If the shares are then more than the payment, it says so. When the bank removes the payment, the split is undone first.
 
@@ -83,9 +83,9 @@ A ledger the card is shared with can do everything with the transactions it hold
 
 It can't change the card's name, type, starting balance or notes, update its balance, import a CSV into it, link or sync it, share it or delete it. Those are done in the home, and the app says which ledger that is.
 
-One thing to know. The bank's balance (or the last one you recorded with **Update balance**) is the whole account's, and one ledger carries the card's starting balance: the home, or the ledger that was the home before you changed it. That ledger takes up any difference between the transactions and the bank. So when another ledger deletes a synced transaction, changes its amount, or adds one by hand that the bank never has, the total stays the bank's and the difference shows in that ledger's balance. The app says so where it can happen: "Visa is a shared account, so Personal’s balance on it may change."
+One thing to know. The bank's balance (or the last one you recorded with **Update balance**) is the whole account's, and one ledger carries the card's starting balance: the home, or after a home change the ledger that had it before. That ledger takes up any difference between the transactions and the bank. So when another ledger deletes a synced transaction, changes its amount, or adds one by hand that the bank never has, the total stays the bank's and the difference shows in that ledger's balance. The app says so where it can happen: "Visa is a shared account, so Personal’s balance on it may change."
 
-**Update balance** on a shared card that isn't synced records the whole account's balance, and shows what it gives each ledger before you save.
+**Update balance** on a shared account that isn't synced records the whole account's balance, and shows what it gives each ledger before you save.
 
 ### Changing the home
 
@@ -98,17 +98,19 @@ The starting balance stays with the ledger that had it, which keeps taking up di
 Untick a ledger in **Share with…**. The home can't be unticked: make another ledger the home first. A ledger with no transactions on the card just loses it. One that holds some asks what happens to them, and each choice shows the balances it gives before you save:
 
 - **Move them to the home** ("Move Family’s 12 transactions to Personal"). They become the home's transactions, as with any move. The home's balance on the card grows by what Family owed, and the total doesn't change. Family's share of a payment the home holds goes back to the home.
-- **Keep them** ("Keep them in Family, in a new manual account"). Family gets a new credit card account of its own, with the same name, holding those transactions. Its balance is what Family owed. It isn't synced, and the bank never adds those transactions to the shared card again. Family's recurring items, custom reports and report filters that named the card name the new account.
+- **Keep them** ("Keep them in Family, in a new manual account"). Family gets a new credit card account of its own, with the same name, holding those transactions. Its balance is what Family owed. It isn't synced, and the bank never adds those transactions to the shared account again. Family's recurring items, custom reports and report filters that named the card name the new account.
 
   With "keep", the card's total doesn't go down. It's still what the bank says, and Family no longer has a part of it. So what Family owed is counted twice: on Family's new account, and inside the balance of the ledger that carries the card's starting balance. It stays that way until you record how it was settled, by hand, for example with a payment on Family's new account once Family has paid its part. The dialog names the ledger and the amount.
 
   Pending transactions from the bank go to the home even with "keep", because the bank will post them again under the card. Splits that Family was part of end, and each share becomes an ordinary transaction where it is, with no balance changing.
 
-With only the home left ticked, the card isn't shared any more. A shared card can't be deleted: stop sharing it first.
+When the ledger that carries the card's starting balance is taken out, the starting balance and recorded balances go to the home, and the dialog says by how much the home's balance changes.
+
+With only the home left ticked, the card isn't shared any more. A shared account can't be deleted: stop sharing it first.
 
 ### Deleting, erasing or archiving a ledger
 
-A ledger that has a shared card asks first, in the same dialog:
+A ledger that has a shared account asks first, in the same dialog:
 
 - **"Visa’s home is Personal. Which ledger becomes its home?"** when the ledger is the card's home. This is asked before archiving too: an archived ledger is never a home.
 - **"Personal has 42 transactions on Visa. Delete them or move them?"** before deleting or erasing, with **Delete them** and **Move to Family**. Under the choices it says what each does to the other ledgers' balances, now and at the next sync.
@@ -122,6 +124,6 @@ An archived ledger keeps its transactions and its balance on the card, and syncs
 
 ### Left out for now
 
-- Other account types. Only credit cards can be shared, and a shared card can't change type.
+- Other account types. Only credit cards can be shared, and a shared account can't change type.
 - Suggestions to move a transaction. You decide what belongs where.
 - A backup of one ledger. The full backup holds every ledger, shared accounts included.

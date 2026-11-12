@@ -377,7 +377,7 @@ No arguments.
 | Argument | Type | | What it is |
 |---|---|---|---|
 | `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
-| `id` | number | required | The payment: money in on a shared credit card, in a category left out of totals, held by this ledger. |
+| `id` | number | required | The payment: money in on a shared account, in a category left out of totals, held by this ledger. |
 | `shares` | object[] | required | One `{ ledger, amount }` for each ledger other than the home that gets part of it: the ledger by slug or name, the amount in dollars, above zero. Together they can’t be more than the payment. When the ledger that holds the payment isn’t the home, its own amount is what it keeps. Empty: the split is undone. |
 | `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
 

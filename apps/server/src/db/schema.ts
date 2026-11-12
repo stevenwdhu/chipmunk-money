@@ -567,7 +567,7 @@ export const transactions = sqliteTable(
     index('tx_transfer_pair')
       .on(t.transferPairId)
       .where(sql`${t.transferPairId} IS NOT NULL`),
-    // Card-wide on purpose: the bank's id is unique on the account whatever ledger holds the row.
+    // Account-wide on purpose: the bank's id is unique on the account whatever ledger holds the row.
     uniqueIndex('tx_external_id')
       .on(t.accountId, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL`),

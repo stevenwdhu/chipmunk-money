@@ -878,7 +878,7 @@ export const TOOLS: ToolDef[] = [
       'Splits a card payment on a shared account between the ledgers that have it: give one amount for each ledger other than the account’s home, and the home keeps the rest. Each ledger counts its share as a card payment, not as spending or income. Sending the shares again changes the split, and an empty `shares` undoes it. Needs a key that can use the ledger that holds the payment and every ledger with a share.',
     input: z.object({
       ledger,
-      id: z.number().int().describe('The payment: money in on a shared credit card, in a category left out of totals, held by this ledger.'),
+      id: z.number().int().describe('The payment: money in on a shared account, in a category left out of totals, held by this ledger.'),
       shares: z
         .array(
           z.object({
