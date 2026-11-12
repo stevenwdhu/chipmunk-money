@@ -22,6 +22,8 @@ const count = (n: number, word: string) => `${n.toLocaleString()} ${word}${n ===
 
 /** What the request was for. One from before that was kept is a call to one provider. */
 function what(c: AiRecord) {
+  // “Ask AI again” on transactions that had a category: a retry asks about those ones only.
+  if (c.kind === 'categorize' && c.again) return `Ask again about ${c.subject ?? 'a payee'}`
   if (c.kind === 'categorize') return `Categorize ${c.subject ?? 'a payee'}`
   if (c.kind === 'names') return `Name ${count(c.payees ?? 0, 'payee')}`
   if (c.kind === 'test') return 'Connection test'
@@ -53,7 +55,7 @@ function unneeded(c: AiRecord) {
     c.kind === 'names'
       ? 'the payees all have names now'
       : c.again
-        ? 'the payee’s transactions that had a category are gone or were changed by hand since, or the payee always gets one category now'
+        ? 'the transactions it asked about are gone, were categorized or confirmed by hand since, or are ones “Ask AI again” leaves as they are now'
         : 'the payee has no uncategorized transaction left'
   return `Nothing is left to ask: ${left}\nIt failed: ${c.error ?? 'no reason was given'}`
 }

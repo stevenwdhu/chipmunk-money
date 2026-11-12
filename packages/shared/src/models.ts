@@ -997,7 +997,11 @@ export const aiRecordSchema = z
       .nullable()
       .describe('What was asked: a category for a payee, names for payees, or a connection test. Null on a record from before this was kept: one call to one provider.'),
     subject: z.string().nullable().describe('The payee as the ledger calls it (`categorize`).'),
-    again: z.boolean().describe('It was asked with POST /categorize/again about transactions that had a category: another thing asked than the payee’s uncategorized transactions.'),
+    again: z
+      .boolean()
+      .describe(
+        'It was asked with POST /categorize/again about transactions that had a category: another thing asked than the payee’s uncategorized transactions. A retry asks about the ones of them that are still open, and no other.',
+      ),
     payees: z.number().int().nullable().describe('How many payees were to be named (`names`).'),
     ledger: z.string().describe('The name of the ledger it was for.'),
     ledgerSlug: z.string().describe('That ledger’s slug, for POST /ledgers/{ledger}/ai/usage/{id}/retry.'),
@@ -1007,14 +1011,14 @@ export const aiRecordSchema = z
     status: z
       .enum(['ok', 'failed', 'unneeded'])
       .describe(
-        '`ok`: answered. `failed`: not answered. `unneeded`: not answered, and no longer needed: the payee has no uncategorized transaction left, or the payees all have names now. A request made with POST /categorize/again about transactions that had a category (`again`) stays `failed` until it’s asked again there and answered, and is `unneeded` once the payee has no such transaction left (deleted, or without a category), is a payee you always set one way, or had a category set by hand after the last try.',
+        '`ok`: answered. `failed`: not answered. `unneeded`: not answered, and no longer needed: the payee has no uncategorized transaction left, or the payees all have names now. A request made with POST /categorize/again about transactions that had a category (`again`) remembers which ones it asked about. It is `failed` while one of them is still open: not deleted, with the category it had when asked, still waiting for review if it was then, and one POST /categorize/again would still ask about (not a transfer, linked to what it pays back, categorized by a recurring item or a split row, and its payee isn’t one you always set one way). It is `unneeded` once none is.',
       ),
     canRetry: z.boolean().describe('It failed, is still needed, and you can ask again (POST /ledgers/{ledger}/ai/usage/{id}/retry).'),
     noRetry: z
       .string()
       .nullable()
       .describe(
-        'Why a failed record can’t be asked again from here, in words to show: it was asked with POST /categorize/again about transactions that had a category (which ones isn’t kept, so ask again there), or its ledger is archived. Null otherwise, and for one that is no longer needed.',
+        'Why a failed record can’t be asked again for now, in words to show: its ledger is archived. Null otherwise, and for one that is no longer needed.',
       ),
     retrying: z.boolean().describe('It’s being asked again now.'),
     outcome: z.string().nullable().describe('The category picked (`categorize`, `test`). Null when it failed, or picked none the ledger uses.'),

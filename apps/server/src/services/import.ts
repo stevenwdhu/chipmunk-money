@@ -9,7 +9,7 @@ import {
 } from '@chipmunk/shared'
 import type { z } from 'zod'
 import type { importCommitSchema, importPreviewSchema } from '@chipmunk/shared'
-import { categorizeKey } from '../ai/records'
+import { ASKED_AGAIN_ABOUT, categorizeKey } from '../ai/records'
 import { aiEnabled } from '../ai/runner'
 import { badRequest } from '../lib/http'
 import { requireHome, saveImportMapping } from './accounts'
@@ -257,27 +257,6 @@ export function payeesWaiting(ctx: AppContext): Set<string> {
 }
 
 /**
- * Whether a failed “Ask AI again” about a payee's transactions that had a category is still
- * something to ask there: some of them are left (ones it asks about: see recategorize), the payee
- * isn't one you always set one way, and none had its category set by a person after `since`, when
- * it was last tried. Which transactions were asked about isn't kept, so any of the payee's that
- * went the same way count, and one a person categorized that changed since counts as set by hand,
- * also when the change was its payee being named.
- */
-export function askedAgainStands(ctx: AppContext, payeeKey: string, direction: 'in' | 'out', since: string): boolean {
-  if (payeeRule(ctx, payeeKey)?.mode === 'always') return false
-  const { left, byHand } = ctx.q.get<{ left: number; byHand: number }>(
-    `SELECT count(*) AS left, coalesce(sum(category_source = 'user' AND updated_at > ?), 0) AS byHand
-     FROM transactions
-     WHERE ledger_id = @ledger AND payee_key = ? AND ${direction === 'in' ? 'amount_minor > 0' : 'amount_minor <= 0'} AND category_id IS NOT NULL
-       AND deleted_at IS NULL AND transfer_pair_id IS NULL AND COALESCE(category_source, '') NOT IN ('linked', 'recurring') AND split_of IS NULL`,
-    since,
-    payeeKey,
-  )!
-  return left > 0 && byHand === 0
-}
-
-/**
  * Asks the configured LLM about uncategorized transactions, one request per distinct payee, and
  * applies the answer to every transaction from that payee (flagged for review). Never a split row
  * (a share of a split payment, or what its holder gave): its category is the split's. With `payees`
@@ -357,9 +336,11 @@ export interface Recategorized {
  * transactions waiting for a category get yours. Left as they are: transfers, refunds and paybacks that
  * follow their purchase, payments a recurring item categorizes, and split rows (a share of a split
  * payment, or what its holder gave), whose category must stay left out of totals. `onDone` hears what changed. Throws
- * when AI isn't set up or is already at work in this ledger.
+ * when AI isn't set up or is already at work in this ledger. A request about transactions that had a
+ * category remembers them in its record while it's failed. `records` says, for a retry, which failed
+ * record each transaction is asked again for: that one is corrected.
  */
-export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: Recategorized[]) => void): AiJobStatus {
+export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: Recategorized[]) => void, records?: Map<number, number>): AiJobStatus {
   if (!aiEnabled(ctx)) badRequest('Set up an AI provider first, in App settings → AI.')
   const aiJob = aiJobStatus(ctx)
   if (aiJob.running) badRequest('AI is already categorizing in this ledger. Try again when it’s done.')
@@ -375,20 +356,21 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
       bankConfident: number
       categoryId: number | null
       source: string | null
+      review: number
     }>(
-    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee, payee_key AS payeeKey, notes,
-       bank_category AS bankCategory, bank_category_confident AS bankConfident, category_id AS categoryId, category_source AS source
-     FROM transactions
-     WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND transfer_pair_id IS NULL
-       AND COALESCE(category_source, '') NOT IN ('linked', 'recurring') AND split_of IS NULL
-     ORDER BY date DESC`,
+    `SELECT t.id, t.account_id AS accountId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.notes,
+       t.bank_category AS bankCategory, t.bank_category_confident AS bankConfident, t.category_id AS categoryId, t.category_source AS source,
+       t.needs_review AS review
+     FROM transactions t
+     WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(?)) AND ${ASKED_AGAIN_ABOUT}
+     ORDER BY t.date DESC`,
     JSON.stringify(ids),
   )
   const always = new Set(selected.filter((r) => payeeRule(ctx, r.payeeKey)?.mode === 'always').map((r) => r.payeeKey))
   const rows = selected.filter((r) => !always.has(r.payeeKey))
   const groups = new Map<string, typeof rows>()
   for (const r of rows) {
-    const key = JSON.stringify([r.payeeKey, r.amount, r.notes ?? '', r.categoryId !== null])
+    const key = JSON.stringify([r.payeeKey, r.amount, r.notes ?? '', r.categoryId !== null, records?.get(r.id) ?? null])
     groups.set(key, [...(groups.get(key) ?? []), r])
   }
   const work = [...groups.values()]
@@ -416,7 +398,8 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
               bankCategory: first.bankCategory,
               bankConfident: !!first.bankConfident,
               // About a category that's there, it isn't the payee's uncategorized transactions that were asked about.
-              again: first.categoryId !== null,
+              again: first.categoryId !== null ? list.map((r) => ({ id: r.id, categoryId: r.categoryId!, review: !!r.review })) : undefined,
+              record: records?.get(first.id),
             })
             const pick = s?.categoryId
             if (s && pick) {

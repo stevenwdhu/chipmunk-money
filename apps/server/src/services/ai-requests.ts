@@ -1,10 +1,10 @@
 import type { AiRecord, AiRetry, AiUsage } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
-import { askedAgain, namesOf, payeeOf } from '../ai/records'
+import { askedAgain, askedOf, namesOf, stillOpen } from '../ai/records'
 import { aiEnabled } from '../ai/runner'
 import { badRequest, notFound } from '../lib/http'
 import type { AppContext } from './context'
-import { aiJobStatus, askedAgainStands, categorizeUncategorized, payeesWaiting } from './import'
+import { aiJobStatus, categorizeUncategorized, payeesWaiting, recategorize, type Recategorized } from './import'
 import type { PayeeWorld } from './payee-names'
 import { retryNames, tidyAvailable, tidyRunning, unnamedPayees, type PayeeTidier } from './payee-tidy'
 
@@ -15,13 +15,15 @@ import { retryNames, tidyAvailable, tidyRunning, unnamedPayees, type PayeeTidier
  * payees once they all have names. A retry asks about things as they are now, through the code a
  * normal request uses, which corrects the record.
  *
- * Two kinds of record stand apart. A request to name payees sits in one ledger but is about the
- * payees of every ledger, so a caller that can't use every ledger gets nothing of it: no row, no
- * count, no tokens, and its id is unknown to them. And “Ask AI again” about transactions that had a
- * category is never asked again from here: which transactions were asked about isn't kept, so
- * nothing here can ask about the same ones. It stays failed, to ask again there, until that's
- * answered or it's no longer needed: the payee has no such transaction left, always gets one
- * category, or had a category set by hand since (askedAgainStands).
+ * A failed “Ask AI again” about transactions that had a category remembers which ones it asked
+ * about. It's a failure while any of them is still open (stillOpen): there as it was when asked, and
+ * one “Ask AI again” would still ask about. A retry asks about exactly those, as “Ask AI again” does,
+ * so one a person categorized or confirmed since is left as it is, and so is every transaction that
+ * wasn't asked about. With none of them open it's no longer needed.
+ *
+ * A request to name payees sits in one ledger but is about the payees of every ledger, so a caller
+ * that can't use every ledger gets nothing of it: no row, no count, no tokens, and its id is unknown
+ * to them.
  */
 
 /** Who reads or retries: what they may do decides what can be retried. */
@@ -32,6 +34,8 @@ export interface AiCaller {
   everyLedger: boolean
   /** Payee names in every ledger, to tell which payees still wait for one. */
   world: PayeeWorld
+  /** Hears the categories a retried “Ask AI again” changed in a ledger. */
+  onRecategorized?: (ctx: AppContext, changed: Recategorized[]) => void
 }
 
 interface Row {
@@ -50,17 +54,17 @@ interface Row {
   firstFailedAt: string | null
   error: string | null
   primaryError: string | null
+  asked: string | null
 }
 
 const COLUMNS = `id, kind, subject, subject_key AS subjectKey, slot, model, ok, outcome, latency_ms AS latencyMs, tries,
-  created_at AS createdAt, tried_at AS triedAt, first_failed_at AS firstFailedAt, error, primary_error AS primaryError`
+  created_at AS createdAt, tried_at AS triedAt, first_failed_at AS firstFailedAt, error, primary_error AS primaryError, asked`
 
 /** Leaves out what the caller gets nothing of: a request to name payees, for one that can't use every ledger. */
 const seenBy = (who: AiCaller) => (who.everyLedger ? '' : " AND kind IS NOT 'names'")
 
-const ASKED_AGAIN = 'It was asked with “Ask AI again”, about transactions that had a category. Select them and ask again there.'
 const AGAIN_UNNEEDED =
-  'This is no longer needed: the payee’s transactions that had a category are gone or were changed by hand since, or the payee always gets one category now.'
+  'This is no longer needed: the transactions it asked about are gone, were categorized or confirmed by hand since, or are ones “Ask AI again” leaves as they are now.'
 const ARCHIVED = 'This ledger is archived. Restore it first, then ask again.'
 
 /** The records being asked again now, by ledger, each with its kind. */
@@ -78,11 +82,8 @@ function needs(ctx: AppContext, who: AiCaller) {
   let waiting: Set<string> | undefined
   let unnamed: ((payees: string[]) => string[]) | undefined
   return (row: Row): boolean => {
-    if (row.kind === 'categorize' && askedAgain(row.subjectKey)) {
-      // Asked about transactions that had a category, it isn't about the uncategorized ones.
-      const { payeeKey, direction } = payeeOf(row.subjectKey ?? '')
-      return askedAgainStands(ctx, payeeKey, direction, row.triedAt ?? row.createdAt)
-    }
+    // Asked about transactions that had a category, it isn't about the uncategorized ones: it's about the ones it remembers.
+    if (row.kind === 'categorize' && askedAgain(row.subjectKey)) return stillOpen(ctx, askedOf(row.asked)).length > 0
     if (row.kind === 'categorize') return (waiting ??= payeesWaiting(ctx)).has(row.subjectKey ?? '')
     if (row.kind === 'names') return (unnamed ??= unnamedPayees(who.world))(namesOf(row.subjectKey)).length > 0
     return true
@@ -92,8 +93,8 @@ function needs(ctx: AppContext, who: AiCaller) {
 function recordOf(ctx: AppContext, who: AiCaller, row: Row, needed: (row: Row) => boolean): AiRecord {
   const status = row.ok ? 'ok' : needed(row) ? 'failed' : 'unneeded'
   const again = row.kind === 'categorize' && askedAgain(row.subjectKey)
-  const asksAgain = (row.kind === 'categorize' && !again) || (row.kind === 'names' && who.everyLedger)
-  const noRetry = status !== 'failed' ? null : again ? ASKED_AGAIN : asksAgain && ctx.ledger.archived ? ARCHIVED : null
+  const asksAgain = row.kind === 'categorize' || (row.kind === 'names' && who.everyLedger)
+  const noRetry = status === 'failed' && asksAgain && ctx.ledger.archived ? ARCHIVED : null
   return {
     id: row.id,
     kind: row.kind,
@@ -181,8 +182,9 @@ const conflict = (message: string): never => {
 /**
  * Asks again about these records, each one the caller can retry: the payees still without a name, as
  * one run of AI tidying for the records of every ledger given, then in each ledger the payees'
- * transactions still uncategorized, as one run of its AI categorization. While either is at work
- * already, its records are left (`working`), and nothing second is started. Returns at once, the
+ * transactions still uncategorized, as one run of its AI categorization, and after it the
+ * transactions still open of the “Ask AI again” records, as “Ask AI again” asks about them. While
+ * either is at work already, its records are left (`working`), and nothing second is started. Returns at once, the
  * work going on in the background, with what started and what was left in each ledger. `given`
  * stands in for the configured providers when names are asked (a test's).
  */
@@ -228,16 +230,47 @@ function retry(asked: Array<{ ctx: AppContext; records: Seen[] }>, who: AiCaller
     }
     const done = mark(l.ctx, l.categorize)
     l.result.started += l.categorize.length
-    void categorizeUncategorized(l.ctx, { payees: l.categorize.map((x) => x.row.subjectKey ?? '') }).finally(done)
+    const again = l.categorize.filter((x) => x.record.again)
+    const waiting = l.categorize.filter((x) => !x.record.again)
+    void (async () => {
+      if (waiting.length) await categorizeUncategorized(l.ctx, { payees: waiting.map((x) => x.row.subjectKey ?? '') })
+      if (again.length) await askAgain(l.ctx, again, who)
+    })().finally(done)
   }
   return each.map((l) => l.result)
 }
 
 /**
+ * Asks again about the transactions these “Ask AI again” records remember that are still open, as
+ * they are by now, each for its own record. Ends when AI is done with them.
+ */
+function askAgain(ctx: AppContext, records: Seen[], who: AiCaller): Promise<void> {
+  // The record each one is asked again for: the first, should two remember it.
+  const of = new Map<number, number>()
+  for (const x of records) for (const a of stillOpen(ctx, askedOf(x.row.asked))) if (!of.has(a.id)) of.set(a.id, x.row.id)
+  if (!of.size) return Promise.resolve()
+  return new Promise((resolve) => {
+    const ended = (changed: Recategorized[]) => {
+      try {
+        if (changed.length) who.onRecategorized?.(ctx, changed)
+      } finally {
+        resolve()
+      }
+    }
+    try {
+      recategorize(ctx, [...of.keys()], ended, of)
+    } catch (err) {
+      // The records stay failed, to retry: nothing was asked.
+      console.error(`[ai] a retry in ${ctx.ledger.name} couldn't ask again`, err)
+      resolve()
+    }
+  })
+}
+
+/**
  * Asks again about one failed record of this ledger. Refused (409), saying why, for a record that
- * was answered, is no longer needed, is a connection test, is from before requests were recorded or
- * was asked with “Ask AI again”, in an archived ledger, and while AI is already working on the same
- * kind of thing. A record the caller gets nothing of is not found, like an id that doesn't exist.
+ * was answered, is no longer needed, is a connection test or is from before requests were recorded,
+ * in an archived ledger, and while AI is already working on the same kind of thing. A record the caller gets nothing of is not found, like an id that doesn't exist.
  */
 export function retryRecord(ctx: AppContext, who: AiCaller, id: number, given?: PayeeTidier): AiRetry {
   const row = ctx.q.get<Row>(`SELECT ${COLUMNS} FROM ai_calls WHERE ledger_id = @ledger AND id = ?${seenBy(who)}`, id)

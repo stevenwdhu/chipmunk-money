@@ -231,13 +231,29 @@ const ACROSS =
 
 /** What a list of AI records says, for the ledger's and the app's. */
 export const AI_USAGE =
-  'What AI was asked to do, one record per thing asked: a category for a payee (the payee as the ledger calls it is all that’s kept of the transaction), names for payees, a connection test. The primary provider failing and the fallback answering is one record that is `ok`, with `primaryError`. A failure asked again (a retry, the next sync, by hand) corrects its record, never a second one. A failed record reads `unneeded` once nothing is left to ask: the payee has no uncategorized transaction, or the payees all have names. One asked with POST /categorize/again about transactions that had a category (`again`) reads `unneeded` once the payee has no such transaction left, is one you always set one way, or had a category set by hand after the last try. A request to name payees is about the payees of every ledger, so a key limited to some ledgers gets nothing of it: no record, no count, no tokens. `recent` is the newest 20, and the totals count every record.'
+  'What AI was asked to do, one record per thing asked: a category for a payee (the payee as the ledger calls it is all that’s kept of the transaction), names for payees, a connection test. The primary provider failing and the fallback answering is one record that is `ok`, with `primaryError`. A failure asked again (a retry, the next sync, by hand) corrects its record, never a second one. A failed record reads `unneeded` once nothing is left to ask: the payee has no uncategorized transaction, or the payees all have names. One asked with POST /categorize/again about transactions that had a category (`again`) remembers which ones, and reads `unneeded` once none of them is still open: each is deleted, has another category, was confirmed by a person if it waited for review, or is one POST /categorize/again leaves as it is (its payee is one you always set one way). A request to name payees is about the payees of every ledger, so a key limited to some ledgers gets nothing of it: no record, no count, no tokens. `recent` is the newest 20, and the totals count every record.'
+
+/** Notes in a ledger's activity the categories AI changed when this actor asked it again, with what each was. */
+const recategorized = (actor: Actor) => {
+  const by = { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null }
+  return (ctx: AppContext, changed: imports.Recategorized[]) => {
+    if (!changed.length) return
+    recordActivity(ctx, by, {
+      action: 'bulk_update',
+      entity: 'transaction',
+      summary: `AI changed the category of ${changed.length} transaction${changed.length === 1 ? '' : 's'}, to review`,
+      before: changed.map((x) => ({ id: x.id, categoryId: x.before })),
+      after: changed.map((x) => ({ id: x.id, categoryId: x.after })),
+    })
+  }
+}
 
 /** Who asks about AI records: what they may do decides what they can retry. */
 export const aiCaller = (actor: Actor, world: names.PayeeWorld): AiCaller => ({
   write: actor.kind === 'web' || actor.key.scopes.includes('write'),
   everyLedger: actor.kind === 'web' || !actor.key.ledgers,
   world,
+  onRecategorized: recategorized(actor),
 })
 
 /** Routes for one ledger's data, mounted at /api/v1/ledgers/:ledger. */
@@ -1616,25 +1632,15 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Ask AI again about transactions’ categories',
       description:
-        'AI only, not your history, in the background: poll the status. A different pick replaces the category as a suggestion to review. A request that fails is in GET /ai/usage: one about transactions waiting for a category can be retried there, and one about transactions that had a category is asked again here. Transfers, refunds and paybacks that follow their purchase, payments a recurring item categorizes, and payees you always set one way are left as they are.',
+        'AI only, not your history, in the background: poll the status. A different pick replaces the category as a suggestion to review. A request that fails is in GET /ai/usage and can be retried there: one about transactions that had a category remembers which ones, and a retry asks about those that are still as they were. Transfers, refunds and paybacks that follow their purchase, payments a recurring item categorizes, and payees you always set one way are left as they are.',
       body: recategorizeSchema,
       response: aiJobStatusSchema,
       status: 202,
     },
     (c, { body }) => {
       const ctx = c.var.ctx
-      const actor = c.var.actor
-      const by = { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null }
-      return imports.recategorize(ctx, body.ids, (changed) => {
-        if (!changed.length) return
-        recordActivity(ctx, by, {
-          action: 'bulk_update',
-          entity: 'transaction',
-          summary: `AI changed the category of ${changed.length} transaction${changed.length === 1 ? '' : 's'}, to review`,
-          before: changed.map((x) => ({ id: x.id, categoryId: x.before })),
-          after: changed.map((x) => ({ id: x.id, categoryId: x.after })),
-        })
-      })
+      const noted = recategorized(c.var.actor)
+      return imports.recategorize(ctx, body.ids, (changed) => noted(ctx, changed))
     },
   )
   r.get('/categorize/status', { ...ai, scope: 'read', summary: 'Get the AI categorization status', response: aiJobStatusSchema }, (c) =>
@@ -1658,7 +1664,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Ask AI again about a failed request',
       description:
-        'For a record that failed and is still needed (`canRetry`). It asks about things as they are now, in the background: the payee’s transactions still uncategorized, as POST /categorize/run does for them, or the payees still without a name. The same record is corrected: answered, it turns `ok` and keeps `firstFailedAt`. GET /ai/usage says when it’s done (`retrying`). 409, saying why, for a record that was answered, is no longer needed, is a connection test, is from before requests were recorded or was asked with POST /categorize/again about transactions that had a category (`noRetry`), in an archived ledger (restore it first), and while AI is already working in this ledger. A request to name payees is not found (404) for a key limited to some ledgers.',
+        'For a record that failed and is still needed (`canRetry`). It asks about things as they are now, in the background: the payee’s transactions still uncategorized, as POST /categorize/run does for them, the payees still without a name, or for a record made with POST /categorize/again about transactions that had a category (`again`) the ones of them that are still open, as POST /categorize/again does for them and for no other transaction. The same record is corrected: answered, it turns `ok` and keeps `firstFailedAt`. GET /ai/usage says when it’s done (`retrying`). 409, saying why, for a record that was answered, is no longer needed, is a connection test or is from before requests were recorded, in an archived ledger (restore it first, `noRetry`), and while AI is already working in this ledger. A request to name payees is not found (404) for a key limited to some ledgers.',
       params: z.object({ id: z.coerce.number().int().positive() }),
       response: aiRetrySchema,
       status: 202,

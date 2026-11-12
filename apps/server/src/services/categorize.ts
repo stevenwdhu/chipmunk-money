@@ -1,5 +1,5 @@
 import { payeeSimilarity, type CategorySuggestion } from '@chipmunk/shared'
-import { categorizeKey, recorded } from '../ai/records'
+import { categorizeKey, recorded, type Asked } from '../ai/records'
 import { aiEnabled, configuredCategorizer } from '../ai/runner'
 import type { LlmCategoryRequest } from '../ai/types'
 import type { AppContext } from './context'
@@ -159,8 +159,13 @@ export interface AiInput {
   bankCategory?: string | null
   /** The bank says it's sure of its category. */
   bankConfident?: boolean
-  /** Asked about transactions that had a category (“Ask AI again”): recorded apart from the payee's uncategorized ones. */
-  again?: boolean
+  /**
+   * Asked about these transactions, which had a category (“Ask AI again”): recorded apart from the
+   * payee's uncategorized ones, in a record that remembers them while it's failed.
+   */
+  again?: Asked[]
+  /** The failed record this asks again (a retry): corrected whatever its payee is called now. */
+  record?: number
 }
 
 function buildLlmRequest(ctx: AppContext, input: AiInput): LlmCategoryRequest {
@@ -221,7 +226,13 @@ export async function aiSuggestion(ctx: AppContext, input: AiInput): Promise<Sug
     () => {
       // Named otherwise while AI was asked, the payee's open record went with it: this is for the payee as it's called now.
       const now = payeeNameOf(ctx, input.payee)
-      return { kind: 'categorize', subject: now.name, key: categorizeKey(now.key !== named ? now.key : payeeKey, directionOf(input.amountMinor), input.again) }
+      return {
+        kind: 'categorize',
+        subject: now.name,
+        key: categorizeKey(now.key !== named ? now.key : payeeKey, directionOf(input.amountMinor), !!input.again),
+        record: input.record,
+        asked: input.again,
+      }
     },
     async (log) => {
       const res = await (ctx.llm ?? configuredCategorizer(ctx, log))(req)
