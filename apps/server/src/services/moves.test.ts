@@ -17,6 +17,7 @@ import { matchTransactions } from './matching'
 import { MOVE_LIMIT, moveTransactions, type MoveInput } from './moves'
 import { addPayment, confirmRecurring, createRecurring, detectRecurring, getRecurring, listRecurring, updateRecurring } from './recurring'
 import { payeeKeyOf } from './payee-namer'
+import { periodSummary } from './reports'
 import { createTransaction, deleteTransaction, getTransaction, insertTransaction, updateTransaction } from './transactions'
 
 // The real categorizing, its calls recorded: what a move hands it.
@@ -122,11 +123,15 @@ describe('moving transactions: categories', () => {
     const payment = w.row(personal, '2026-09-05', 5000, { payee: 'Payment thank you', category: 'Credit card payment', source: 'rule' })
     const transfer = w.row(personal, '2026-09-06', 2000, { payee: 'From savings', category: 'Transfer', source: 'history' })
     setCategoryEnabled(family, categoryId(family, 'Transfer'), { enabled: false })
+    const summary = () => periodSummary(family, '2026-09-01', '2026-09-30')
+    const totals = summary()
     expect(w.move(personal, [payment, transfer], family)).toMatchObject({ moved: 2, recategorized: 1 })
     const card = categoryId(family, 'Credit card payment')
     expect(getTransaction(family, payment)).toMatchObject({ categoryId: card, categorySource: 'user' })
     // Transfer is off in Family: its card payment category instead, as yours.
     expect(getTransaction(family, transfer)).toMatchObject({ categoryId: card, categorySource: 'user' })
+    // Never income in Family, nor spending.
+    expect(summary()).toMatchObject({ incomeMinor: totals.incomeMinor, spentMinor: totals.spentMinor })
     w.check()
 
     // A ledger with no category left out of totals can't take it.

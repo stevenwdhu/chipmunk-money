@@ -166,7 +166,8 @@ function addLedger(ctx: AppContext, ctxOf: CtxOf, account: Account, home: Accoun
 /**
  * Shares a credit card of this ledger (its home) with another ledger. The other ledger gets it under
  * an institution of its own with the home institution's name (found, or added), after its other
- * accounts. Nothing moves, so no balance changes. Activity in both ledgers.
+ * accounts. Nothing moves, so no balance changes. Activity in both ledgers. The API and MCP share
+ * through setSharing.
  */
 export function addMember(ctx: AppContext, ctxOf: CtxOf, accountId: number, ledgerId: string, actor: ActivityActor): AccountSharing {
   const { account, ledgers, home } = inHome(ctx, accountId)
@@ -805,7 +806,8 @@ export function setSharing(
 /**
  * Stops sharing an account of this ledger (its home) with another ledger (setSharing with every
  * ledger but that one). A ledger that holds transactions on it must be told where they go (`rows`):
- * "home" moves them to the home. Activity in both ledgers.
+ * "home" moves them to the home. Activity in both ledgers. The API and MCP stop sharing through
+ * setSharing.
  */
 export function removeMember(
   ctx: AppContext,

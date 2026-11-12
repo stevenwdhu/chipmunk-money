@@ -291,6 +291,8 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     setBalance(personal, w.visa, { date: '2026-08-31', balanceMinor: -1_400 })
     w.move(personal, [rows[0]!], family)
     w.move(personal, [rows[1]!, rows[2]!], trip)
+    // Trip is archived: it keeps its rows and its part, and keeps them on its own account when it stops sharing.
+    w.storage.registry.change(trip.ledger.id, { archived: true, answers: {} }, { actor: TESTER })
     const before = w.check()
     const pastBefore = w.partsAt(MONTH_ENDS)
 
@@ -306,6 +308,9 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     expect(pastAfter.personal).toEqual(pastBefore.personal)
     expect(pastAfter.family).toEqual(pastBefore.family)
     expect(getSharingMembers(personal, w.visa)).toEqual(['family'])
+    expect(trip.q.column('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? ORDER BY id', own)).toEqual([rows[1], rows[2]])
+    expect(w.storage.registry.get(trip.ledger.id).archivedAt).not.toBeNull()
+    w.storage.registry.update(trip.ledger.id, { archived: false })
 
     // Trip's own account, shared with Family in turn, which keeps its row: split off from Trip's
     // account, the one it was split off from directly. Visa reaches it through that one.

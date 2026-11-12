@@ -12,6 +12,7 @@ import type { AppContext } from '../context'
 import { matchTransactions } from '../matching'
 import { moveTransactions } from '../moves'
 import { changeHome } from '../sharing'
+import { setSplit } from '../splits'
 import { createTransaction, deleteTransaction, findByExternalId, getTransaction, restoreTransaction } from '../transactions'
 import { applyRemoteTransactions, latestBankPayload, type ApplyScope } from './apply'
 import { BankService } from './service'
@@ -508,6 +509,60 @@ describe('bank sync on a shared account', () => {
     expect(w.where()).toEqual({ a1: 'personal', a2: 'family', n1: 'family' })
     // In the old home, the account syncs no more.
     expect(() => applyRemoteTransactions(w.personal, w.ctxOf, w.visa, [], { removed: [], floor: null } satisfies ApplyScope, 'simplefin')).toThrow(/syncs in its home/)
+    w.check()
+  })
+
+  it('updates the rows of an archived ledger where they are, its share of a split payment following the payment', () => {
+    const w0 = sharedWorld()
+    const w = { ...w0, ...world(w0) }
+    plaid(w, [
+      remote('p1', '2026-09-28', -4000, 'Corner Cafe', { pending: true }),
+      remote('s1', '2026-09-27', -3000, 'Book Shop'),
+      remote('m1', '2026-09-25', 10_000, 'PAYMENT THANK YOU'),
+    ])
+    // Filed as a card payment, as a sync's matching does.
+    matchTransactions(w.personal)
+    w.move(w.personal, ['p1', 's1'], w.family)
+    const [p1, s1, m1] = ['p1', 's1', 'm1'].map((x) => w.row(x)!.id)
+    // $60 of the $100 payment is Family's.
+    setSplit(w.personal, w.ctxOf, m1!, { shares: [{ ledger: 'family', amountMinor: 6000 }] }, { actor: TESTER, usable: null })
+    const splitRows = () =>
+      [w.personal, w.family].flatMap((c) =>
+        c.q
+          .all<{ amount: number; date: string }>('SELECT amount_minor AS amount, date FROM transactions WHERE ledger_id = @ledger AND split_of = ? ORDER BY id', m1)
+          .map((r) => [c.ledger.slug, r.amount, r.date]),
+      )
+    expect(splitRows()).toEqual([
+      ['personal', -6000, '2026-09-25'],
+      ['family', 6000, '2026-09-25'],
+    ])
+    w.storage.registry.change(w.family.ledger.id, { archived: true, answers: {} }, { actor: TESTER })
+    expect(w.storage.registry.get(w.family.ledger.id).archivedAt).not.toBeNull()
+    w.check()
+
+    // p1 posts under a new id, the payment moves a day, and the bank removes s1.
+    const changed = plaid(
+      w,
+      [remote('c1', '2026-09-29', -4600, 'Corner Cafe', { replaces: 'p1' }), remote('m1', '2026-09-26', 10_000, 'PAYMENT THANK YOU')],
+      [{ remoteId: 'p1', raw: { removed: 'p1' } }, { remoteId: 's1' }],
+    )
+    expect(changed).toMatchObject({ added: 0, updated: 2, removed: 1 })
+    expect(w.row('c1')).toMatchObject({ ledger: 'family', id: p1, status: 'cleared', amount: -4600, deleted: 0 })
+    expect(w.row('s1')).toMatchObject({ ledger: 'family', id: s1, deleted: 1, removedAt: '2026-10-03T18:00:00.000Z' })
+    expect(splitRows()).toEqual([
+      ['personal', -6000, '2026-09-26'],
+      ['family', 6000, '2026-09-26'],
+    ])
+    expect(expectPartsSumToAccount(w.storage, w.visa).parts).toEqual({ personal: 4000, family: 1400 })
+    w.check()
+
+    // The bank removes the payment: its split is undone first, Family's share going back with it.
+    expect(plaid(w, [], [{ remoteId: 'm1' }])).toMatchObject({ removed: 1 })
+    expect(splitRows()).toEqual([])
+    expect(w.row('m1')).toMatchObject({ ledger: 'personal', id: m1, deleted: 1 })
+    expect(expectPartsSumToAccount(w.storage, w.visa).parts).toEqual({ personal: 0, family: -4600 })
+    expect(w.storage.registry.get(w.family.ledger.id).archivedAt).not.toBeNull()
+    expect(runDailyJobs(w.storage)).toEqual([])
     w.check()
   })
 })

@@ -258,7 +258,7 @@ describe('changing the home', () => {
 })
 
 describe('stopping sharing with a ledger whose transactions go home', () => {
-  it('moves its rows home, sends its deleted ones home still deleted, and lets go of its recurring items and institution', () => {
+  it('moves its rows home from an archived ledger, sends its deleted ones home still deleted, and lets go of its recurring items and institution', () => {
     const w = world({ opening: -1_000 })
     const { personal, family } = w
     w.addTx(personal, '2026-08-01', -100)
@@ -274,7 +274,10 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
        VALUES (@ledger, 'Gym', 'gym', ?, -3000, 'monthly', '2026-01-01', '2026-10-01', 'active', 'manual')`,
       w.visa,
     )
+    // Family is archived: it keeps its rows and its part until it stops sharing.
+    w.storage.registry.change(family.ledger.id, { archived: true, answers: {} }, { actor: TESTER })
     const before = w.check()
+    expect(before.parts.family).toBe(-6000)
 
     const change = w.set(personal, { ledgers: ['personal'], rows: { family: 'home' } })
     expect(change).toMatchObject({
@@ -306,6 +309,7 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
     expect(listInstitutions(family)).toEqual([])
     expect(w.activity(personal, 'stop_sharing')).toEqual(['Stopped sharing Visa with Family'])
     expect(w.activity(family, 'stop_sharing')).toEqual(['Personal stopped sharing Visa with this ledger'])
+    expect(w.storage.registry.get(family.ledger.id).archivedAt).not.toBeNull()
 
     // So the ledger, then the account, can be deleted.
     w.storage.registry.remove(family.ledger.id)

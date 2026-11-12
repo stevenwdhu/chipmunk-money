@@ -832,28 +832,3 @@ export function leaveSplits(
   })
 }
 
-/**
- * The splits a ledger takes part in, on every account, let go of before the ledger itself goes
- * (deleted or erased): leaveSplits for each account it has split rows on. Its shares of other
- * ledgers' payments are dropped, since its rows are going (or detached, where `shares` says so for
- * an account and the payment's holder), and a payment it holds has its split detached, so the other
- * ledgers keep their shares as ordinary rows and no balance of theirs changes. The questions asked
- * before a ledger goes do the same account by account (leaveSplits, in questions.ts), in their
- * transaction before the ledger's rows go. Archiving keeps a ledger's rows, so its splits can stay:
- * an archived ledger's share stays at its amount. Returns what it did, by account id.
- */
-export function leaveLedgerSplits(
-  ctx: AppContext,
-  ctxOf: CtxOf,
-  opts: { actor: ActivityActor; shares?: (accountId: number, holderLedgerId: string) => 'drop' | 'detach' },
-): Map<number, LeftSplit[]> {
-  return ctx.q.transaction(() => {
-    const out = new Map<number, LeftSplit[]>()
-    const accountIds = ctx.q.column<number>('SELECT DISTINCT account_id FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL ORDER BY account_id')
-    for (const accountId of accountIds) {
-      const shares = (holder: string) => opts.shares?.(accountId, holder) ?? 'drop'
-      out.set(accountId, leaveSplits(ctx, ctxOf, accountId, { shares, actor: opts.actor }).splits)
-    }
-    return out
-  })
-}
