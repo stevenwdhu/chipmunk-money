@@ -9,8 +9,9 @@ import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useAccounts, useActivity, useActivityActors, useCategories, useSettings } from '@/composables/queries'
+import { useAccounts, useActivity, useActivityActors, useCategories, useLedgers, useSettings } from '@/composables/queries'
 import { useToday } from '@/composables/useToday'
+import { formatDateShort } from '@chipmunk/shared'
 import { money, relativeDay } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -21,6 +22,9 @@ const settings = useSettings()
 const tz = computed(() => settings.data.value?.effectiveTimezone)
 const { byId: accounts } = useAccounts()
 const { byId: categories } = useCategories()
+const ledgers = useLedgers()
+/** A ledger's name by its slug, as the entries about shared accounts name ledgers. */
+const ledgerName = (slug: unknown) => ledgers.all.value.find((l) => l.slug === slug)?.name ?? String(slug)
 
 const ENTITIES = [
   { value: 'transaction', label: 'Transactions' },
@@ -82,7 +86,7 @@ function toggle(id: number) {
   open.value = next
 }
 
-const HIDDEN = new Set(['id', 'createdAt', 'updatedAt', 'payeeKey', 'sort', 'importMapping', 'transactionCount'])
+const HIDDEN = new Set(['id', 'createdAt', 'updatedAt', 'payeeKey', 'sort', 'importMapping', 'transactionCount', 'payloadsCleared'])
 const LABELS: Record<string, string> = {
   accountId: 'Account',
   categoryId: 'Category',
@@ -99,13 +103,66 @@ const LABELS: Record<string, string> = {
   isIncome: 'Income',
   excludeFromTotals: 'Left out of totals',
 }
-const label = (k: string) => LABELS[k] ?? k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase())
+/**
+ * Entries about shared accounts (sharing, a move, a split, a new home, and what a ledger handed over
+ * when it was deleted, erased or archived) have fields of their own.
+ */
+const SHARING_ACTIONS = new Set(['share', 'stop_sharing', 'change_home', 'move', 'split'])
+const aboutSharing = (a: Activity) => SHARING_ACTIONS.has(a.action) || (a.entity === 'account' && a.action === 'update')
+const SHARING_LABELS: Record<string, string> = {
+  ledger: 'Ledger',
+  home: 'Home',
+  opening: 'Opening balance in',
+  to: 'Moved to',
+  from: 'From',
+  ids: 'Transactions',
+  carried: 'Links kept',
+  unlinked: 'Links let go',
+  unpaired: 'Transfers no longer paired',
+  recurringDetached: 'Taken off a recurring item',
+  shares: 'Shares',
+  dropped: 'Share taken back from',
+  detached: 'Made its own transaction',
+  transactionId: 'Transaction',
+  rows: 'Transactions',
+  moved: 'Moved to the home',
+  sentAsDeleted: 'Deleted ones kept for the bank',
+  kept: 'Kept on its own account',
+  account: 'New account',
+  splits: 'Split payments',
+  recurringItems: 'Recurring items',
+  importBatches: 'Imports forgotten',
+  reports: 'Reports changed',
+  recordedBalances: 'Recorded balances changed',
+  balanceToday: 'Balance that day',
+  openingBaseMinor: 'Opening balance moved',
+  bankIds: 'Bank ids kept',
+}
+/** Of those, the ones that name a ledger by its slug, and the counts, which say nothing at zero. */
+const LEDGER_KEYS = new Set(['ledger', 'home', 'opening', 'to', 'from', 'dropped'])
+const COUNTS = new Set(['carried', 'unlinked', 'unpaired', 'recurringDetached', 'moved', 'deleted', 'sentAsDeleted', 'kept', 'recurringItems', 'importBatches', 'reports', 'recordedBalances', 'bankIds', 'rows'])
+const label = (k: string, a: Activity) => (aboutSharing(a) ? SHARING_LABELS[k] : undefined) ?? LABELS[k] ?? k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase())
 
-function show(key: string, v: unknown): string {
+function show(key: string, v: unknown, a: Activity): string {
   if (v === null || v === undefined || v === '') return '—'
   if (key === 'accountId') return accounts.value.get(v as number)?.name ?? `#${v}`
   if (key === 'categoryId') return categories.value.get(v as number)?.name ?? `#${v}`
   if (key.endsWith('Minor') && typeof v === 'number') return money(v)
+  if (aboutSharing(a)) {
+    if (typeof v === 'string' && (LEDGER_KEYS.has(key) || key === 'detached')) return ledgerName(v)
+    if (key === 'ids' && Array.isArray(v)) return v.length > 10 ? `${v.length} transactions` : v.map((id) => `#${id}`).join(', ')
+    if (key === 'transactionId') return `#${v}`
+    // A split's shares: each ledger's slug with its amount.
+    if (key === 'shares' && isRecord(v)) {
+      const shares = Object.entries(v).map(([slug, amount]) => `${ledgerName(slug)} ${typeof amount === 'number' ? money(amount) : amount}`)
+      return shares.length ? shares.join(', ') : '—'
+    }
+    if (key === 'rows' && isRecord(v) && 'movedTo' in v) return `Moved to ${ledgerName(v.movedTo)}`
+    if (key === 'rows' && v === 'deleted') return 'Deleted'
+    if (key === 'account' && isRecord(v) && typeof v.name === 'string') return v.name
+    if (key === 'balanceToday' && isRecord(v) && typeof v.balanceMinor === 'number') return `${money(v.balanceMinor)} on ${formatDateShort(String(v.date))}`
+    if (key === 'splits' && Array.isArray(v)) return String(v.length)
+  }
   if (key === 'tags' && Array.isArray(v)) return v.length ? v.map((t) => `#${(t as { name: string }).name ?? t}`).join(' ') : '—'
   if (key === 'categoryConfidence' && typeof v === 'number') return `${Math.round(v * 100)}%`
   if (typeof v === 'boolean') return v ? 'Yes' : 'No'
@@ -129,17 +186,29 @@ function details(a: Activity): Detail[] {
       heading: `Transaction #${x.id}`,
       rows: Object.keys(x)
         .filter((k) => !HIDDEN.has(k))
-        .map((k) => ({ key: label(k), before: show(k, b[i]?.[k]), after: show(k, x[k]) })),
+        .map((k) => ({ key: label(k, a), before: show(k, b[i]?.[k], a), after: show(k, x[k], a) })),
     }))
   }
+  if (isRecord(before) && isRecord(after) && aboutSharing(a) && Object.keys(after).some((k) => !(k in before))) {
+    // What was and what it led to are different fields here (the ledger it was shared with, then what moved): each on its own line.
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !HIDDEN.has(k))
+    const rows = keys.flatMap((k): Row[] => {
+      if (k in before && k in after) return [{ key: label(k, a), before: show(k, before[k], a), after: show(k, after[k], a) }]
+      const v = k in after ? after[k] : before[k]
+      if (v === null || (v === 0 && COUNTS.has(k))) return []
+      return [{ key: label(k, a), [k in after ? 'after' : 'before']: show(k, v, a) }]
+    })
+    return [{ rows }]
+  }
   if (isRecord(before) && isRecord(after)) {
-    return [{ rows: Object.keys(after).filter((k) => !HIDDEN.has(k)).map((k) => ({ key: label(k), before: show(k, before[k]), after: show(k, after[k]) })) }]
+    return [{ rows: Object.keys(after).filter((k) => !HIDDEN.has(k)).map((k) => ({ key: label(k, a), before: show(k, before[k], a), after: show(k, after[k], a) })) }]
   }
   const only = isRecord(after) ? after : isRecord(before) ? before : null
   if (!only) return []
+  // A count of nothing says nothing: an entry about a move or a sharing change lists many.
   const rows = Object.entries(only)
-    .filter(([k, v]) => !HIDDEN.has(k) && v !== null && v !== '' && !(Array.isArray(v) && !v.length))
-    .map(([k, v]) => ({ key: label(k), [isRecord(after) ? 'after' : 'before']: show(k, v) }))
+    .filter(([k, v]) => !HIDDEN.has(k) && v !== null && v !== '' && !(Array.isArray(v) && !v.length) && !(v === 0 && aboutSharing(a) && COUNTS.has(k)))
+    .map(([k, v]) => ({ key: label(k, a), [isRecord(after) ? 'after' : 'before']: show(k, v, a) }))
   return [{ rows }]
 }
 const hasDetails = (a: Activity) => details(a).some((d) => d.rows.length)
