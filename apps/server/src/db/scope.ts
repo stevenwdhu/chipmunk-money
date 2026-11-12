@@ -16,8 +16,9 @@ export { checkPinned, LedgerScopeError } from './pins'
  * - Write guards: TEMP triggers on every table with ledger data abort a write to a row outside the
  *   write scope, which the handle sets to its ledger around each call. Outside a handle the scope
  *   is empty, so a raw write to ledger data aborts too. They fire for rows changed by the content
- *   triggers and by foreign key actions as well. A move's scope (ledgerMove) is the one that
- *   spans two ledgers, and it lets through only a transaction changing from one to the other.
+ *   triggers and by foreign key actions as well. Two scopes span two ledgers: a move's (ledgerMove),
+ *   which lets through only a transaction changing from one to the other, and a home change's
+ *   (twoLedgers).
  * better-sqlite3 is synchronous, so nothing else runs on the connection while a scope is set.
  */
 
@@ -148,6 +149,16 @@ export function ledgerMaintenance<T>(sqlite: SQLite, ledgerId: string, fn: () =>
 export function ledgerMove<T>(sqlite: SQLite, move: { from: string; to: string }, fn: () => T): T {
   if (move.from === move.to) throw new Error('A move is between two ledgers')
   return withScope(sqlite, { from: move.from, to: move.to }, fn)
+}
+
+/**
+ * Runs fn with two ledgers' rows writable and no pin checker: for changeHome (move-rows.ts), whose
+ * statements write an account and its member rows in both the old home and the new one. The write
+ * guards stay on, so nothing it does reaches a third ledger.
+ */
+export function twoLedgers<T>(sqlite: SQLite, ledgers: { from: string; to: string }, fn: () => T): T {
+  if (ledgers.from === ledgers.to) throw new Error('Two ledgers, not one')
+  return withScope(sqlite, new Set([ledgers.from, ledgers.to]), fn)
 }
 
 type Row = Record<string, unknown>

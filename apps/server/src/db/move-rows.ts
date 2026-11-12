@@ -1,12 +1,12 @@
 import type { CategorySource } from '@chipmunk/shared'
 import type { SQLite } from './client'
-import { ledgerMove, type UnscopedQuery } from './scope'
+import { ledgerMove, twoLedgers, type UnscopedQuery } from './scope'
 
 /**
  * The statements that touch two ledgers at once, which no one ledger's handle can run: a
- * transaction changing ledger (moveRows), and the check that nothing refers across ledgers
- * afterwards (crossLedgerReferences). Services reach them through ctx.accountWide, never by
- * running SQL of their own.
+ * transaction changing ledger (moveRows), a shared account changing home (changeHome), and the
+ * check that nothing refers across ledgers afterwards (crossLedgerReferences). Services reach them
+ * through ctx.accountWide, never by running SQL of their own.
  */
 
 /** What a moved transaction's category is in the ledger it moves to. */
@@ -61,6 +61,85 @@ export function moveRows(sqlite: SQLite, move: RowsMove): number {
         .run({ from: move.from, to: move.to, rows: JSON.stringify(rows) })
       if (changes !== ids.length) throw new Error(`Expected to move ${ids.length} transactions from ${move.from} to ${move.to}, moved ${changes}`)
       return changes
+    })(),
+  )
+}
+
+export interface HomeChange {
+  accountId: number
+  /** The account's home now. */
+  from: string
+  /** The ledger it's shared with that becomes its home. */
+  to: string
+}
+
+/**
+ * Changes a shared account's home, in a write scope of the two ledgers only (twoLedgers), with the
+ * statements in the order the guards of migration 0001 allow:
+ * 1. The account goes to `to`, with the institution, sort and archive of `to`'s member row
+ *    (keep_ledger_accounts lets it, since `to` has one).
+ * 2. `to`'s member row goes (guard_account_ledgers_delete steps aside, `to` being the home now), and
+ *    `from` takes one with what the account had.
+ * 3. The opening ledger stays the ledger it was: `from` when it was the home (null), null when it
+ *    was `to`. Its own UPDATE, after step 2, since guard_accounts_opening_ledger needs `from` to be a
+ *    member by then.
+ * 4. Bank payloads pointing at rows `to` doesn't hold point at none: only the home's rows have them.
+ * Every row stays in the ledger that holds it, and so does every import batch. Each step asserts the
+ * rows it changes. Returns how many payloads let go of their row.
+ */
+export function changeHome(sqlite: SQLite, change: HomeChange): { payloadsCleared: number } {
+  const { accountId, from, to } = change
+  const one = (what: string, changes: number) => {
+    if (changes !== 1) throw new Error(`Changing account ${accountId}'s home from ${from} to ${to}: expected one ${what}, changed ${changes}`)
+  }
+  return twoLedgers(sqlite, change, () =>
+    sqlite.transaction(() => {
+      const was = sqlite
+        .prepare('SELECT institution_id AS institutionId, sort, archived_at AS archivedAt, opening_ledger_id AS openingLedgerId FROM accounts WHERE id = ? AND ledger_id = ?')
+        .get(accountId, from) as { institutionId: number; sort: number; archivedAt: string | null; openingLedgerId: string | null } | undefined
+      if (!was) throw new Error(`Account ${accountId}'s home isn't ${from}`)
+      const params = { accountId, from, to }
+
+      // 1. An opening ledger that names the home itself is the same as null: written as null, so the
+      // guard doesn't take `from` for a ledger that isn't a member yet.
+      one(
+        'account',
+        sqlite
+          .prepare(
+            `UPDATE accounts SET ledger_id = m.ledger_id, institution_id = m.institution_id, sort = m.sort, archived_at = m.archived_at,
+               opening_ledger_id = nullif(accounts.opening_ledger_id, @from), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             FROM account_ledgers m
+             WHERE m.account_id = accounts.id AND m.ledger_id = @to AND accounts.id = @accountId AND accounts.ledger_id = @from`,
+          )
+          .run(params).changes,
+      )
+
+      // 2. The member rows change places.
+      one('member row of the new home', sqlite.prepare('DELETE FROM account_ledgers WHERE ledger_id = @to AND account_id = @accountId').run(params).changes)
+      one(
+        'member row of the old home',
+        sqlite
+          .prepare('INSERT INTO account_ledgers (ledger_id, account_id, institution_id, sort, archived_at) VALUES (@from, @accountId, @institutionId, @sort, @archivedAt)')
+          .run({ ...params, institutionId: was.institutionId, sort: was.sort, archivedAt: was.archivedAt }).changes,
+      )
+
+      // 3. The opening ledger.
+      const opening = was.openingLedgerId ?? from
+      const want = opening === to ? null : opening
+      const now = was.openingLedgerId === from ? null : was.openingLedgerId
+      if (want !== now) {
+        one('opening ledger', sqlite.prepare('UPDATE accounts SET opening_ledger_id = @want WHERE id = @accountId AND ledger_id = @to').run({ ...params, want }).changes)
+      }
+
+      // 4. Payloads.
+      const payloadsCleared = sqlite
+        .prepare(
+          `UPDATE bank_payloads SET transaction_id = NULL
+           WHERE account_id = @accountId AND transaction_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = bank_payloads.transaction_id AND t.ledger_id = @to)`,
+        )
+        .run(params).changes
+      return { payloadsCleared }
     })(),
   )
 }

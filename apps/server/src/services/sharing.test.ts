@@ -135,7 +135,7 @@ describe('sharing an account', () => {
     expect(getAccount(w.family, w.visa).sharing?.isHome).toBe(false)
   })
 
-  it('refuses to take out a ledger that still has something on it, or the home', () => {
+  it('asks where the transactions of a ledger taken out go, and refuses to take out the home', () => {
     const w = sharedWorld()
     expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.personal.ledger.id, TESTER))).toEqual({
       status: 400,
@@ -144,19 +144,18 @@ describe('sharing an account', () => {
     expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER))).toEqual({ status: 400, message: 'Visa isn’t shared with that ledger.' })
 
     const id = w.addTx(w.family, '2026-09-03', -500)
-    expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER))).toEqual({
-      status: 409,
-      message: 'Family still has 1 transaction on Visa, so it can’t stop sharing it yet.',
-    })
+    w.addTx(w.family, '2026-09-04', -600)
+    const ask = (message: string) => expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER))).toEqual({ status: 400, message })
+    ask('Say whether Family’s 2 transactions go home or stay in Family.')
+    w.family.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND id <> ?', id)
+    ask('Say whether Family’s 1 transaction goes home or stays in Family.')
+    // Deleted ones count: they go home too, still deleted.
     w.family.q.run('UPDATE transactions SET deleted_at = ? WHERE id = ? AND ledger_id = @ledger', '2026-10-01T00:00:00Z', id)
-    w.family.q.run(
-      `INSERT INTO recurring_items (ledger_id, name, payee_key, account_id, expected_amount_minor, cadence, anchor_date, next_due_date, status, origin)
-       VALUES (@ledger, 'Phone', 'phone', ?, -3000, 'monthly', '2026-01-01', '2026-10-01', 'active', 'manual')`,
-      w.visa,
-    )
-    expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER))).toEqual({
-      status: 409,
-      message: 'Family still has 1 transaction (1 deleted) and 1 recurring item on Visa, so it can’t stop sharing it yet.',
+    ask('Say whether Family’s 1 deleted transaction goes home or stays in Family.')
+    // Staying, on an account of their own, isn't there yet.
+    expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'keep' }))).toEqual({
+      status: 400,
+      message: 'Keeping Family’s transactions in Family isn’t available yet. Send them home instead.',
     })
     expect(getSharing(w.personal, w.visa).members.map((m) => m.slug)).toEqual(['family'])
   })

@@ -17,7 +17,8 @@ import { transferCategoryId, unpairTransfer } from './transactions'
  * a new transaction: what the old ledger said about it (its links, transfer pair, recurring item,
  * tags and category) is carried over where it fits there and let go where it doesn't, and the new
  * ledger's own matching and categorizing run on it. There's no undo: moving it back is another
- * move, which works it all out again.
+ * move, which works it all out again. A ledger giving up an account sends its deleted rows on it
+ * away as they are, still deleted (sendAsDeleted).
  */
 
 /** The most transactions one move takes. */
@@ -345,6 +346,52 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
   }
   if (!input.dryRun && !input.defer && categorize.length && aiEnabled(toCtx)) void categorizeUncategorized(toCtx, { ids: categorize })
   return result!
+}
+
+/**
+ * Sends transactions to another ledger that has their account as deleted rows: for a ledger that
+ * gives up an account (stopping sharing it, being deleted) and whose rows on it must not come back.
+ * A deleted row keeps its bank id, so the account's sync knows it and doesn't add it again. Unlike a
+ * move, nothing of what the rows were in `from` is carried over or worked out again in `to`.
+ *
+ * In `from`: the live ones are deleted (soft), then every link they have goes (the money in that
+ * stays settles its category), their transfers are unpaired on both sides, their rejected pairs and
+ * tags go, recurring items let go of them (dues and not-payments too) and work out their payments
+ * again, and their bank payloads point at no row. Then one UPDATE (moveRows) puts them in `to` with
+ * no category, recurring item, transfer pair or import batch. Up to MOVE_LIMIT at a time, all of
+ * them held by `from`. Run it inside the caller's transaction. Returns how many went.
+ */
+export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: number[]; to: string }): number {
+  const ids = [...new Set(input.ids)]
+  if (!ids.length) return 0
+  if (ids.length > MOVE_LIMIT) throw new Error(`Send at most ${MOVE_LIMIT} transactions at a time, not ${ids.length}`)
+  const toCtx = ctxOf(input.to)
+  const these = json(ids)
+  return fromCtx.q.transaction(() => {
+    const held = fromCtx.q.column<number>(`SELECT id FROM transactions WHERE ledger_id = @ledger AND ${THESE}`, these)
+    if (held.length !== ids.length) throw new Error(`${fromCtx.ledger.name} holds ${held.length} of the ${ids.length} transactions to send as deleted`)
+    const stamp = fromCtx.now().toISOString()
+    fromCtx.q.run(`UPDATE transactions SET deleted_at = ? WHERE ledger_id = @ledger AND deleted_at IS NULL AND ${THESE}`, stamp, these)
+
+    releaseTransactionLinks(fromCtx, THESE, these)
+    // Both sides of each pair, the other one whichever account or state it's in.
+    fromCtx.q.run(`UPDATE transactions SET transfer_pair_id = NULL WHERE ledger_id = @ledger AND transfer_pair_id IN (SELECT value FROM json_each(?))`, these)
+    fromCtx.q.run(`UPDATE transactions SET transfer_pair_id = NULL WHERE ledger_id = @ledger AND transfer_pair_id IS NOT NULL AND ${THESE}`, these)
+    fromCtx.q.run(`DELETE FROM transfer_rejections WHERE in_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND ${THESE})`, these)
+    fromCtx.q.run(`DELETE FROM transfer_rejections WHERE out_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND ${THESE})`, these)
+    fromCtx.q.run(`DELETE FROM transaction_tags WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND ${THESE})`, these)
+    const detached = detachPayments(fromCtx, ids)
+    fromCtx.q.run(
+      `UPDATE bank_payloads SET transaction_id = NULL
+       WHERE account_id IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND home_ledger_id = @ledger) AND transaction_id IN (SELECT value FROM json_each(?))`,
+      these,
+    )
+
+    const none: MovedCategory = { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false }
+    const sent = fromCtx.accountWide.moveRows({ from: fromCtx.ledger.id, to: toCtx.ledger.id, ids, fields: new Map(ids.map((id) => [id, none])) })
+    for (const item of detached) recalculateRecurring(fromCtx, item.itemId, { removed: true, followAmount: true, wasPaidOff: item.wasPaidOff })
+    return sent
+  })
 }
 
 /**

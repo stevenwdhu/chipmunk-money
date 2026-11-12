@@ -7,8 +7,9 @@ import { ledgerMaintenance, ledgerMove, UnscopedQuery } from './scope'
 /**
  * Migration 0002: a transaction moves to another ledger that has its account, once nothing is
  * attached to it (tx_move_keeps_refs), and moveRows, the one place that moves one, in a write
- * scope that lets through only that change. Raw SQL on a migrated database without the write
- * guards, as in account-ledgers.test.ts, except where the write guards are what's tested.
+ * scope that lets through only that change. And changeHome, a shared account's home changing in
+ * a scope of the two ledgers. Raw SQL on a migrated database without the write guards, as in
+ * account-ledgers.test.ts, except where the write guards are what's tested.
  */
 
 const MOVE = 'a transaction moves only to a ledger that has its account, with nothing still attached'
@@ -218,3 +219,54 @@ describe('moveRows, with the write guards', () => {
     expect(run('UPDATE transactions SET ledger_id = ? WHERE id = ?', p, tx)).toThrow(OUTSIDE)
   })
 })
+
+describe('changeHome', () => {
+  it('swaps the two ledgers’ roles with what each had, keeps the opening ledger, and lets go of payloads on rows the new home doesn’t hold', () => {
+    const w = sharedWorld({ shareWith: ['family', 'trip'] })
+    const { personal, family, trip, storage } = w
+    const { sqlite } = storage
+    const [p, f, t] = [personal.ledger.id, family.ledger.id, trip.ledger.id]
+    const mine = w.addTx(personal, '2026-09-10', -700)
+    personal.q.run("INSERT INTO bank_payloads (account_id, provider, remote_id, transaction_id, event, payload) VALUES (?, 'plaid', 'r1', ?, 'added', '{}')", w.visa, mine)
+    family.q.run('UPDATE account_ledgers SET sort = 5, archived_at = ? WHERE ledger_id = @ledger AND account_id = ?', '2026-10-01T00:00:00Z', w.visa)
+    const account = () =>
+      sqlite.prepare('SELECT ledger_id AS home, opening_ledger_id AS opening, institution_id AS institution, sort, archived_at AS archived FROM accounts WHERE id = ?').get(w.visa)
+    /** Where each ledger that has it keeps it: its institution, sort and archive. */
+    const places = () =>
+      Object.fromEntries(
+        [personal, family, trip].map((c) => [c.ledger.slug, c.q.get('SELECT institution_id AS institution, sort, archived_at AS archived FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', w.visa)]),
+      )
+    const before = places()
+
+    expect(personal.accountWide.changeHome({ accountId: w.visa, from: p, to: f })).toEqual({ payloadsCleared: 1 })
+    expect(account()).toEqual({ home: f, opening: p, ...before.family })
+    expect(places()).toEqual(before)
+    expect(sqlite.prepare('SELECT ledger_id FROM account_ledgers WHERE account_id = ? ORDER BY ledger_id').pluck().all(w.visa)).toEqual([p, t].sort())
+    expect(sqlite.prepare('SELECT transaction_id FROM bank_payloads').pluck().all()).toEqual([null])
+    expect(sqlite.prepare('SELECT ledger_id FROM transactions WHERE id = ?').pluck().get(mine)).toBe(p)
+
+    // Between members, the opening ledger stays; to the opening ledger, it's the home's again (null).
+    personal.accountWide.changeHome({ accountId: w.visa, from: f, to: t })
+    expect(account()).toMatchObject({ home: t, opening: p })
+    personal.accountWide.changeHome({ accountId: w.visa, from: t, to: p })
+    expect(account()).toMatchObject({ home: p, opening: null })
+    // An opening ledger written as the home itself is the same as none.
+    personal.q.run('UPDATE accounts SET opening_ledger_id = ? WHERE ledger_id = @ledger AND id = ?', p, w.visa)
+    personal.accountWide.changeHome({ accountId: w.visa, from: p, to: f })
+    expect(account()).toMatchObject({ home: f, opening: p })
+    expect(places()).toEqual(before)
+    expect(sqlite.pragma('foreign_key_check')).toEqual([])
+    expect(crossLedgerReferences(new UnscopedQuery(sqlite))).toEqual({})
+  })
+
+  it('refuses a ledger that isn’t the home, or one the account isn’t shared with, with nothing changed', () => {
+    const w = sharedWorld()
+    const { personal, family, trip, storage } = w
+    const before = storage.sqlite.prepare('SELECT * FROM accounts').all()
+    expect(() => personal.accountWide.changeHome({ accountId: w.visa, from: family.ledger.id, to: personal.ledger.id })).toThrow('home isn')
+    expect(() => personal.accountWide.changeHome({ accountId: w.visa, from: personal.ledger.id, to: trip.ledger.id })).toThrow('expected one account')
+    expect(() => personal.accountWide.changeHome({ accountId: w.visa, from: personal.ledger.id, to: personal.ledger.id })).toThrow('Two ledgers')
+    expect(storage.sqlite.prepare('SELECT * FROM accounts').all()).toEqual(before)
+  })
+})
+
