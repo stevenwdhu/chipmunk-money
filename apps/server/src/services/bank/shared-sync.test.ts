@@ -430,10 +430,10 @@ describe('the account’s rows read across ledgers', () => {
   /** Uses of the reads that hand out rows, by file, comments left out. */
   function rowReads(source: string): string[] {
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder|switchRows|importedRows)\b/g)].map((m) => m[1]!)
+    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder|switchRows|importedRows|accountTransactions)\b/g)].map((m) => m[1]!)
   }
 
-  it('are read only by the bank code, the CSV import’s duplicate check and findByExternalId', () => {
+  it('are read only by the bank code, the CSV import’s duplicate check, findByExternalId and the all-ledgers list', () => {
     const root = path.join(repoRoot, 'apps/server')
     const found: string[] = []
     const walk = (dir: string) => {
@@ -452,6 +452,7 @@ describe('the account’s rows read across ledgers', () => {
       'src/services/bank/switching.ts: holder',
       'src/services/bank/switching.ts: switchRows',
       'src/services/import.ts: importedRows',
+      'src/services/transactions.ts: accountTransactions',
       'src/services/transactions.ts: holder',
     ])
     expect(rowReads('// ctx.accountWide.bankRows(1)\nconst x = ctx.accountWide . holder(1, "a")')).toEqual(['holder'])

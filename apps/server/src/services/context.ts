@@ -29,11 +29,13 @@ export interface AppContext {
   /**
    * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
    * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, and
-   * the account's rows for two users only: the bank code (bankRows, bankIds, holder, switchRows),
-   * whose rows reach a response only in a switch's review, to a caller allowed in every ledger that
-   * has the account, and a CSV import's duplicate check (importedRows). And the two writes that span two ledgers, bound to this ledger: a move's
-   * UPDATE of this ledger's rows (moveRows), and a home change of an account this ledger is the home
-   * of (changeHome), the other ledger a context from ctxOf.
+   * the account's rows for three users only: the bank code (bankRows, bankIds, holder, switchRows),
+   * whose rows reach a response only in a switch's review, a CSV import's duplicate check
+   * (importedRows), and the all-ledgers list (accountTransactions). The review and the list show
+   * them only to a caller allowed in every ledger that has the account. And the two writes that
+   * span two ledgers, bound to this ledger: a move's UPDATE of this ledger's rows (moveRows), and a
+   * home change of an account this ledger is the home of (changeHome), the other ledger a context
+   * from ctxOf.
    */
   accountWide: AccountWide
   /** Injectable clock for tests. */

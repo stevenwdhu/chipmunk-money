@@ -16,16 +16,18 @@ import {
   type Transaction,
   type TransactionPage,
   type TransactionSpan,
+  type AccountTransactionPage,
 } from '@chipmunk/shared'
 import type { z } from 'zod'
 import type { bulkUpdateSchema, transactionCreateSchema, transactionQuerySchema, transactionUpdateSchema } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest, notFound } from '../lib/http'
-import { getAccount } from './accounts'
+import { currentParts, getAccount } from './accounts'
 import { diff } from './activity'
 import { listScope, positional, textLike } from './filters'
 import { learn, suggestCategory, type SuggestionResult } from './categorize'
 import { upsertTags } from './categories'
+import type { UsableLedgers } from './bank/service'
 import type { AppContext } from './context'
 import { payeeKeyOf, payeeNamerFor } from './payee-namer'
 import { linksFor } from './links'
@@ -476,6 +478,63 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
     items: items.map((t, i) => ({ ...t, balanceAfterMinor: balances?.[i] ?? null })),
     nextCursor: rows.length > q.limit && last ? last.sort_key : null,
   }
+}
+
+/** A row's place in a list (SORT_KEY), as a paging cursor has it. */
+const CURSOR = /^\d{4}-\d{2}-\d{2}\|[012]\|[\d:T-]*\|\d{12}$/
+
+/**
+ * A shared account's transactions in every ledger that has it, one page at a time, newest first as
+ * the register lists them, from `from` to `to`: each with the ledger that holds it (`here` when it's
+ * this one), its category by name, and the account's total balance after it, so the list reads like
+ * the bank's statement and its newest row ends at the account's total. Nothing else of another
+ * ledger's: no ids of its categories, tags, links or recurring items. Only for a shared account
+ * (409 otherwise), and only for a caller allowed in every ledger that has it (`allowed`, null for
+ * every ledger): 403 otherwise. Besides a bank switch's review, the one place another ledger's rows
+ * reach a response.
+ */
+export function listAccountTransactions(
+  ctx: AppContext,
+  accountId: number,
+  q: { from?: string; to?: string; limit?: number; cursor?: string },
+  allowed: UsableLedgers,
+): AccountTransactionPage {
+  const { name } = getAccount(ctx, accountId)
+  if (!ctx.accountWide.isShared(accountId)) throw new HTTPException(409, { message: `${name} isn’t shared, so all its transactions are in this ledger.` })
+  if (allowed && !ctx.accountWide.ledgers(accountId).every((l) => allowed.includes(l.ledgerId))) {
+    throw new HTTPException(403, { message: `This key can’t see every ledger that has ${name}` })
+  }
+  const limit = q.limit ?? 100
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) badRequest('Ask for 1 to 500 transactions at a time')
+  if (q.cursor && !CURSOR.test(q.cursor)) badRequest('Invalid cursor')
+  const rows = ctx.accountWide.accountTransactions(accountId, { from: q.from, to: q.to, cursor: q.cursor, limit: limit + 1 })
+  const page = rows.slice(0, limit)
+  const first = page[0]
+  // The account's total less everything listed above the first row (newer, or later the same day), in every ledger.
+  let after = first ? currentParts(ctx, accountId).totalMinor - ctx.accountWide.sumAfter(accountId, first.sortKey) : 0
+  const named = payeeNamerFor(ctx)
+  const items = page.map((r) => {
+    const balanceAfterMinor = after
+    after -= r.amountMinor
+    return {
+      id: r.id,
+      ledger: { slug: r.ledgerSlug, name: r.ledgerName },
+      here: r.ledgerId === ctx.ledger.id,
+      date: r.date,
+      datetime: r.datetime,
+      amountMinor: r.amountMinor,
+      currency: r.currency,
+      payee: r.payee,
+      payeeName: named(r.payee).name,
+      name: r.name,
+      category: r.category,
+      notes: r.notes,
+      status: r.status,
+      origin: r.origin,
+      balanceAfterMinor,
+    }
+  })
+  return { items, nextCursor: rows.length > limit && page.length ? page[page.length - 1]!.sortKey : null }
 }
 
 /**

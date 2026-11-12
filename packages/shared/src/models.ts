@@ -378,6 +378,36 @@ export const transactionPageSchema = z
   .meta({ id: 'TransactionPage' })
 export type TransactionPage = z.output<typeof transactionPageSchema>
 
+export const accountTransactionSchema = z
+  .object({
+    id,
+    ledger: ledgerRef.describe('The ledger that holds it. Only that ledger can edit it or move it.'),
+    here: z.boolean().describe('This ledger holds it.'),
+    date,
+    datetime: z.string().nullable().describe('When it happened, when known: local time like `date`, on the same day (YYYY-MM-DDTHH:MM:SS).'),
+    amountMinor: minor,
+    currency: z.string(),
+    payee: z.string().describe('As the bank or file sent it (or as it was entered), never tidied.'),
+    payeeName: z.string().describe('What its payee is called: by your payee name rules, or AI tidying, or as sent.'),
+    name: z.string().nullable().describe('What it is: its recurring item’s name when it’s a payment of one that has a name, otherwise its own.'),
+    category: z.string().nullable().describe('Its category’s name in the ledger that holds it. Null when it has none.'),
+    notes: z.string().nullable(),
+    status: z.enum(['cleared', 'pending']),
+    origin: z.enum(['manual', 'import', 'sync']),
+    balanceAfterMinor: minor.describe('The account’s total balance after this transaction, every ledger’s rows counted, like a bank statement’s running balance.'),
+  })
+  .meta({ id: 'AccountTransaction' })
+  .describe('A transaction of a shared account, in whichever ledger holds it.')
+export type AccountTransaction = z.output<typeof accountTransactionSchema>
+
+export const accountTransactionPageSchema = z
+  .object({
+    items: z.array(accountTransactionSchema),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` to get the next page. Null on the last page.'),
+  })
+  .meta({ id: 'AccountTransactionPage' })
+export type AccountTransactionPage = z.output<typeof accountTransactionPageSchema>
+
 export const linkCandidateSchema = z
   .object({
     transaction: transactionSchema,

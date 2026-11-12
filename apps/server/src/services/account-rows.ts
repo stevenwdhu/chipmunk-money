@@ -10,12 +10,14 @@ import type { AppContext } from './context'
  * account's rows are held by its home and by the ledgers it's shared with. Everything that reads an
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
  * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and the
- * account's rows, each with the ledger that holds it, for two users only. The bank code: sync
+ * account's rows, each with the ledger that holds it, for three users only. The bank code: sync
  * matches against them and writes each row through its holder's context (bankRows, bankIds,
  * holder), and a switch pairs them the same way (switchRows), its review showing them only to a
- * caller allowed in every ledger that has the account. And a CSV import's duplicate check
- * (importedRows), whose preview names no other ledger's row. Other than that review, those never
- * reach a response.
+ * caller allowed in every ledger that has the account. A CSV import's duplicate check
+ * (importedRows), whose preview names no other ledger's row. And the all-ledgers list
+ * (accountTransactions), for a caller allowed in every ledger that has the account, which shows
+ * names and amounts but no other ledger's category, tag or link ids. Other than that list and the
+ * switch's review, those never reach a response.
  *
  * The reads a bank or a CSV matches against also cover the rows a ledger kept when it stopped
  * sharing the account: the rows of its split-off accounts (accounts.split_from_id) that were there
@@ -160,6 +162,30 @@ export interface SplitOff {
 }
 
 /**
+ * A row of a shared account as the all-ledgers list shows it, in whichever ledger holds it: its
+ * category by name only, and no ids of what it's linked to there. For listAccountTransactions only.
+ */
+export interface AccountTransactionRow {
+  id: number
+  ledgerId: string
+  ledgerSlug: string
+  ledgerName: string
+  date: ISODate
+  datetime: string | null
+  amountMinor: number
+  currency: string
+  payee: string
+  /** Its own name, or its recurring item's when it's a payment of one with a name. */
+  name: string | null
+  category: string | null
+  notes: string | null
+  status: 'cleared' | 'pending'
+  origin: 'manual' | 'import' | 'sync'
+  /** Its place in the list, as a register's (the paging cursor). */
+  sortKey: string
+}
+
+/**
  * The rows a bank or a CSV matches against, as `t`: the account's own (named @accountId), and the
  * frozen ones, which a split-off account had when it was made. A split-off account is made with
  * split_from_id naming the account, and takes the leaving ledger's rows in the same transaction, so
@@ -170,6 +196,15 @@ const MATCHED = `(t.account_id = @accountId
 
 /** Of MATCHED, whether `t` is a frozen row (1) or the account's own (0). */
 const FROZEN = '(t.account_id <> @accountId)'
+
+/**
+ * A shared account's place for each row in its all-ledgers list, as one string (the register's,
+ * transactions.ts): its date; then, that day, money in without a time of day, then ones with a time
+ * in time order, then money out without one (none for a credit card, which keeps the order they
+ * were added); then the order they were added.
+ */
+const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN t.amount_minor < 0 AND a.type <> 'credit' THEN 2 ELSE 0 END
+  || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
 
 /** The module's one unscoped call: every read in READS runs through it. */
 function everyLedger<T>(sqlite: SQLite, fn: (db: UnscopedQuery) => T): T {
@@ -382,6 +417,40 @@ const READS = {
   /** The accounts split off from this one (accounts.split_from_id), each in the ledger that kept its rows, oldest first. */
   splitOffs(db: UnscopedQuery, accountId: number): SplitOff[] {
     return db.all<SplitOff>('SELECT s.id, s.name, s.ledger_id AS ledgerId FROM accounts s WHERE s.split_from_id = ? ORDER BY s.id', accountId)
+  },
+
+  /**
+   * One page of a shared account's rows in every ledger, live ones only (not the frozen ones), newest
+   * first as a register lists them (SORT_KEY), from `from` to `to` and after `cursor` (a row's sort
+   * key): `limit` of them. Each with the ledger that holds it, its category by name and nothing else
+   * of that ledger's. For listAccountTransactions only.
+   */
+  accountTransactions(
+    db: UnscopedQuery,
+    accountId: number,
+    opts: { from?: ISODate; to?: ISODate; cursor?: string; limit: number },
+  ): AccountTransactionRow[] {
+    // Split rows (a payment's shares and what its holder gave) are to be left out here, and the
+    // payment to carry its shares instead.
+    return db.all<AccountTransactionRow>(
+      `SELECT t.id, t.ledger_id AS ledgerId, l.slug AS ledgerSlug, l.name AS ledgerName, t.date, t.datetime, t.amount_minor AS amountMinor,
+         t.currency, t.payee, coalesce((SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id), t.name) AS name,
+         (SELECT c.name FROM categories c WHERE c.id = t.category_id) AS category, t.notes, t.status, t.origin, ${SORT_KEY} AS sortKey
+       FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN ledgers l ON l.id = t.ledger_id
+       WHERE t.account_id = @accountId AND t.deleted_at IS NULL
+         AND (@from IS NULL OR t.date >= @from) AND (@to IS NULL OR t.date <= @to) AND (@cursor IS NULL OR ${SORT_KEY} < @cursor)
+       ORDER BY ${SORT_KEY} DESC LIMIT @limit`,
+      { accountId, from: opts.from ?? null, to: opts.to ?? null, cursor: opts.cursor ?? null, limit: opts.limit },
+    )
+  },
+
+  /** The sum of a shared account's live rows in every ledger listed above `sortKey` in its all-ledgers list (SORT_KEY): newer, or later the same day. */
+  sumAfter(db: UnscopedQuery, accountId: number, sortKey: string): number {
+    return db.pluck<number>(
+      `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t JOIN accounts a ON a.id = t.account_id
+       WHERE t.account_id = @accountId AND t.deleted_at IS NULL AND ${SORT_KEY} > @sortKey`,
+      { accountId, sortKey },
+    )!
   },
 }
 
