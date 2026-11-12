@@ -166,6 +166,13 @@ export class ToolContext {
 
 // Views: what tools return. Names next to ids, amounts in cents and formatted. -------------
 
+/** A ledger's share of a split payment. */
+export const shareView = z.object({
+  ledger: z.string().describe('The ledger it’s given to, by slug.'),
+  amountMinor: z.number().describe('Cents, above zero: what that ledger counts as paid onto the account.'),
+  amount: z.string(),
+})
+
 export const transactionView = z.object({
   id: z.number(),
   date: z.string(),
@@ -190,8 +197,31 @@ export const transactionView = z.object({
       'Refunds (from the merchant) and paybacks (someone’s share of a bill you paid). For money in: the purchases or bills it pays back, and how much of it goes to each. Linked in full to one, it has that one’s category. For money out: what paid it back.',
     ),
   externalId: z.string().nullable(),
+  split: z
+    .object({
+      part: z
+        .enum(['payment', 'given', 'share'])
+        .describe(
+          'payment: a card payment on a shared account, split between the ledgers that have it. given: the row beside it, for what the other ledgers got. share: this ledger’s share of a payment another ledger holds.',
+        ),
+      keptMinor: z.number().nullable().describe('For the payment: what this ledger keeps of it, in cents. Null otherwise.'),
+      shares: z.array(shareView).describe('What each other ledger gets. Empty for a share.'),
+      from: z.string().nullable().describe('For a share: the ledger that holds the payment, by slug. Null otherwise.'),
+    })
+    .nullable()
+    .describe('How it’s split between the ledgers that share its account (split_transaction). Null when it isn’t part of a split.'),
 })
 export type TransactionView = z.output<typeof transactionView>
+
+export const viewShares = (shares: Array<{ ledger: { slug: string }; amountMinor: number }>, currency?: string) =>
+  shares.map((s) => ({ ledger: s.ledger.slug, amountMinor: s.amountMinor, amount: money(s.amountMinor, currency) }))
+
+function viewSplit(t: Transaction): TransactionView['split'] {
+  const s = t.split
+  if (!s) return null
+  if (s.part === 'share') return { part: s.part, keptMinor: null, shares: [], from: s.from.slug }
+  return { part: s.part, keptMinor: s.part === 'payment' ? s.keptMinor : null, shares: viewShares(s.shares, t.currency), from: null }
+}
 
 export function viewTransaction(t: Transaction, lk: Lookups): TransactionView {
   return {
@@ -214,7 +244,17 @@ export function viewTransaction(t: Transaction, lk: Lookups): TransactionView {
     isTransfer: t.transferPairId !== null,
     links: t.links.map((l) => ({ kind: l.kind, transactionId: l.transactionId, amount: money(l.amountMinor, t.currency) })),
     externalId: t.externalId,
+    split: viewSplit(t),
   }
+}
+
+/** "split: Family $80.00, keeps $20.00", "share of a Personal payment": a split row's part, in words. */
+function splitWords(t: TransactionView): string {
+  const s = t.split
+  if (!s) return ''
+  if (s.part === 'share') return `share of a payment in ${s.from}`
+  const shares = s.shares.map((x) => `${x.ledger} ${x.amount}`).join(', ')
+  return s.part === 'payment' ? `split: ${shares}, keeps ${money(s.keptMinor ?? 0)}` : `given to ${shares}`
 }
 
 /** One line per transaction for the text part of a result. */
@@ -225,6 +265,7 @@ export function transactionLine(t: TransactionView): string {
     t.tags.length ? t.tags.map((x) => `#${x}`).join(' ') : '',
     t.notes ? `“${t.notes}”` : '',
     t.pending ? 'pending' : '',
+    splitWords(t),
   ]
     .filter(Boolean)
     .join(' · ')
@@ -241,6 +282,18 @@ export const accountView = z.object({
   institution: z.string().describe('Where it’s held, e.g. a bank.'),
   archived: z.boolean(),
   transactionCount: z.number(),
+  sharing: z
+    .object({
+      home: z.string().describe('The ledger new transactions from sync and CSV go to, and where the account’s settings and sharing are changed, by slug.'),
+      isHome: z.boolean().describe('Whether this ledger is the home.'),
+      ledgers: z.array(z.string()).describe('Every ledger that has the account, by slug, the home first.'),
+      totalBalanceMinor: z.number().describe('The account’s balance across every ledger that has it, in cents: for a synced account, the bank’s.'),
+      totalBalance: z.string(),
+    })
+    .nullable()
+    .describe(
+      'How the account is shared between ledgers (share_account), or null when only this ledger has it. For a shared account `balance` and `transactionCount` are this ledger’s part: what it holds of the account.',
+    ),
 })
 
 export function viewAccount(a: Account): z.output<typeof accountView> {
@@ -254,7 +307,21 @@ export function viewAccount(a: Account): z.output<typeof accountView> {
     institution: a.institution,
     archived: a.archived,
     transactionCount: a.transactionCount,
+    sharing: a.sharing && {
+      home: a.sharing.home.slug,
+      isHome: a.sharing.isHome,
+      ledgers: a.sharing.ledgers.map((l) => l.slug),
+      totalBalanceMinor: a.sharing.totalBalanceMinor,
+      totalBalance: money(a.sharing.totalBalanceMinor, a.currency),
+    },
   }
+}
+
+/** "#3 Visa at TD (credit): -$200.00 of -$500.00 · shared with family, its home is personal". `here` is the ledger it's listed in. */
+export function accountLine(a: z.output<typeof accountView>, here: string): string {
+  const s = a.sharing
+  const shared = s ? ` of ${s.totalBalance} · shared with ${s.ledgers.filter((l) => l !== here).join(', ')}, its home is ${s.isHome ? 'this ledger' : s.home}` : ''
+  return `#${a.id} ${a.name} at ${a.institution} (${a.type}${a.archived ? ', archived' : ''}): ${a.balance}${shared}`
 }
 
 export const categoryView = z.object({

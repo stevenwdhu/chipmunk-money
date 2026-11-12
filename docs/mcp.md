@@ -132,12 +132,25 @@ No arguments.
 
 #### `list_accounts`
 
-**List accounts.** Accounts with current balances. Credit cards and loans are liabilities (their balance is negative when you owe).
+**List accounts.** Accounts with current balances. Credit cards and loans are liabilities (their balance is negative when you owe). An account shared with other ledgers shows its home, the ledgers that have it, this ledger’s part as its balance, and the account’s total.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
 | `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
 | `includeArchived` | boolean | optional | Default: `false`. |
+
+#### `list_account_transactions`
+
+**List a shared account’s transactions in every ledger.** A shared account’s transactions in whichever ledger holds them, newest first, each with the account’s total balance after it, like the bank’s statement. A split payment is listed once, with its shares. Only for a shared account, and a key that can use every ledger that has it. For one ledger’s own, use search_transactions with `account`. Pass `cursor` from the previous result for more.
+
+| Argument | Type | | What it is |
+|---|---|---|---|
+| `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
+| `account` | string or number | required |  |
+| `from` | string | optional |  |
+| `to` | string | optional |  |
+| `limit` | number | optional | Default: `100`. |
+| `cursor` | string | optional |  |
 
 #### `list_categories`
 
@@ -341,6 +354,28 @@ No arguments.
 |---|---|---|---|
 | `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
 | `ids` | number[] | required |  |
+| `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
+
+#### `move_transactions`
+
+**Move transactions to another ledger.** Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link or transfer pair moves only when both its sides do, and is let go otherwise. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.
+
+| Argument | Type | | What it is |
+|---|---|---|---|
+| `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
+| `ids` | number[] | required | Transactions this ledger holds, on accounts shared with `to`. |
+| `to` | string | required | The ledger they go to (slug or name): another ledger that has their account. |
+| `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
+
+#### `split_transaction`
+
+**Split a card payment between ledgers.** Splits a card payment on a shared account between the ledgers that have it: give one amount for each ledger other than the account’s home, and the home keeps the rest. Each ledger counts its share as a card payment, not as spending or income. Sending the shares again changes the split, and an empty `shares` undoes it. Needs a key that can use the ledger that holds the payment and every ledger with a share.
+
+| Argument | Type | | What it is |
+|---|---|---|---|
+| `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
+| `id` | number | required | The payment: money in on a shared credit card, in a category left out of totals, held by this ledger. |
+| `shares` | object[] | required | One `{ ledger, amount }` for each ledger other than the home that gets part of it: the ledger by slug or name, the amount in dollars, above zero. Together they can’t be more than the payment. When the ledger that holds the payment isn’t the home, its own amount is what it keeps. Empty: the split is undone. |
 | `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
 
 #### `create_account`
@@ -551,12 +586,26 @@ No arguments.
 | `color` | string | optional |  |
 | `start` | "empty" \\| "demo" | optional | Default: `"empty"`. |
 
+#### `share_account`
+
+**Share an account with other ledgers.** Sets which ledgers have a credit card, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the card, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the card needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after.
+
+| Argument | Type | | What it is |
+|---|---|---|---|
+| `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
+| `account` | string or number | required |  |
+| `ledgers` | string[] | required | Every ledger that will have the account (slugs or names), its home included. |
+| `home` | string | optional | The ledger that will be its home (slug or name): one of `ledgers`. The current home when left out. |
+| `rows` | object | optional | For each ledger taken out that holds transactions on the account, by slug or name: "home" moves them to the home, "keep" keeps them in that ledger on a new manual account of its own (its pending ones from the bank still go home). |
+| `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
+
 #### `archive_ledger`
 
-**Archive a ledger.** Hides a ledger from the app’s switcher while keeping all its data. It can be restored in App settings → Ledgers.
+**Archive a ledger.** Hides a ledger from the app’s switcher while keeping all its data. It can be restored in App settings → Ledgers. A ledger that is a shared account’s home is asked which ledger becomes the home first: the tool then answers with `questions` and archives nothing. Call it again with `answers`, each question’s `id` with the `value` of the option chosen. When `blockers` isn’t empty it can’t be archived, whatever the answers.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
 | `ledger` | string | required | Ledger slug or name. |
+| `answers` | object | optional | The answers to the questions it asked: each question’s `id` with the chosen option’s `value`. |
 
 <!-- reference:end -->

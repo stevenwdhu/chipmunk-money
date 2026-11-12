@@ -32,6 +32,8 @@ import {
   type ReportSpec,
   type TransactionSpan,
   type Account,
+  type AccountSharing,
+  type AccountTransactionPage,
   type ApiScope,
   type BulkResult,
   type Category,
@@ -43,13 +45,17 @@ import {
   type Institution,
   type Label,
   type Ledger,
+  type LedgerQuestions,
   type MonthSummary,
+  type MoveResult,
   type MonthTotals,
   type PayeeChoice,
   type NetWorthReport,
   type PayeeTotal,
   type RecurringItem,
   type RecurringPaymentCandidate,
+  type SharingChange,
+  type SplitResult,
   type SyncResult,
   type Tag,
   type TagWithCount,
@@ -58,17 +64,21 @@ import {
   type TrendReport,
   type UpcomingPayment,
 } from '@chipmunk/shared'
+import { ApiError } from './api'
 import {
+  accountLine,
   accountView,
   categoryView,
   ledgerView,
   money,
+  shareView,
   toMinor,
   ToolError,
   transactionLine,
   transactionView,
   viewAccount,
   viewCategory,
+  viewShares,
   viewTransaction,
   type Lookups,
   type ToolContext,
@@ -786,13 +796,135 @@ export const TOOLS: ToolDef[] = [
       return { text, data: { ledger: l.slug, dryRun: args.dryRun, deleted } }
     },
   }),
+  tool({
+    name: 'move_transactions',
+    scope: 'write',
+    title: 'Move transactions to another ledger',
+    description:
+      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link or transfer pair moves only when both its sides do, and is let go otherwise. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.',
+    input: z.object({
+      ledger,
+      ids: z.array(z.number().int()).min(1).max(1000).describe('Transactions this ledger holds, on accounts shared with `to`.'),
+      to: z.string().min(1).describe('The ledger they go to (slug or name): another ledger that has their account.'),
+      dryRun,
+    }),
+    output: z.object({
+      ledger: z.string(),
+      to: z.string(),
+      dryRun: z.boolean(),
+      moved: z.number(),
+      carried: z.number().describe('Links kept, because both their sides moved (a purchase with its refund).'),
+      unlinked: z.number().describe('Links let go, because one side moved and the other stayed.'),
+      unpaired: z.number().describe('Transfers no longer paired with their other side, which stayed.'),
+      recategorized: z.number().describe('Moved transactions with another category there, or none.'),
+      recurringDetached: z.number().describe('Moved transactions taken off a recurring item.'),
+      tagsCreated: z.number().describe('Tags the other ledger didn’t have, added for them.'),
+      matched: z
+        .object({ refunds: z.number(), transfers: z.number(), payments: z.number(), cleared: z.number() })
+        .describe('What the other ledger’s matching found for them afterwards.'),
+      partlyLinked: z
+        .array(z.object({ id: z.number(), ledger: z.string(), payee: z.string(), left: z.string() }))
+        .describe('Money in that loses some of its links: `left` of it is no longer paid back, and counts as income in the ledger that holds it.'),
+    }),
+    annotations: WRITE,
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const to = await ctx.ledger(args.to)
+      const r = await ctx.api.post<MoveResult>(`/ledgers/${l.slug}/transactions/move`, { ids: args.ids, to: to.slug }, { dryRun: args.dryRun })
+      const partlyLinked = r.dropped.partlyLinked.map((p) => ({ id: p.id, ledger: p.ledger, payee: p.payee, left: money(p.leftMinor) }))
+      const found = [
+        r.matched.refunds ? plural(r.matched.refunds, 'refund') : '',
+        r.matched.transfers ? plural(r.matched.transfers, 'transfer') : '',
+        r.matched.payments ? plural(r.matched.payments, 'recurring payment') : '',
+        r.matched.cleared ? `${r.matched.cleared} cleared` : '',
+      ].filter(Boolean)
+      const text = [
+        `${args.dryRun ? 'Would move' : 'Moved'} ${plural(r.moved, 'transaction')} from ${l.name} to ${to.name}.`,
+        r.carried ? `${plural(r.carried, 'link')} kept (both sides moved).` : '',
+        r.unlinked ? `${plural(r.unlinked, 'link')} let go (one side stayed).` : '',
+        r.unpaired ? `${plural(r.unpaired, 'transfer')} no longer paired with ${r.unpaired === 1 ? 'its' : 'their'} other side.` : '',
+        r.recurringDetached ? `${r.recurringDetached} taken off a recurring item.` : '',
+        r.recategorized ? `${r.recategorized} with another category in ${to.name}, or none.` : '',
+        r.tagsCreated ? `${plural(r.tagsCreated, 'tag')} added in ${to.name}.` : '',
+        found.length ? `Matched in ${to.name}: ${found.join(', ')}.` : '',
+        ...partlyLinked.map((p) => `#${p.id} ${p.payee} in ${p.ledger}: ${p.left} of it is no longer paid back.`),
+      ]
+        .filter(Boolean)
+        .join('\n')
+      return {
+        text,
+        data: {
+          ledger: l.slug,
+          to: to.slug,
+          dryRun: args.dryRun,
+          moved: r.moved,
+          carried: r.carried,
+          unlinked: r.unlinked,
+          unpaired: r.unpaired,
+          recategorized: r.recategorized,
+          recurringDetached: r.recurringDetached,
+          tagsCreated: r.tagsCreated,
+          matched: r.matched,
+          partlyLinked,
+        },
+      }
+    },
+  }),
+  tool({
+    name: 'split_transaction',
+    scope: 'write',
+    title: 'Split a card payment between ledgers',
+    description:
+      'Splits a card payment on a shared account between the ledgers that have it: give one amount for each ledger other than the account’s home, and the home keeps the rest. Each ledger counts its share as a card payment, not as spending or income. Sending the shares again changes the split, and an empty `shares` undoes it. Needs a key that can use the ledger that holds the payment and every ledger with a share.',
+    input: z.object({
+      ledger,
+      id: z.number().int().describe('The payment: money in on a shared credit card, in a category left out of totals, held by this ledger.'),
+      shares: z
+        .array(
+          z.object({
+            ledger: z.string().min(1).describe('A ledger that has the account (slug or name), not its home.'),
+            amount: z.number().positive().describe('In dollars, above zero: what that ledger counts as paid onto the account.'),
+          }),
+        )
+        .max(100)
+        .describe(
+          'One `{ ledger, amount }` for each ledger other than the home that gets part of it: the ledger by slug or name, the amount in dollars, above zero. Together they can’t be more than the payment. When the ledger that holds the payment isn’t the home, its own amount is what it keeps. Empty: the split is undone.',
+        ),
+      dryRun,
+    }),
+    output: z.object({
+      ledger: z.string(),
+      dryRun: z.boolean(),
+      transaction: transactionView,
+      keptMinor: z.number().describe('What the ledger that holds the payment keeps, in cents.'),
+      kept: z.string(),
+      shares: z.array(shareView).describe('Each other ledger’s share. Empty when the split was undone.'),
+    }),
+    annotations: { ...WRITE, idempotentHint: true },
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const lk = await ctx.lookups(l)
+      const shares: Array<{ ledger: string; amountMinor: number }> = []
+      for (const s of args.shares) shares.push({ ledger: (await ctx.ledger(s.ledger)).slug, amountMinor: toMinor(s.amount) })
+      const r = await ctx.api.put<SplitResult>(`/ledgers/${l.slug}/transactions/${args.id}/split`, { shares }, { dryRun: args.dryRun })
+      const v = viewTransaction(r.transaction, lk)
+      const given = viewShares(r.shares, r.transaction.currency)
+      const kept = money(r.keptMinor, r.transaction.currency)
+      const what = `#${v.id} ${v.date} ${v.payee} ${v.amount}`
+      const text = given.length
+        ? `${args.dryRun ? 'Would split' : 'Split'} ${what}: ${given.map((s) => `${s.ledger} ${s.amount}`).join(', ')}, and ${l.name} keeps ${kept}.`
+        : `${args.dryRun ? 'Would undo' : 'Undid'} the split of ${what}.`
+      return { text, data: { ledger: l.slug, dryRun: args.dryRun, transaction: v, keptMinor: r.keptMinor, kept, shares: given } }
+    },
+  }),
 
   // Accounts --------------------------------------------------------------------
   tool({
     name: 'list_accounts',
     scope: 'read',
     title: 'List accounts',
-    description: 'Accounts with current balances. Credit cards and loans are liabilities (their balance is negative when you owe).',
+    description:
+      'Accounts with current balances. Credit cards and loans are liabilities (their balance is negative when you owe). An account shared with other ledgers shows its home, the ledgers that have it, this ledger’s part as its balance, and the account’s total.',
     input: z.object({ ledger, includeArchived: z.boolean().default(false) }),
     output: z.object({ ledger: z.string(), accounts: z.array(accountView) }),
     annotations: READ,
@@ -800,9 +932,95 @@ export const TOOLS: ToolDef[] = [
       const l = await ctx.ledger(args.ledger)
       const accounts = (await ctx.api.get<Account[]>(`/ledgers/${l.slug}/accounts`)).filter((a) => args.includeArchived || !a.archived).map(viewAccount)
       const text = accounts.length
-        ? accounts.map((a) => `#${a.id} ${a.name} at ${a.institution} (${a.type}${a.archived ? ', archived' : ''}): ${a.balance}`).join('\n')
+        ? accounts.map((a) => accountLine(a, l.slug)).join('\n')
         : `${l.name} has no accounts yet.`
       return { text, data: { ledger: l.slug, accounts } }
+    },
+  }),
+  tool({
+    name: 'list_account_transactions',
+    scope: 'read',
+    title: 'List a shared account’s transactions in every ledger',
+    description:
+      'A shared account’s transactions in whichever ledger holds them, newest first, each with the account’s total balance after it, like the bank’s statement. A split payment is listed once, with its shares. Only for a shared account, and a key that can use every ledger that has it. For one ledger’s own, use search_transactions with `account`. Pass `cursor` from the previous result for more.',
+    input: z.object({
+      ledger,
+      account: nameOrId,
+      from: date.optional(),
+      to: date.optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      cursor: z.string().optional(),
+    }),
+    output: z.object({
+      ledger: z.string(),
+      account: z.string(),
+      accountId: z.number(),
+      transactions: z.array(
+        z.object({
+          id: z.number(),
+          ledger: z.string().describe('The ledger that holds it, by slug. Only that ledger can change it or move it.'),
+          here: z.boolean().describe('This ledger holds it.'),
+          date: z.string(),
+          time: z.string().nullable(),
+          payee: z.string(),
+          name: z.string().nullable(),
+          amountMinor: z.number().describe('Cents. Negative is money out.'),
+          amount: z.string(),
+          category: z.string().nullable().describe('Its category’s name in the ledger that holds it.'),
+          notes: z.string().nullable(),
+          pending: z.boolean(),
+          split: z
+            .object({ keptMinor: z.number(), kept: z.string(), shares: z.array(shareView) })
+            .nullable()
+            .describe('For a split payment: what the ledger that holds it keeps, and each other ledger’s share.'),
+          balanceAfterMinor: z.number().describe('The account’s total balance after it, every ledger’s transactions counted, in cents.'),
+          balanceAfter: z.string(),
+        }),
+      ),
+      nextCursor: z.string().nullable(),
+    }),
+    annotations: READ,
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const account = (await ctx.lookups(l)).account(args.account)
+      const page = await ctx.api.get<AccountTransactionPage>(`/ledgers/${l.slug}/accounts/${account.id}/transactions`, {
+        from: args.from,
+        to: args.to,
+        limit: args.limit,
+        cursor: args.cursor,
+      })
+      const transactions = page.items.map((t) => ({
+        id: t.id,
+        ledger: t.ledger.slug,
+        here: t.here,
+        date: t.date,
+        time: t.datetime?.slice(11, 16) ?? null,
+        payee: t.payeeName,
+        name: t.name,
+        amountMinor: t.amountMinor,
+        amount: money(t.amountMinor, t.currency),
+        category: t.category,
+        notes: t.notes,
+        pending: t.status === 'pending',
+        split: t.split && { keptMinor: t.split.keptMinor, kept: money(t.split.keptMinor, t.currency), shares: viewShares(t.split.shares, t.currency) },
+        balanceAfterMinor: t.balanceAfterMinor,
+        balanceAfter: money(t.balanceAfterMinor, t.currency),
+      }))
+      const line = (t: (typeof transactions)[number]) =>
+        [
+          `#${t.id} ${t.date}${t.time ? ` ${t.time}` : ''} ${t.payee}${t.name ? ` (${t.name})` : ''} ${t.amount}`,
+          t.ledger,
+          t.category ?? 'uncategorized',
+          t.split ? `split: ${t.split.shares.map((s) => `${s.ledger} ${s.amount}`).join(', ')}, keeps ${t.split.kept}` : '',
+          t.pending ? 'pending' : '',
+          `balance ${t.balanceAfter}`,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      const text = transactions.length
+        ? [`${plural(transactions.length, 'transaction')} on ${account.name} in every ledger${page.nextCursor ? ` (more: cursor "${page.nextCursor}")` : ''}:`, ...transactions.map(line)].join('\n')
+        : `No transactions on ${account.name} match.`
+      return { text, data: { ledger: l.slug, account: account.name, accountId: account.id, transactions, nextCursor: page.nextCursor } }
     },
   }),
   tool({
@@ -1801,19 +2019,161 @@ export const TOOLS: ToolDef[] = [
     },
   }),
   tool({
+    name: 'share_account',
+    scope: 'admin',
+    title: 'Share an account with other ledgers',
+    description:
+      'Sets which ledgers have a credit card, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the card, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the card needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after.',
+    input: z.object({
+      ledger,
+      account: nameOrId,
+      ledgers: z.array(z.string().min(1)).min(1).max(100).describe('Every ledger that will have the account (slugs or names), its home included.'),
+      home: z.string().min(1).optional().describe('The ledger that will be its home (slug or name): one of `ledgers`. The current home when left out.'),
+      rows: z
+        .record(z.string(), z.enum(['home', 'keep']))
+        .optional()
+        .describe(
+          'For each ledger taken out that holds transactions on the account, by slug or name: "home" moves them to the home, "keep" keeps them in that ledger on a new manual account of its own (its pending ones from the bank still go home).',
+        ),
+      dryRun,
+    }),
+    output: z.object({
+      ledger: z.string(),
+      dryRun: z.boolean(),
+      account: z.string(),
+      accountId: z.number(),
+      home: z.string().describe('Its home afterwards, by slug.'),
+      ledgers: z
+        .array(z.object({ ledger: z.string(), name: z.string(), transactionCount: z.number(), balanceMinor: z.number(), balance: z.string() }))
+        .describe('Every ledger that has it afterwards, the home first, each with what it holds of the account.'),
+      totalBalanceMinor: z.number(),
+      totalBalance: z.string(),
+      added: z.array(z.string()).describe('The ledgers it’s now shared with too.'),
+      homeChange: z.object({ from: z.string(), to: z.string() }).nullable(),
+      removed: z
+        .array(
+          z.object({
+            ledger: z.string(),
+            rows: z.enum(['home', 'keep']).nullable(),
+            moved: z.number().describe('Transactions it moved to the home.'),
+            kept: z.number().describe('With "keep": its transactions now on its own account.'),
+            account: z.object({ id: z.number(), name: z.string(), balance: z.string() }).nullable().describe('With "keep": the manual account made for them in that ledger.'),
+          }),
+        )
+        .describe('The ledgers that no longer have it.'),
+      before: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account before, by slug.'),
+      after: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account afterwards, by slug.'),
+      notices: z.array(z.string()).describe('What to tell the owner about it.'),
+    }),
+    annotations: { ...WRITE, destructiveHint: true, idempotentHint: true },
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const account = (await ctx.lookups(l)).account(args.account)
+      const slug = async (ref: string) => (await ctx.ledger(ref)).slug
+      const ledgers: string[] = []
+      for (const ref of args.ledgers) ledgers.push(await slug(ref))
+      const rows: Record<string, string> = {}
+      for (const [ref, choice] of Object.entries(args.rows ?? {})) rows[await slug(ref)] = choice
+      const r = await ctx.api.put<SharingChange>(
+        `/ledgers/${l.slug}/accounts/${account.id}/sharing`,
+        { ledgers, home: args.home === undefined ? undefined : await slug(args.home), rows: args.rows ? rows : undefined },
+        { dryRun: args.dryRun },
+      )
+      const cur = account.currency
+      const part = (p: AccountSharing['home']) => ({ ledger: p.slug, name: p.name, transactionCount: p.transactionCount, balanceMinor: p.balanceMinor, balance: money(p.balanceMinor, cur) })
+      const has = [r.sharing.home, ...r.sharing.members].map(part)
+      const removed = r.removed.map((x) => ({
+        ledger: x.ledger.slug,
+        rows: x.rows,
+        moved: x.moved,
+        kept: x.kept,
+        account: x.account && { id: x.account.id, name: x.account.name, balance: money(x.account.balanceMinor, cur) },
+      }))
+      const amounts = (parts: Record<string, number>) => Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, money(v, cur)]))
+      const would = args.dryRun ? 'would be' : 'is'
+      const text = [
+        has.length > 1
+          ? `${account.name} ${would} shared by ${has.map((p) => `${p.name} (${p.balance})`).join(', ')}: ${money(r.sharing.totalBalanceMinor, cur)} in all. Its home ${would} ${r.sharing.home.name}.`
+          : `${account.name} ${would} in ${r.sharing.home.name} only (${money(r.sharing.totalBalanceMinor, cur)}).`,
+        ...removed.map((x) =>
+          x.account
+            ? `${x.ledger}: ${plural(x.kept, 'transaction')} kept on its own account #${x.account.id} ${x.account.name} (${x.account.balance})${x.moved ? `, ${x.moved} pending moved to the home` : ''}.`
+            : `${x.ledger}: ${plural(x.moved, 'transaction')} moved to the home.`,
+        ),
+        ...r.notices,
+      ].join('\n')
+      return {
+        text,
+        data: {
+          ledger: l.slug,
+          dryRun: args.dryRun,
+          account: account.name,
+          accountId: account.id,
+          home: r.sharing.home.slug,
+          ledgers: has,
+          totalBalanceMinor: r.sharing.totalBalanceMinor,
+          totalBalance: money(r.sharing.totalBalanceMinor, cur),
+          added: r.added.map((x) => x.slug),
+          homeChange: r.home && { from: r.home.from.slug, to: r.home.to.slug },
+          removed,
+          before: amounts(r.parts.before),
+          after: amounts(r.parts.after),
+          notices: r.notices,
+        },
+      }
+    },
+  }),
+  tool({
     name: 'archive_ledger',
     scope: 'admin',
     title: 'Archive a ledger',
-    description: 'Hides a ledger from the app’s switcher while keeping all its data. It can be restored in App settings → Ledgers.',
-    input: z.object({ ledger: z.string().min(1).describe('Ledger slug or name.') }),
-    output: z.object({ ledger: ledgerView }),
+    description:
+      'Hides a ledger from the app’s switcher while keeping all its data. It can be restored in App settings → Ledgers. A ledger that is a shared account’s home is asked which ledger becomes the home first: the tool then answers with `questions` and archives nothing. Call it again with `answers`, each question’s `id` with the `value` of the option chosen. When `blockers` isn’t empty it can’t be archived, whatever the answers.',
+    input: z.object({
+      ledger: z.string().min(1).describe('Ledger slug or name.'),
+      answers: z.record(z.string(), z.string()).optional().describe('The answers to the questions it asked: each question’s `id` with the chosen option’s `value`.'),
+    }),
+    output: z.object({
+      ledger: ledgerView.optional().describe('The ledger, archived. Left out when it asked questions instead.'),
+      changes: z.array(z.string()).optional().describe('What archiving did, in words.'),
+      questions: z
+        .array(
+          z.object({
+            id: z.string().describe('What to answer it by, in `answers`.'),
+            text: z.string(),
+            note: z.string().nullable(),
+            options: z.array(z.object({ value: z.string().describe('What to send as the answer.'), label: z.string() })),
+          }),
+        )
+        .optional()
+        .describe('What must be answered before it’s archived. With these, nothing was archived.'),
+      notices: z.array(z.string()).optional().describe('What archiving does without a choice.'),
+      blockers: z.array(z.string()).optional().describe('Why it can’t be archived at all, whatever the answers.'),
+    }),
     annotations: { ...WRITE, idempotentHint: true },
     run: async (args, ctx) => {
       const target = await ctx.ledger(args.ledger)
-      const l = await ctx.api.patch<Ledger>(`/ledgers/${target.id}`, { archived: true })
+      let l: Ledger & { changes?: string[] }
+      try {
+        l = await ctx.api.patch<Ledger & { changes?: string[] }>(`/ledgers/${target.id}`, { archived: true, answers: args.answers })
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.status !== 409) throw err
+        // Something is asked first, or stops it: say what, as the result.
+        const asked = await ctx.api.get<LedgerQuestions>(`/ledgers/${target.id}/questions`, { action: 'archive' })
+        if (!asked.questions.length && !asked.blockers.length) throw err
+        const text = asked.blockers.length
+          ? [`${target.name} can’t be archived:`, ...asked.blockers].join('\n')
+          : [
+              `${target.name} wasn’t archived. Answer first, in \`answers\`:`,
+              ...asked.questions.flatMap((q) => [`${q.id}: ${q.text}${q.note ? ` ${q.note}` : ''}`, ...q.options.map((o) => `  "${o.value}": ${o.label}`)]),
+              ...asked.notices,
+            ].join('\n')
+        return { text, data: asked }
+      }
+      const changes = l.changes ?? []
       return {
-        text: `Archived ${l.name}.`,
-        data: { ledger: { name: l.name, slug: l.slug, isDefault: false, archived: l.archived, accounts: l.accounts, transactions: l.transactions } },
+        text: [`Archived ${l.name}.`, ...changes.filter((c) => c !== `${l.name} was archived.`)].join('\n'),
+        data: { ledger: { name: l.name, slug: l.slug, isDefault: false, archived: l.archived, accounts: l.accounts, transactions: l.transactions }, changes },
       }
     },
   }),

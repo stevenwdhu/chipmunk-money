@@ -800,7 +800,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
       ...banks,
       scope: 'write',
       summary: 'Sync a bank connection',
-      description: 'Fetches new transactions and balances now. SimpleFIN allows about 24 requests a day, so this is refused once the day’s budget is used; Plaid has no such limit. An account shared between ledgers syncs into its home: a key limited to some ledgers needs that ledger only, and what the bank changed reaches each transaction in the ledger that holds it.',
+      description: 'Fetches new transactions and balances now. SimpleFIN allows about 24 requests a day, so this is refused once the day’s budget is used. Plaid has no such limit. An account shared between ledgers syncs into its home: a key limited to some ledgers needs that ledger only, and what the bank changed reaches each transaction in the ledger that holds it.',
       params: idParam,
       response: syncResultSchema,
     },
@@ -816,7 +816,7 @@ export function appRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Fetch a bank connection’s history again',
       description:
-        'Like a sync, but for all the history the provider gives instead of what’s new: Plaid sends every transaction it has for the bank login again (up to 2 years), SimpleFIN the last 90 days (or since each account’s “sync from” date), using one of the day’s requests. Nothing is added twice; where the bank’s date, amount or pending status differs, the bank’s is used, and what it sent is kept for each transaction. As for a sync, a key limited to some ledgers needs the home of each account it syncs into, not the other ledgers a shared account is in.',
+        'Like a sync, but for all the history the provider gives instead of what’s new: Plaid sends every transaction it has for the bank login again (up to 2 years), SimpleFIN the last 90 days (or since each account’s “sync from” date), using one of the day’s requests. Nothing is added twice. Where the bank’s date, amount or pending status differs, the bank’s is used, and what it sent is kept for each transaction. As for a sync, a key limited to some ledgers needs the home of each account it syncs into, not the other ledgers a shared account is in.',
       params: idParam,
       response: syncResultSchema,
     },

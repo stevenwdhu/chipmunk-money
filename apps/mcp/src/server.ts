@@ -13,6 +13,7 @@ const INSTRUCTIONS = `Chipmunk keeps personal finances in ledgers (separate sets
 - Amounts you send are in dollars: negative is money out (spending), positive is money in. Results show both cents (\`amountMinor\`) and formatted amounts. Dates are YYYY-MM-DD in the app's time zone.
 - Accounts and categories can be given by name or id.
 - To categorize: list_review_queue, then set_categories (each transaction to its own category) and accept_suggestions. Choosing categories improves the suggestions; for a payee that's always the same category, set_payee_choice with \`always\` sets its transactions now and from then on, without review.
+- A credit card can be shared between ledgers (share_account). Each ledger holds its own transactions on it, and an account's balance in a ledger is that ledger's part. list_accounts shows the account's total and its home, move_transactions moves transactions between the ledgers that have it, and list_account_transactions lists them all.
 - When adding transactions from a bank or receipt, give each an externalId so retries never add duplicates.
 - Bulk tools accept dryRun: true to preview. Everything you change is recorded in the ledger's Activity log under your API key's name.`
 
