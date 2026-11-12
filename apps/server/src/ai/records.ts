@@ -89,6 +89,15 @@ export interface PayeeMove {
  */
 export function movePayeeRecords(ctx: AppContext, moves: PayeeMove[]) {
   if (!moves.length) return
+  try {
+    moveRecords(ctx, moves)
+  } catch (err) {
+    // The records are left as they were: naming a payee or a bank sync never fails over a note of what AI was asked.
+    console.error(`[ai] the failed requests of ${ctx.ledger.name} couldn't follow their payees`, err)
+  }
+}
+
+function moveRecords(ctx: AppContext, moves: PayeeMove[]) {
   const open = ctx.q.all<{ id: number; key: string }>(
     "SELECT id, subject_key AS key FROM ai_calls WHERE ledger_id = @ledger AND kind = 'categorize' AND ok = 0 AND subject_key IS NOT NULL ORDER BY id",
   )
@@ -113,40 +122,47 @@ export function movePayeeRecords(ctx: AppContext, moves: PayeeMove[]) {
     if (!tos) continue
     const direction = plain.startsWith('in:') ? 'in' : 'out'
     const from = plain.slice(direction.length + 1)
-    const stays = ctx.q.pluck(
-      `SELECT 1 FROM transactions WHERE ledger_id = @ledger AND payee_key = ? AND deleted_at IS NULL
-         AND ${direction === 'in' ? 'amount_minor > 0' : 'amount_minor <= 0'}${again ? '' : ' AND category_id IS NULL'} LIMIT 1`,
+    // The ones it's about that are with the old payee now, less those that just came to it from another: they were never its own.
+    const there = ctx.q.pluck<number>(
+      `SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND payee_key = ? AND deleted_at IS NULL
+         AND ${direction === 'in' ? 'amount_minor > 0' : 'amount_minor <= 0'}${again ? '' : ' AND category_id IS NULL'}`,
       from,
-    )
-    if (stays) continue
+    )!
+    const came = moves.filter((m) => m.to === from && m.direction === direction && (again || m.waiting)).length
+    if (there > came) continue
     const count = (t: { rows: number; waiting: number }) => (again ? t.rows : t.waiting)
     const [best] = [...tos.values()].filter((t) => count(t) > 0).sort((a, b) => count(b) - count(a))
     if (best) after.set(record.id, { key: categorizeKey(best.to, direction, again), name: best.name })
   }
-  const kept = new Map<string, number>()
+  // Who ends on each key, oldest first: the oldest keeps it, and the others become part of it.
+  const ends = new Map<string, number[]>()
+  for (const [id, a] of after) ends.set(a.key, [...(ends.get(a.key) ?? []), id])
+  const parked = [...after].filter(([, a]) => a.name !== undefined || ends.get(a.key)!.length > 1).map(([id]) => id)
+  if (!parked.length) return
   ctx.q.transaction(() => {
-    // Off their keys first: a record may move to a key another one is about to leave, and no two open ones share a key.
-    for (const [id, a] of after) if (a.name !== undefined) ctx.q.run("UPDATE ai_calls SET subject_key = 'moving:' || id WHERE ledger_id = @ledger AND id = ?", id)
-    for (const [id, a] of after) {
-      const keep = kept.get(a.key)
-      if (keep === undefined) {
-        kept.set(a.key, id)
-        if (a.name !== undefined) ctx.q.run('UPDATE ai_calls SET subject_key = ?, subject = ? WHERE ledger_id = @ledger AND id = ?', a.key, a.name, id)
-        continue
+    // Off their keys first, each one that moves or shares the key it ends on: no two open ones share a key at any
+    // time, whichever of them is the older, and a record may move to a key another one is about to leave.
+    for (const id of parked) ctx.q.run("UPDATE ai_calls SET subject_key = 'moving:' || id WHERE ledger_id = @ledger AND id = ?", id)
+    for (const [key, [keep, ...rest]] of ends) {
+      if (!parked.includes(keep!)) continue
+      for (const id of rest) {
+        const other = ctx.q.get<{ tries: number; inputTokens: number | null; outputTokens: number | null; firstFailedAt: string | null }>(
+          'SELECT tries, input_tokens AS inputTokens, output_tokens AS outputTokens, first_failed_at AS firstFailedAt FROM ai_calls WHERE ledger_id = @ledger AND id = ?',
+          id,
+        )!
+        ctx.q.run(
+          `UPDATE ai_calls SET tries = tries + @tries,
+             input_tokens = CASE WHEN @inputTokens IS NULL THEN input_tokens ELSE coalesce(input_tokens, 0) + @inputTokens END,
+             output_tokens = CASE WHEN @outputTokens IS NULL THEN output_tokens ELSE coalesce(output_tokens, 0) + @outputTokens END,
+             first_failed_at = CASE WHEN @firstFailedAt IS NOT NULL AND (first_failed_at IS NULL OR @firstFailedAt < first_failed_at) THEN @firstFailedAt ELSE first_failed_at END
+           WHERE ledger_id = @ledger AND id = @keep`,
+          { ...other, keep },
+        )
+        ctx.q.run('DELETE FROM ai_calls WHERE ledger_id = @ledger AND id = ?', id)
       }
-      const other = ctx.q.get<{ tries: number; inputTokens: number | null; outputTokens: number | null; firstFailedAt: string | null }>(
-        'SELECT tries, input_tokens AS inputTokens, output_tokens AS outputTokens, first_failed_at AS firstFailedAt FROM ai_calls WHERE ledger_id = @ledger AND id = ?',
-        id,
-      )!
-      ctx.q.run(
-        `UPDATE ai_calls SET tries = tries + @tries, subject = coalesce(@name, subject),
-           input_tokens = CASE WHEN @inputTokens IS NULL THEN input_tokens ELSE coalesce(input_tokens, 0) + @inputTokens END,
-           output_tokens = CASE WHEN @outputTokens IS NULL THEN output_tokens ELSE coalesce(output_tokens, 0) + @outputTokens END,
-           first_failed_at = CASE WHEN @firstFailedAt IS NOT NULL AND (first_failed_at IS NULL OR @firstFailedAt < first_failed_at) THEN @firstFailedAt ELSE first_failed_at END
-         WHERE ledger_id = @ledger AND id = @keep`,
-        { ...other, keep, name: a.name ?? null },
-      )
-      ctx.q.run('DELETE FROM ai_calls WHERE ledger_id = @ledger AND id = ?', id)
+      // Called what the payee is called now, when any of them moved to it.
+      const name = [keep!, ...rest].map((id) => after.get(id)!.name).find((n) => n !== undefined)
+      ctx.q.run('UPDATE ai_calls SET subject_key = ?, subject = coalesce(?, subject) WHERE ledger_id = @ledger AND id = ?', key, name ?? null, keep)
     }
   })
 }

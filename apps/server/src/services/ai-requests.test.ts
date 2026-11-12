@@ -9,7 +9,7 @@ import { addTx } from '../test/transaction-twins'
 import { aiUsage, ledgerAiUsage, retryAll, retryRecord, type AiCaller } from './ai-requests'
 import type { AppContext } from './context'
 import { aiJobStatus } from './import'
-import { nameWordings, renamePayee, worldOf } from './payee-names'
+import { followBankPayee, nameWordings, renamePayee, worldOf } from './payee-names'
 import { previewTidy, setAiTidy, tidyNewPayees, tidyStatus, type PayeeTidier } from './payee-tidy'
 import { updateSettings } from './settings'
 
@@ -766,6 +766,232 @@ describe('AI request records: a payee named after its request failed', () => {
     nameWordings(t.world, { payees: ['METRO #7'], name: null })
     expect(records(t.s.personal)).toEqual([expect.objectContaining({ id: t.failed.id, subject: 'Metro', subject_key: 'out:metro' })])
     expect((await t.s.usage()).recent[0]).toMatchObject({ status: 'failed', canRetry: true })
+  })
+})
+
+describe('AI request records: failed payees that become one, whichever failed first', () => {
+  /** A ledger whose AI is down, with what adds a transaction and asks about the uncategorized ones, or asks again about some. */
+  function down() {
+    const ai = fakeLlm()
+    const s = setup({ llm: ai.llm })
+    useProviders(s.storage, 'claude')
+    ai.down = true
+    const acc = makeAccount(s.personal)
+    const add = (payee: string, opts: Parameters<typeof addTx>[5] = {}, amount = -4_200) => addTx(s.personal, acc, '2026-09-01', amount, payee, opts)
+    const askAgain = async (ids: number[]) => {
+      expect((await s.call('POST', '/ledgers/personal/categorize/again', { ids })).status).toBe(202)
+      await settle(() => !aiJobStatus(s.personal).running)
+    }
+    const open = () => records(s.personal).map((r: Json) => [r.id, r.ok, r.subject_key, r.subject, r.tries])
+    const keys = () => s.personal.q.column('SELECT payee_key FROM transactions WHERE ledger_id = @ledger ORDER BY id')
+    /** Every one retried and answered: the payees asked about, and the records after. */
+    const retried = async () => {
+      ai.down = false
+      ai.asked.length = 0
+      await s.call('POST', '/ai/usage/retry')
+      await idle(s)
+      return { asked: [...ai.asked].sort(), records: records(s.personal).map((r: Json) => [r.id, r.ok, r.tries]) }
+    }
+    return { ai, s, add, askAgain, open, keys, retried, world: worldOf(s.storage) }
+  }
+  /** What the bank sent for a transaction, worded otherwise now. */
+  const reword = (ctx: AppContext, id: number, payee: string) => {
+    const was = ctx.q.get<{ payee: string; payeeKey: string }>('SELECT payee, payee_key AS payeeKey FROM transactions WHERE ledger_id = @ledger AND id = ?', id)!
+    followBankPayee(ctx, { id, ...was, origin: 'sync' }, payee)
+  }
+
+  it('keeps the older record when its payee joins one that failed later', async () => {
+    const t = down()
+    t.add('METRO #412')
+    await categorize(t.s)
+    t.add('METRO #7')
+    renamePayee(t.world, { payee: 'METRO #7', name: 'Metro' })
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro 412', 'METRO #412', 2],
+      [2, 0, 'out:metro', 'Metro', 1],
+    ])
+    const first = records(t.s.personal)[0].first_failed_at
+
+    expect(nameWordings(t.world, { payees: ['METRO #412', 'METRO #7'], name: 'Metro' }).changed).toBe(1)
+    expect(t.keys()).toEqual(['metro', 'metro'])
+    expect(t.open()).toEqual([[1, 0, 'out:metro', 'Metro', 3]])
+    expect(records(t.s.personal)[0].first_failed_at).toBe(first)
+    expect(await t.s.usage()).toMatchObject({ requests: 1, failed: 1, retryable: 1 })
+    expect(await t.retried()).toEqual({ asked: ['METRO #7'], records: [[1, 1, 4]] })
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries'])
+  })
+
+  it('keeps the older record when a payee that failed later joins it', async () => {
+    const t = down()
+    t.add('METRO #7')
+    renamePayee(t.world, { payee: 'METRO #7', name: 'Metro' })
+    await categorize(t.s)
+    t.add('METRO #412')
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro', 'Metro', 2],
+      [2, 0, 'out:metro 412', 'METRO #412', 1],
+    ])
+    nameWordings(t.world, { payees: ['METRO #412', 'METRO #7'], name: 'Metro' })
+    expect(t.open()).toEqual([[1, 0, 'out:metro', 'Metro', 3]])
+    expect((await t.retried()).records).toEqual([[1, 1, 4]])
+  })
+
+  it('makes one record of three, the payee they join being neither the oldest nor the newest', async () => {
+    const t = down()
+    t.add('METRO #412')
+    await categorize(t.s)
+    t.add('METRO #7')
+    renamePayee(t.world, { payee: 'METRO #7', name: 'Metro' })
+    await categorize(t.s)
+    t.add('METRO #9')
+    // Money in from the newest is another thing asked: it moves alone.
+    addTx(t.s.personal, makeAccount(t.s.personal, 'Savings'), '2026-09-02', 900, 'METRO #9')
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro 412', 'METRO #412', 3],
+      [2, 0, 'out:metro', 'Metro', 2],
+      [3, 0, 'in:metro 9', 'METRO #9', 1],
+      [4, 0, 'out:metro 9', 'METRO #9', 1],
+    ])
+    nameWordings(t.world, { payees: ['METRO #412', 'METRO #7', 'METRO #9'], name: 'Metro' })
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro', 'Metro', 6],
+      [3, 0, 'in:metro', 'Metro', 1],
+    ])
+    expect(await t.s.usage()).toMatchObject({ requests: 2, failed: 2, retryable: 2 })
+    expect((await t.retried()).records).toEqual([
+      [1, 1, 7],
+      [3, 1, 2],
+    ])
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries', 'Groceries', 'Groceries'])
+  })
+
+  /** AI tidying switched on with these names, which every payee takes at once. */
+  async function tidied(t: ReturnType<typeof down>, names: Record<string, string>) {
+    const tidier: PayeeTidier = async (payees) => ({ names: payees.map((payee) => ({ payee, name: names[payee] ?? payee })), model: 'fake-model' })
+    setAiTidy(t.world, true, tidier)
+    await settle(() => !tidyStatus(t.world).running)
+  }
+
+  it('moves two records that take each other’s payee', async () => {
+    const t = down()
+    t.add('ALPHA')
+    await categorize(t.s)
+    t.add('BETA')
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:alpha', 'ALPHA', 2],
+      [2, 0, 'out:beta', 'BETA', 1],
+    ])
+    await tidied(t, { ALPHA: 'Beta', BETA: 'Alpha' })
+    expect(t.keys()).toEqual(['beta', 'alpha'])
+    expect(t.open().filter((r) => r[2]?.startsWith('out:'))).toEqual([
+      [1, 0, 'out:beta', 'Beta', 2],
+      [2, 0, 'out:alpha', 'Alpha', 1],
+    ])
+    expect(await t.s.usage()).toMatchObject({ failed: 2, retryable: 2 })
+    expect((await t.retried()).asked).toEqual(['ALPHA', 'BETA'])
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries'])
+  })
+
+  it('moves a record to a payee whose own record moves on, and joins that one with the record it lands on', async () => {
+    const t = down()
+    t.add('GAMMA')
+    await categorize(t.s)
+    t.add('BETA')
+    await categorize(t.s)
+    t.add('ALPHA')
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:gamma', 'GAMMA', 3],
+      [2, 0, 'out:beta', 'BETA', 2],
+      [3, 0, 'out:alpha', 'ALPHA', 1],
+    ])
+    await tidied(t, { ALPHA: 'Beta', BETA: 'Gamma' })
+    expect(t.keys()).toEqual(['gamma', 'gamma', 'beta'])
+    expect(t.open().filter((r) => r[2]?.startsWith('out:'))).toEqual([
+      [1, 0, 'out:gamma', 'Gamma', 5],
+      [3, 0, 'out:beta', 'Beta', 1],
+    ])
+    expect((await t.retried()).asked).toHaveLength(2)
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries', 'Groceries'])
+  })
+
+  it('joins “Ask AI again” records with each other and the ordinary ones with each other, on the same payees', async () => {
+    const t = down()
+    const dineOut = categoryId(t.s.personal, 'Dine out')
+    // One that had a category and one that waits, each asked again about: two things asked of one payee.
+    await t.askAgain([t.add('BEAN #2', { categoryId: dineOut })])
+    await t.askAgain([t.add('BEAN #2', {}, -900)])
+    const has = t.add('BEAN BAR', { categoryId: dineOut })
+    const waits = t.add('BEAN BAR', {}, -900)
+    renamePayee(t.world, { payee: 'BEAN BAR', name: 'Bean' })
+    await t.askAgain([has])
+    await t.askAgain([waits])
+    expect(t.open()).toEqual([
+      [1, 0, 'again:out:bean 2', 'BEAN #2', 1],
+      [2, 0, 'out:bean 2', 'BEAN #2', 1],
+      [3, 0, 'again:out:bean', 'Bean', 1],
+      [4, 0, 'out:bean', 'Bean', 1],
+    ])
+    nameWordings(t.world, { payees: ['BEAN #2', 'BEAN BAR'], name: 'Bean' })
+    expect(t.open()).toEqual([
+      [1, 0, 'again:out:bean', 'Bean', 2],
+      [2, 0, 'out:bean', 'Bean', 2],
+    ])
+    // And apart again, each record stays with the payee most of its transactions are.
+    nameWordings(t.world, { payees: ['BEAN #2', 'BEAN BAR'], name: null })
+    expect(t.open().map((r) => r[0])).toEqual([1, 2])
+  })
+
+  it('keeps a bank sync going when a pending charge posts under a payee that failed too, older or newer', async () => {
+    const t = down()
+    const pending = t.add('METRO PENDING', { origin: 'sync' })
+    await categorize(t.s)
+    t.add('METRO POSTED', { origin: 'sync' })
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro pending', 'METRO PENDING', 2],
+      [2, 0, 'out:metro posted', 'METRO POSTED', 1],
+    ])
+    // The older record's payee becomes the newer one's.
+    reword(t.s.personal, pending, 'METRO POSTED')
+    expect(t.keys()).toEqual(['metro posted', 'metro posted'])
+    expect(t.open()).toEqual([[1, 0, 'out:metro posted', 'METRO POSTED', 3]])
+
+    // The newer record's payee becomes the older one's.
+    const late = t.add('SHOP PENDING', { origin: 'sync' })
+    await categorize(t.s)
+    expect(t.open()).toEqual([
+      [1, 0, 'out:metro posted', 'METRO POSTED', 4],
+      [3, 0, 'out:shop pending', 'SHOP PENDING', 1],
+    ])
+    reword(t.s.personal, late, 'METRO POSTED')
+    expect(t.open()).toEqual([[1, 0, 'out:metro posted', 'METRO POSTED', 5]])
+    expect(await t.retried()).toEqual({ asked: ['METRO POSTED'], records: [[1, 1, 6]] })
+    expect(categoriesOf(t.s.personal).map((r: Json) => r.category)).toEqual(['Groceries', 'Groceries', 'Groceries'])
+  })
+
+  it('keeps a bank sync going when a charge asked again about posts under a payee asked again about too', async () => {
+    const t = down()
+    const dineOut = categoryId(t.s.personal, 'Dine out')
+    const pending = t.add('BEAN PENDING', { origin: 'sync', categoryId: dineOut })
+    await t.askAgain([pending])
+    await t.askAgain([t.add('BEAN POSTED', { origin: 'sync', categoryId: dineOut })])
+    await t.askAgain([t.add('BEAN POSTED', { origin: 'sync' }, -900)])
+    expect(t.open()).toEqual([
+      [1, 0, 'again:out:bean pending', 'BEAN PENDING', 1],
+      [2, 0, 'again:out:bean posted', 'BEAN POSTED', 1],
+      [3, 0, 'out:bean posted', 'BEAN POSTED', 1],
+    ])
+    // The record asked again goes with it, and the one of those still waiting is left alone.
+    reword(t.s.personal, pending, 'BEAN POSTED')
+    expect(t.open()).toEqual([
+      [1, 0, 'again:out:bean posted', 'BEAN POSTED', 2],
+      [3, 0, 'out:bean posted', 'BEAN POSTED', 1],
+    ])
   })
 })
 
