@@ -240,7 +240,7 @@ export interface Left {
   rows: RowsChoice | null
   /** Live transactions it moved home: with "keep", its pending ones with a bank id, which the bank will post again. */
   moved: number
-  /** Deleted transactions it sent home, still deleted. */
+  /** Deleted transactions it sent home, still deleted: with "keep", its pending ones with a bank id. */
   sentAsDeleted: number
   /** With "keep": its transactions now on its own account, deleted ones included. */
   kept: number
@@ -310,6 +310,7 @@ interface Kept {
   account: { id: number; name: string }
   kept: number
   moved: number
+  sentAsDeleted: number
   recurringItems: number
   reports: number
   /** Its live rows now on that account: what comes off the recorded balances. */
@@ -325,7 +326,8 @@ interface Kept {
  * 1. The account's total at today is read: every live row in every ledger, less those dated after
  *    today.
  * 2. Its pending rows with a bank id move home (moveTransactions, the categorizing deferred): the bank
- *    will post them under new ids, and only the account is synced.
+ *    will post them under new ids, and only the account is synced. Its deleted ones go home still
+ *    deleted (sendAsDeleted), so that the posted one Plaid says replaces one stays deleted too.
  * 3. A′ is made through its context: the account's name, type, currency, notes and opening date, its
  *    own institution, place and archive (its member row's), opening balance 0, no bank link and no
  *    import mapping. split_from_id names the account (or the one it was split off from itself), so
@@ -351,6 +353,12 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
     moved += result.moved
     deferred.push(...result.deferred!)
   }
+  let sentAsDeleted = 0
+  const gone = member.q.column<number>(
+    "SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NOT NULL AND status = 'pending' AND external_id IS NOT NULL ORDER BY id",
+    accountId,
+  )
+  for (let i = 0; i < gone.length; i += MOVE_LIMIT) sentAsDeleted += sendAsDeleted(member, ctxOf, { ids: gone.slice(i, i + MOVE_LIMIT), to: home.ledger.id })
 
   const facts = home.accountWide.account(accountId)!
   const splitFrom = home.q.pluck<number | null>('SELECT split_from_id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', accountId) ?? null
@@ -390,6 +398,7 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
     account: { id, name: made.name },
     kept: rows.length,
     moved,
+    sentAsDeleted,
     recurringItems,
     reports,
     live: rows.filter((r) => !r.deleted).map((r) => ({ date: r.date, amount: r.amount })),
@@ -437,7 +446,8 @@ function rebalance(home: AppContext, accountId: number, kept: Kept): number {
  * 2. Its rows. With "home": its live rows on the account move home (moveTransactions, in chunks, the
  *    categorizing deferred to the caller), its deleted ones go home still deleted (sendAsDeleted),
  *    and its recurring items on the account are on no account from then on. With "keep": they stay
- *    in it, on an account of its own (keepOnOwnAccount), but for its pending ones, which go home.
+ *    in it, on an account of its own (keepOnOwnAccount), but for its pending ones with a bank id,
+ *    which go home (the deleted ones still deleted).
  * 3. Its imports into the account go (it has some only if it was the home once).
  * 4. Its member row goes, then its institution if no other account is there (with "keep" its own
  *    account is).
@@ -474,6 +484,7 @@ function leave(
   const kept = rows === 'keep' ? keepOnOwnAccount(home, member, ctxOf, account, actor) : null
   if (kept) {
     moved = kept.moved
+    sentAsDeleted = kept.sentAsDeleted
     recurringItems = kept.recurringItems
     deferred.push(...kept.deferred)
   } else {

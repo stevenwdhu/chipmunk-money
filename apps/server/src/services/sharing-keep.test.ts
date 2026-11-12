@@ -526,3 +526,32 @@ describe('the rows a ledger kept on its own account, for the account’s bank', 
     expect(w.everything()).toEqual(unchanged)
   })
 })
+
+describe('a ledger that keeps its rows, for the account’s bank and CSV imports', () => {
+  /** Applied to Visa in its home as Plaid's changes. */
+  const plaid = (w: ReturnType<typeof world>, changed: RemoteTransaction[], removed: Array<{ remoteId: string }> = []) =>
+    applyRemoteTransactions(w.personal, w.ctxOf, w.visa, changed, { removed, floor: null }, 'plaid')
+  const bankRow = (ctx: AppContext, externalId: string) => ctx.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND external_id = ?', externalId)!
+
+  it('sends home a pending row it deleted, so the posted one Plaid says replaces it stays deleted', () => {
+    const w = world()
+    const { personal, family } = w
+    plaid(w, [remote('p2', '2026-09-30', -4_000, 'Cafe', { pending: true })])
+    const p2 = bankRow(personal, 'p2')
+    w.move(personal, [p2], family)
+    // Family entered the same charge by hand, and deleted the bank's.
+    const twin = w.addTx(family, '2026-09-30', -4_000, { payee: 'Cafe' })
+    deleteTransaction(family, p2)
+
+    const change = w.set(personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+    const own = w.splitOff(family)
+    expect(change.removed).toMatchObject([{ moved: 0, sentAsDeleted: 1, kept: 1, account: { id: own, balanceMinor: -4_000 } }])
+    expect(w.rowsOn(personal, w.visa)).toMatchObject([{ id: p2, externalId: 'p2', status: 'pending', deleted: 1 }])
+    expect(w.rowsOn(family, own)).toMatchObject([{ id: twin, deleted: 0 }])
+
+    // Posted, replacing it: nothing is added, and it stays deleted, as on an account that isn't shared.
+    expect(plaid(w, [remote('c2', '2026-10-01', -4_000, 'Cafe', { replaces: 'p2' })], [{ remoteId: 'p2' }])).toMatchObject({ added: 0, updated: 0 })
+    expect(w.rowsOn(personal, w.visa)).toMatchObject([{ id: p2, externalId: 'c2', status: 'cleared', deleted: 1 }])
+    w.check(own)
+  })
+})
