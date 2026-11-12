@@ -461,7 +461,8 @@ function rebalance(home: AppContext, accountId: number, kept: Kept): number {
  *    opening balance and recorded balances' share, not the whole change in the home's part.
  * 2. Its rows. First its split payments (letSplitsGo): a payment it holds has its split detached,
  *    and its shares of other ledgers' payments are detached, or with "home" dropped when the home
- *    holds the payment, so every row it then has on the account is an ordinary one. With "home":
+ *    holds the payment, so every row it then has on the account is an ordinary one. The rows it
+ *    has only for their bank ids (bank_id_only) go home, as they are, whatever it chose. With "home":
  *    its live rows on the account move home (moveTransactions, in chunks, the
  *    categorizing deferred to the caller), its deleted ones go home still deleted (sendAsDeleted),
  *    and its recurring items on the account are on no account from then on. With "keep": they stay
@@ -496,6 +497,9 @@ function leave(
 
   // 2. Its rows: its splits first, then home, live then deleted, or kept on its own account.
   const splits = letSplitsGo(home, member, ctxOf, accountId, rows, actor)
+  // The rows it has only for their bank ids are the account's, not its own: they go home whatever it chose.
+  const known = member.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND bank_id_only = 1 ORDER BY id', accountId)
+  for (let i = 0; i < known.length; i += MOVE_LIMIT) sendAsDeleted(member, ctxOf, { ids: known.slice(i, i + MOVE_LIMIT), to: home.ledger.id })
   let moved = 0
   let sentAsDeleted = 0
   let recurringItems = 0
@@ -588,7 +592,8 @@ function splitNotice(leaving: LedgerName, s: LeftSplit): string {
 
 /**
  * What a ledger that leaves must be told about its transactions on the account: nothing when it
- * holds none (deleted ones count), else `rows` must say. A 400 when it doesn't.
+ * holds none (deleted ones count, rows kept only for their bank ids don't), else `rows` must say. A
+ * 400 when it doesn't.
  */
 function rowsChoiceFor(ctx: AppContext, account: Account, leaving: AccountLedger, choice: string | undefined): RowsChoice | null {
   const has = ctx.accountWide.holdings(account.id, leaving.ledgerId)

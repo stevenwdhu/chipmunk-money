@@ -535,6 +535,14 @@ export const transactions = sqliteTable(
      * live payment that isn't a split row itself.
      */
     splitOf: integer('split_of'),
+    /**
+     * A row kept only so its account keeps knowing a bank id (external_id): what's left of one that
+     * was the account's and went with an account split off from it, or with a ledger, that's gone.
+     * It's no one's transaction any more, only what stops a sync, a bank switch or a CSV import from
+     * adding it again. It's always deleted and stays so (triggers), the purge leaves it, and it goes
+     * with its account.
+     */
+    bankIdOnly: integer('bank_id_only', { mode: 'boolean' }).notNull().default(false),
     ...timestamps,
   },
   (t) => [

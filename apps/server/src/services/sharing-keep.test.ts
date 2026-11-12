@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { accountBankSwitchSchema, importCommitSchema, importPreviewSchema, transactionCreateSchema, type ReportSpec } from '@chipmunk/shared'
+import { accountBankSwitchSchema, importCommitSchema, importPreviewSchema, transactionCreateSchema, transactionQuerySchema, type ReportSpec } from '@chipmunk/shared'
 import { expectNoCrossLedgerReferences, expectPartsSumToAccount, sharedWorld, TESTER } from '../test/shared-accounts'
 import { ledgerRows } from '../test/world'
 import { balancesAt, deleteAccount, getAccount, leaveSplitOffBankIds, listSnapshots, setBalance, updateAccount } from './accounts'
@@ -9,9 +9,21 @@ import type { RemoteTransaction } from './bank/types'
 import type { AppContext } from './context'
 import { createCustomReport, getCustomReport } from './custom-reports'
 import { commitImport, previewImport } from './import'
-import { moveTransactions } from './moves'
+import { moveTransactions, sendAsBankIds } from './moves'
 import { addMember, changeHome, setSharing, type SharingInput } from './sharing'
-import { createTransaction, deleteTransaction, findByExternalId, getTransaction, updateTransaction } from './transactions'
+import { periodSummary } from './reports'
+import {
+  bulkUpdate,
+  createTransaction,
+  deleteTransaction,
+  findByExternalId,
+  getTransaction,
+  linkedTransactions,
+  listTransactions,
+  purgeDeleted,
+  restoreTransaction,
+  updateTransaction,
+} from './transactions'
 
 /**
  * Stopping sharing a shared account with a ledger that keeps its transactions: they stay in it, on a
@@ -684,6 +696,113 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     const file = [{ line: 2, date: '2026-09-20', payee: 'Book Shop', amountMinor: -9_000, externalId: 'k1' }]
     expect(commitImport(personal, importCommitSchema.parse({ accountId: w.visa, rows: file }), { background: false })).toMatchObject({ imported: 0, skippedDuplicates: 1 })
     expect(w.check(again).totalMinor).toBe(getAccount(personal, w.visa).balanceMinor)
+  })
+
+  /** The rows a ledger has on Visa only for their bank ids, and its other deleted rows there. */
+  const deletedRows = (ctx: AppContext, account: number) =>
+    ctx.q.all<{ id: number; externalId: string | null; only: number }>(
+      'SELECT id, external_id AS externalId, bank_id_only AS only FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NOT NULL ORDER BY id',
+      account,
+    )
+  /** A full window as SimpleFIN sends it, 90 days back. */
+  const window = (w: ReturnType<typeof world>, sent: RemoteTransaction[]) =>
+    applyRemoteTransactions(w.personal, w.ctxOf, w.visa, sent, { from: '2026-07-05', to: '2026-10-03', floor: null }, 'simplefin')
+
+  it('keeps those bank ids for as long as the account: the purge leaves them, a re-send adds nothing, and they’re no transactions of the home’s', () => {
+    const w = world()
+    const { personal, family } = w
+    const sent = [remote('k1', '2026-09-20', -9_000, 'Book Shop'), remote('k2', '2026-09-21', -1_200, 'Gas Bar')]
+    plaid(w, sent)
+    const [k1, k2] = [bankRow(personal, 'k1'), bankRow(personal, 'k2')]
+    w.move(personal, [k1, k2], family)
+    deleteTransaction(family, k2)
+    w.set(personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+    const own = w.splitOff(family)
+    const summary = () => periodSummary(personal, '2026-09-01', '2026-09-30')
+    const before = { summary: summary(), balance: getAccount(personal, w.visa).balanceMinor }
+    deleteAccount(family, w.ctxOf, own)
+    const left = deletedRows(personal, w.visa)
+    expect(left).toMatchObject([
+      { externalId: 'k1', only: 1 },
+      { externalId: 'k2', only: 1 },
+    ])
+
+    // The nightly purge, 31 days on and at any age: they stay, and a full re-send adds nothing, by window or as Plaid's.
+    purgeDeleted(personal, -1)
+    expect(deletedRows(personal, w.visa)).toEqual(left)
+    expect(window(w, sent)).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    expect(plaid(w, sent)).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    const file = [{ line: 2, date: '2026-09-20', payee: 'Book Shop', amountMinor: -9_000, externalId: 'k1' }]
+    expect(commitImport(personal, importCommitSchema.parse({ accountId: w.visa, rows: file }), { background: false })).toMatchObject({ imported: 0, skippedDuplicates: 1 })
+    expect(deletedRows(personal, w.visa)).toEqual(left)
+
+    // Not the home's transactions: never listed or counted, and not found by id, so there's nothing to restore, edit or delete.
+    expect(listTransactions(personal, transactionQuerySchema.parse({ accountId: w.visa })).items).toEqual([])
+    expect({ summary: summary(), balance: getAccount(personal, w.visa).balanceMinor }).toEqual(before)
+    expect(summary()).toMatchObject({ spentMinor: 0, incomeMinor: 0 })
+    const notFound = { status: 404, message: 'Transaction not found' }
+    for (const { id } of left) {
+      expect(status(() => restoreTransaction(personal, id))).toEqual(notFound)
+      expect(status(() => getTransaction(personal, id))).toEqual(notFound)
+      expect(status(() => updateTransaction(personal, id, { notes: 'mine' }))).toEqual(notFound)
+      expect(status(() => deleteTransaction(personal, id))).toEqual(notFound)
+      expect(status(() => linkedTransactions(personal, id))).toEqual(notFound)
+    }
+    expect(bulkUpdate(personal, { ids: left.map((r) => r.id), categoryId: null })).toEqual({ updated: 0 })
+    expect(status(() => findByExternalId(personal, w.visa, 'k1'))).toEqual({ status: 409, message: 'This transaction went with the account or ledger that had it' })
+    expect(deletedRows(personal, w.visa)).toEqual(left)
+    w.check()
+
+    // They go with the account.
+    deleteAccount(personal, w.ctxOf, w.visa)
+    expect(personal.q.pluck('SELECT count(*) FROM transactions WHERE ledger_id = @ledger')).toBe(0)
+  })
+
+  it('sends rows home only for their bank ids (sendAsBankIds), which stay the account’s through a home change and go home when their ledger leaves', () => {
+    const w = world()
+    const { personal, family } = w
+    const sent = [remote('f1', '2026-09-20', -9_000, 'Book Shop'), remote('f3', '2026-09-22', -1_200, 'Gas Bar')]
+    plaid(w, sent)
+    const [f1, f3] = [bankRow(personal, 'f1'), bankRow(personal, 'f3')]
+    w.move(personal, [f1, f3], family)
+    const f2 = w.addTx(family, '2026-09-21', -500, { payee: 'Pizza' })
+    deleteTransaction(family, f3)
+
+    // As a ledger that goes for good sends them: the ones with a bank id are kept for it, the other is an ordinary deleted row.
+    expect(sendAsBankIds(family, w.ctxOf, { ids: [f1, f2, f3], to: personal.ledger.id })).toBe(3)
+    expect(deletedRows(personal, w.visa)).toEqual([
+      { id: f1, externalId: 'f1', only: 1 },
+      { id: f3, externalId: 'f3', only: 1 },
+      { id: f2, externalId: null, only: 0 },
+    ])
+    expect(family.q.pluck('SELECT count(*) FROM transactions WHERE ledger_id = @ledger')).toBe(0)
+    expect(w.check().parts).toEqual({ personal: 0, family: 0 })
+    purgeDeleted(personal, -1)
+    expect(deletedRows(personal, w.visa).map((r) => r.id)).toEqual([f1, f3])
+    expect(window(w, sent)).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    expect(plaid(w, sent)).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    // What Plaid says replaces one changes nothing anyone sees.
+    const posted = [sent[0]!, remote('f9', '2026-09-23', -1_300, 'Gas Bar', { replaces: 'f3' })]
+    expect(plaid(w, posted)).toMatchObject({ added: 0, updated: 0 })
+    expect(deletedRows(personal, w.visa)).toEqual([
+      { id: f1, externalId: 'f1', only: 1 },
+      { id: f3, externalId: 'f9', only: 1 },
+    ])
+    // Not a transaction to move.
+    expect(status(() => w.move(personal, [f1], family))).toEqual({ status: 400, message: `There’s no transaction ${f1} in Personal to move.` })
+
+    // Family becomes the home, and Personal leaves: it's asked nothing, and they go to the home.
+    changeHome(personal, w.ctxOf, w.visa, family.ledger.id, TESTER)
+    expect(window({ ...w, personal: family }, posted)).toMatchObject({ added: 0, updated: 0 })
+    const change = w.set(family, { ledgers: ['family'] })
+    expect(change.removed).toMatchObject([{ rows: null, moved: 0, sentAsDeleted: 0, kept: 0 }])
+    expect(deletedRows(personal, w.visa)).toEqual([])
+    expect(deletedRows(family, w.visa)).toEqual([
+      { id: f1, externalId: 'f1', only: 1 },
+      { id: f3, externalId: 'f9', only: 1 },
+    ])
+    expect(window({ ...w, personal: family }, posted)).toMatchObject({ added: 0, updated: 0 })
+    w.check()
   })
 
   it('leaves them when the ledger that holds the split-off account goes, once that calls for it, and deleting it doesn’t fail before then', () => {

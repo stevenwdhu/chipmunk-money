@@ -300,12 +300,13 @@ export function deleteAccount(ctx: AppContext, ctxOf: CtxOf, id: number) {
  * Before a split-off account goes (one a ledger kept its rows on when it stopped sharing an
  * account), the account it was split off from must keep knowing the bank ids on those rows: they're
  * all that stops its sync, a switch or a CSV import from adding them again. For each one it matches
- * through this account (splitOffHistory), a deleted row is left on it, in its home, through the
- * home's context: the bank id, the date, amount and payee, when it was created (so the accounts
- * above it still match it) and deleted (now, when it was live), and nothing else of the row (no
- * category, notes, tags, links or recurring item). Nothing for an account that isn't split off from
- * one, or whose parent is gone. Run it in the caller's transaction, before the account's rows go.
- * Returns how many were left.
+ * through this account (splitOffHistory), a row kept only for its bank id (bank_id_only) is left on
+ * it, in its home, through the home's context: the bank id, the date, amount and payee, when it was
+ * created (so the accounts above it still match it) and deleted (now, when it was live), and nothing
+ * else of the row (no category, notes, tags, links or recurring item). Such a row is deleted and
+ * stays so: the purge leaves it, it can't be restored, and it goes with the account. Nothing for an
+ * account that isn't split off from one, or whose parent is gone. Run it in the caller's
+ * transaction, before the account's rows go. Returns how many were left.
  *
  * Deleting or erasing the ledger that holds a split-off account must call this for each of its
  * split-off accounts first. That comes with the questions asked before a ledger goes, so nothing
@@ -319,8 +320,8 @@ export function leaveSplitOffBankIds(ctx: AppContext, ctxOf: CtxOf, accountId: n
   const now = ctx.now().toISOString()
   for (const r of rows) {
     home.q.run(
-      `INSERT INTO transactions (ledger_id, account_id, date, datetime, amount_minor, currency, payee, payee_key, status, origin, external_id, deleted_at, created_at)
-       VALUES (@ledger, @accountId, @date, @datetime, @amountMinor, @currency, @payee, @payeeKey, @status, @origin, @externalId, @deletedAt, @createdAt)`,
+      `INSERT INTO transactions (ledger_id, account_id, date, datetime, amount_minor, currency, payee, payee_key, status, origin, external_id, deleted_at, created_at, bank_id_only)
+       VALUES (@ledger, @accountId, @date, @datetime, @amountMinor, @currency, @payee, @payeeKey, @status, @origin, @externalId, @deletedAt, @createdAt, 1)`,
       { ...r, accountId: parent.id, deletedAt: r.deletedAt ?? now },
     )
   }

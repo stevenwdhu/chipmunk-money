@@ -82,7 +82,10 @@ export interface AccountFacts {
 /** Everything a ledger still has of the account, deleted rows included: what keeps it from leaving. */
 export interface Holdings {
   transactions: number
+  /** The ones a person or the bank deleted, not the rows kept only for their bank ids. */
   deletedTransactions: number
+  /** Rows kept only for their bank ids (bank_id_only): the account's, which go to its home when the ledger leaves. */
+  bankIdRows: number
   recurringItems: number
   importBatches: number
 }
@@ -338,11 +341,12 @@ const READS = {
     return { ...row, recorded: recorded ?? null }
   },
 
-  /** What a ledger has of the account, deleted transactions included. */
+  /** What a ledger has of the account, deleted transactions and rows kept only for their bank ids included. */
   holdings(db: UnscopedQuery, accountId: number, ledgerId: string): Holdings {
     return db.get<Holdings>(
       `SELECT (SELECT count(*) FROM transactions t WHERE t.account_id = @accountId AND t.ledger_id = @ledgerId AND t.deleted_at IS NULL) AS transactions,
-         (SELECT count(*) FROM transactions t WHERE t.account_id = @accountId AND t.ledger_id = @ledgerId AND t.deleted_at IS NOT NULL) AS deletedTransactions,
+         (SELECT count(*) FROM transactions t WHERE t.account_id = @accountId AND t.ledger_id = @ledgerId AND t.deleted_at IS NOT NULL AND t.bank_id_only = 0) AS deletedTransactions,
+         (SELECT count(*) FROM transactions t WHERE t.account_id = @accountId AND t.ledger_id = @ledgerId AND t.bank_id_only = 1) AS bankIdRows,
          (SELECT count(*) FROM recurring_items r WHERE r.account_id = @accountId AND r.ledger_id = @ledgerId) AS recurringItems,
          (SELECT count(*) FROM import_batches b WHERE b.account_id = @accountId AND b.ledger_id = @ledgerId) AS importBatches`,
       { accountId, ledgerId },

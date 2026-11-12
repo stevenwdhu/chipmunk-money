@@ -124,7 +124,7 @@ function refuseSplitRows(from: AppContext, rows: MovingRow[]): void {
 /**
  * The rows, read and checked before anything changes: each held by `from` and not deleted, on an
  * account `to` has, `to` not archived, and none of them part of a split. An id another ledger holds and one that doesn't exist get
- * the same 400, so the answer doesn't say which it is.
+ * the same 400, so the answer doesn't say which it is. So does a row kept only for its bank id.
  */
 function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[] {
   const rows = from.q.all<MovingRow>(
@@ -133,7 +133,7 @@ function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[
        (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id) AS itemName,
        (SELECT c.name FROM ledger_categories c WHERE c.id = t.category_id AND c.ledger_id = t.ledger_id) AS categoryName, ${SPLIT} AS split
      FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
-     WHERE t.ledger_id = @ledger AND t.${THESE}
+     WHERE t.ledger_id = @ledger AND t.${THESE} AND t.bank_id_only = 0
      ORDER BY t.date, t.id`,
     json(ids),
   )
@@ -411,6 +411,27 @@ export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: n
     const none: MovedCategory = { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false }
     const sent = fromCtx.accountWide.moveRows({ to: toCtx, ids, fields: new Map(ids.map((id) => [id, none])) })
     for (const item of detached) recalculateRecurring(fromCtx, item.itemId, { removed: true, followAmount: true, wasPaidOff: item.wasPaidOff })
+    return sent
+  })
+}
+
+/**
+ * Sends transactions to another ledger that has their account as rows kept only for their bank ids
+ * (transactions.bank_id_only): for a ledger that goes for good (deleted or erased) and whose rows
+ * on a shared account are deleted with it. They go as sendAsDeleted sends them, and each one with a
+ * bank id is then marked in `to`: deleted for good, which the purge leaves, which can't be restored,
+ * edited or moved, and which goes with the account. So the account's sync, a bank switch and a CSV
+ * import know it for as long as the account is there, and never add it again. One without a bank id
+ * has nothing to be known by: it's an ordinary deleted row in `to`, which the purge removes. The
+ * same limits as sendAsDeleted. Run it inside the caller's transaction. Returns how many went.
+ */
+export function sendAsBankIds(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: number[]; to: string }): number {
+  const ids = [...new Set(input.ids)]
+  if (!ids.length) return 0
+  const toCtx = ctxOf(input.to)
+  return fromCtx.q.transaction(() => {
+    const sent = sendAsDeleted(fromCtx, ctxOf, { ids, to: input.to })
+    toCtx.q.run(`UPDATE transactions SET bank_id_only = 1 WHERE ledger_id = @ledger AND external_id IS NOT NULL AND bank_id_only = 0 AND ${THESE}`, json(ids))
     return sent
   })
 }

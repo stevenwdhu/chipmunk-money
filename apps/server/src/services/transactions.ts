@@ -184,8 +184,9 @@ function dtos(ctx: AppContext, rows: TxRow[]): Transaction[] {
   return rows.map((r) => toDTO(r, tags.get(r.id) ?? [], links.get(r.id) ?? [], name(r.payee), splits.get(r.id) ?? null))
 }
 
+/** A row kept only for its bank id (bank_id_only) is no transaction of the ledger's: not found, deleted ones included or not. */
 function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
-  const row = ctx.q.get<TxRow>(`SELECT ${ROW} FROM transactions t WHERE t.id = ? AND t.ledger_id = @ledger`, id)
+  const row = ctx.q.get<TxRow>(`SELECT ${ROW} FROM transactions t WHERE t.id = ? AND t.ledger_id = @ledger AND t.bank_id_only = 0`, id)
   if (!row || (!includeDeleted && row.deleted_at)) notFound('Transaction not found')
   return row
 }
@@ -194,14 +195,16 @@ function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
  * The transaction in `accountId` that has this external id, if any (deleted ones included). An
  * external id is the account's, in every ledger that has it: when another ledger holds that
  * transaction (a shared account's), it's a 409 that doesn't say which one it is. So is one an account
- * split off from it has, which a ledger kept when it stopped sharing it.
+ * split off from it has, which a ledger kept when it stopped sharing it, and one that went with
+ * such an account or with a ledger (a row kept only for its bank id): it can't be restored.
  */
 export function findByExternalId(ctx: AppContext, accountId: number, externalId: string) {
-  const row = ctx.q.get<{ id: number; deletedAt: string | null }>(
-    'SELECT id, deleted_at AS deletedAt FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND external_id = ?',
+  const row = ctx.q.get<{ id: number; deletedAt: string | null; bankIdOnly: number }>(
+    'SELECT id, deleted_at AS deletedAt, bank_id_only AS bankIdOnly FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND external_id = ?',
     accountId,
     externalId,
   )
+  if (row?.bankIdOnly) throw new HTTPException(409, { message: 'This transaction went with the account or ledger that had it' })
   if (row) return { id: row.id, deleted: !!row.deletedAt }
   const held = ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', accountId) ? ctx.accountWide.holder(accountId, externalId) : undefined
   if (held?.frozen) throw new HTTPException(409, { message: 'Another account has this transaction' })
@@ -1055,11 +1058,14 @@ export function withChanges(ctx: AppContext, ids: number[], fn: () => void): Omi
   return { updated: changes.length, changes }
 }
 
-/** Purges soft-deleted transactions older than `days` (called by the nightly job). */
+/**
+ * Purges soft-deleted transactions older than `days` (called by the nightly job). Not the rows
+ * kept only for their bank ids (bank_id_only): those stay as long as their account does.
+ */
 export function purgeDeleted(ctx: AppContext, days = 30) {
   const cutoff = new Date(ctx.now().getTime() - days * 86_400_000).toISOString()
   ctx.q.transaction(() => {
-    releaseLinks(ctx, 'deleted_at IS NOT NULL AND deleted_at < ?', cutoff)
-    ctx.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NOT NULL AND deleted_at < ?', cutoff)
+    releaseLinks(ctx, 'deleted_at IS NOT NULL AND deleted_at < ? AND bank_id_only = 0', cutoff)
+    ctx.q.run('DELETE FROM transactions WHERE ledger_id = @ledger AND deleted_at IS NOT NULL AND deleted_at < ? AND bank_id_only = 0', cutoff)
   })
 }
