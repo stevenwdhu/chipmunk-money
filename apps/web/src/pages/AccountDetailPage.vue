@@ -10,6 +10,7 @@ import LineChart from '@/components/charts/LineChart.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import MoneyText from '@/components/MoneyText.vue'
+import AllLedgersTable from '@/components/sharing/AllLedgersTable.vue'
 import ShareAccountDialog from '@/components/sharing/ShareAccountDialog.vue'
 import TransactionFilterBar from '@/components/TransactionFilterBar.vue'
 import TransactionTable from '@/components/TransactionTable.vue'
@@ -38,6 +39,8 @@ import { useIsDesktop } from '@/composables/useBreakpoint'
 import { errorMessage } from '@/lib/api'
 import { money, timeAgo } from '@/lib/format'
 import { currentLedger } from '@/lib/ledger'
+import { listOf } from '@/lib/sharing'
+import { cn } from '@/lib/utils'
 import { useUiStore } from '@/stores/ui'
 
 const route = useRoute()
@@ -53,16 +56,22 @@ const ledgers = useLedgers()
 const sharing = computed(() => account.value?.sharing ?? null)
 /** This ledger looks after it: it's the account's home, or the only ledger that has it. A ledger it's shared with only holds transactions on it. */
 const managed = computed(() => !sharing.value || sharing.value.isHome)
-const sharedWith = computed(() => {
-  const names = (sharing.value?.ledgers ?? []).filter((l) => l.slug !== currentLedger.value).map((l) => l.name)
-  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-})
+const sharedWith = computed(() => listOf((sharing.value?.ledgers ?? []).filter((l) => l.slug !== currentLedger.value).map((l) => l.name)))
 // The recorded balances are the home's.
 const snapshots = useSnapshots(id, managed)
 // The same list as the Transactions page, with its filters in the URL and a running balance.
 const f = useTransactionFilters()
 const list = useTransactions(() => ({ accountId: id.value, ...f.filters.value }), 100, { keep: true })
 const items = computed(() => list.data.value?.pages.flatMap((p) => p.items) ?? [])
+/**
+ * A shared account lists this ledger's transactions, or every ledger's (`?ledgers=all`), like the
+ * bank's statement. The switch is for someone who can see every ledger that has the account.
+ */
+const seesAll = computed(() => !!sharing.value?.ledgers.every((l) => ledgers.all.value.some((x) => x.slug === l.slug)))
+const allLedgers = computed({
+  get: () => !!sharing.value && f.q('ledgers') === 'all',
+  set: (v) => f.setQuery({ ledgers: v ? 'all' : undefined }),
+})
 const emptyTitle = computed(() => (f.activeCount.value ? 'Nothing matches these filters.' : 'No transactions in this account'))
 const emptyDescription = computed(() =>
   f.activeCount.value
@@ -223,24 +232,47 @@ async function removeSnapshot(snapshotId: number) {
 
       <section class="flex flex-col gap-3 md:gap-4" aria-labelledby="account-transactions">
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="account-transactions" class="text-base font-semibold">Transactions</h2>
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h2 id="account-transactions" class="text-base font-semibold">Transactions</h2>
+            <div v-if="sharing && seesAll" class="grid grid-cols-2 rounded-lg bg-muted p-1" role="radiogroup" aria-label="Whose transactions">
+              <button
+                v-for="opt in [{ all: false, label: 'This ledger' }, { all: true, label: 'All ledgers' }]"
+                :key="opt.label"
+                type="button"
+                role="radio"
+                :aria-checked="allLedgers === opt.all"
+                :class="cn('rounded-md px-3 py-1 text-sm font-medium transition-colors', allLedgers === opt.all ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground')"
+                @click="allLedgers = opt.all"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
           <Button variant="outline" size="sm" as-child>
             <RouterLink :to="{ name: 'transactions', query: { accountId: account.id, period: 'all' } }">Open in Transactions</RouterLink>
           </Button>
         </div>
-        <TransactionFilterBar :filters="f" />
-        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <TransactionTotals :items="items" :more="list.hasNextPage.value" single-account />
-          <span v-if="f.activeCount.value && !accountTypeInfo(account.type).revalued" class="text-xs text-muted-foreground">
-            Clear the filters to see the running balance.
-          </span>
-        </div>
-        <TransactionTable :list="list" hide-account :empty-title="emptyTitle" :empty-description="emptyDescription">
-          <template #empty>
-            <Button v-if="f.activeCount.value" variant="outline" size="sm" @click="f.clear()">Clear filters</Button>
-            <Button v-else size="sm" @click="ui.openAdd({ accountId: account.id })"><Plus />Add transaction</Button>
-          </template>
-        </TransactionTable>
+        <template v-if="allLedgers">
+          <p class="text-sm text-muted-foreground">
+            What every ledger has on {{ account.name }}, with the whole account’s balance after each. Another ledger’s transaction can be moved here to edit it.
+          </p>
+          <AllLedgersTable :account="account" />
+        </template>
+        <template v-else>
+          <TransactionFilterBar :filters="f" />
+          <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+            <TransactionTotals :items="items" :more="list.hasNextPage.value" single-account />
+            <span v-if="f.activeCount.value && !accountTypeInfo(account.type).revalued" class="text-xs text-muted-foreground">
+              Clear the filters to see the running balance.
+            </span>
+          </div>
+          <TransactionTable :list="list" hide-account :empty-title="emptyTitle" :empty-description="emptyDescription">
+            <template #empty>
+              <Button v-if="f.activeCount.value" variant="outline" size="sm" @click="f.clear()">Clear filters</Button>
+              <Button v-else size="sm" @click="ui.openAdd({ accountId: account.id })"><Plus />Add transaction</Button>
+            </template>
+          </TransactionTable>
+        </template>
       </section>
 
       <Card v-if="managed && snapshots.data.value?.length" class="gap-2">
