@@ -339,7 +339,7 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
       const base = recorded ? -1_450 : -1_000
       expect(change.opening).toEqual({ from: { slug: 'personal', name: 'Personal' }, to: { slug: 'family', name: 'Family' }, baseMinor: base })
       expect(change.notices).toEqual([
-        `Visa’s opening balance and recorded balances move to Family: ${recorded ? '-$14.50' : '-$10.00'} of its balance today, and earlier balances shift too.`,
+        `Visa’s opening balance and recorded balances move to Family: ${recorded ? '$14.50' : '$10.00'} owed of its balance today, and earlier balances shift too.`,
       ])
       // The whole change is in the parts. Before: Personal −1000 − 200 − 10 = −1210, or −2000 − 10 less
       // Family's −300 and Trip's −50 up to 31 July = −1660. After, Family holds −300 − 200 − 10 = −510:

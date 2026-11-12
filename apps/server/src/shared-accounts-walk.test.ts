@@ -205,7 +205,7 @@ it('shares a card, uses it in every ledger, syncs and imports, changes its home,
   expect(own).toEqual({ parts: { personal: -2_500 }, totalMinor: -2_500 })
   // Visa is the bank's whole balance still, so Family carries that −$25.00 too, with the opening balance and Trip's taxi.
   expect(stopped.data.notices).toContain(
-    'Personal’s new account keeps its balance of -$25.00, and Visa’s total is the whole bank balance again, so that amount is also in Family until you record how it was settled.',
+    'Personal’s new account keeps its balance of $25.00 owed, and Visa’s total is the whole bank balance again, so that amount is also in Family until you record how it was settled.',
   )
   expect(check()).toEqual({ parts: { family: -123_500, cabin: 1_000 }, totalMinor: -122_500 })
   // The bank is unchanged: nothing comes back for the rows Personal kept.
@@ -226,7 +226,7 @@ it('shares a card, uses it in every ledger, syncs and imports, changes its home,
   expect(gone.changes).toEqual([
     'Cabin is Visa’s home now.',
     'Family’s 4 transactions on Visa moved to Cabin.',
-    'Visa’s opening balance and recorded balances moved to Cabin. Cabin’s balance on Visa changed by -$1,025.00, and earlier balances shifted too.',
+    'Visa’s opening balance and recorded balances moved to Cabin. Cabin owes $1,025.00 more on Visa, and earlier balances shifted too.',
     'Family and all its data were deleted.',
   ])
   expect((await tool('list_ledgers', {})).data.ledgers.map((l: Json) => l.slug)).toEqual(['personal', 'trip', 'cabin'])

@@ -13,7 +13,7 @@ import type { AppContext } from './context'
 import { listInstitutions } from './institutions'
 import { moveTransactions } from './moves'
 import { eraseAll } from './setup'
-import { addMember, getSharing, removeMember, setSharing } from './sharing'
+import { addMember, balanceWords, changeWords, getSharing, removeMember, setSharing, stepWords } from './sharing'
 
 /**
  * Sharing an account with other ledgers, at the service level: adding a ledger, the sharing
@@ -333,4 +333,25 @@ describe('deleting, erasing or clearing a ledger that has a shared account', () 
       expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: -1_200 }, totalMinor: -1_200 })
     })
   }
+})
+
+describe('a balance in words', () => {
+  const visa = { name: 'Visa', type: 'credit', currency: 'CAD' } as const
+  const savings = { name: 'Savings', type: 'savings', currency: 'CAD' } as const
+
+  it('is what’s owed on a credit card, as its page shows it', () => {
+    expect(balanceWords(-20_000, visa)).toBe('$200.00 owed')
+    expect(balanceWords(0, visa)).toBe('$0.00 owed')
+    expect(balanceWords(500, visa)).toBe('$5.00 in credit')
+    expect(changeWords('Personal', -20_000, visa)).toBe('Personal owes $200.00 more on Visa')
+    expect(changeWords('Personal', 5_000, visa, true)).toBe('Personal owes $50.00 less on Visa')
+    expect(stepWords(-25_500, visa)).toBe('$255.00 more')
+  })
+
+  it('is the balance itself on an account that isn’t a debt', () => {
+    expect(balanceWords(-20_000, savings)).toBe('-$200.00')
+    expect(changeWords('Personal', 20_000, savings)).toBe('Personal’s balance on Savings goes up by $200.00')
+    expect(changeWords('Personal', -5_000, savings, true)).toBe('Personal’s balance on Savings went down by $50.00')
+    expect(stepWords(-5_000, savings)).toBe('down by $50.00')
+  })
 })

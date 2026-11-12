@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
-import { addDays, addMonths, formatMoney, monthOf, monthRange, type Account, type AccountSharing, type ISODate } from '@chipmunk/shared'
+import { accountTypeInfo, addDays, addMonths, formatMoney, monthOf, monthRange, statementBalance, type Account, type AccountSharing, type AccountType, type ISODate } from '@chipmunk/shared'
 import { aiEnabled } from '../ai/runner'
 import { ledgers as ledgersTable } from '../db/schema'
 import { badRequest } from '../lib/http'
@@ -589,6 +589,35 @@ function leave(
   return { left, openingBase, deferred }
 }
 
+/** What the sentences about an account's balance need of it. */
+type Worded = { name: string; type: AccountType; currency: string }
+
+/**
+ * A balance on an account in words, the way its page shows it: what's owed on a credit card or a
+ * loan ("$200.00 owed", or "$5.00 in credit"), and the balance itself on any other account.
+ */
+export function balanceWords(minor: number, a: Pick<Worded, 'type' | 'currency'>): string {
+  if (!accountTypeInfo(a.type).liability) return formatMoney(minor, a.currency)
+  const owed = statementBalance(minor, a.type)
+  return owed < 0 ? `${formatMoney(0 - owed, a.currency)} in credit` : `${formatMoney(owed, a.currency)} owed`
+}
+
+/** How far a balance moves, by its direction: "$200.00 more" or "$50.00 less" owed, "up by $200.00" or "down by $50.00" otherwise. */
+export function stepWords(minor: number, a: Pick<Worded, 'type' | 'currency'>): string {
+  const money = formatMoney(Math.abs(minor), a.currency)
+  if (accountTypeInfo(a.type).liability) return `${money} ${minor < 0 ? 'more' : 'less'}`
+  return `${minor > 0 ? 'up' : 'down'} by ${money}`
+}
+
+/**
+ * A change to a ledger's balance on an account, by its direction: "Personal owes $200.00 more on
+ * Visa" for a credit card or a loan, "Personal’s balance on Savings goes up by $200.00" otherwise.
+ */
+export function changeWords(who: string, minor: number, a: Worded, done = false): string {
+  if (accountTypeInfo(a.type).liability) return `${who} owes ${stepWords(minor, a)} on ${a.name}`
+  return `${who}’s balance on ${a.name} ${done ? 'went' : 'goes'} ${stepWords(minor, a)}`
+}
+
 /**
  * What happened to a split payment a ledger that left took part in, in words. The amount of a
  * payment another ledger holds is left out: the words are kept in the leaving ledger's activity
@@ -731,7 +760,7 @@ export function setSharing(
     }
     if (opening) {
       notices.push(
-        `${account.name}’s opening balance and recorded balances move to ${opening.to.name}: ${formatMoney(opening.baseMinor, account.currency)} of its balance today, and earlier balances shift too.`,
+        `${account.name}’s opening balance and recorded balances move to ${opening.to.name}: ${balanceWords(opening.baseMinor, account)} of its balance today, and earlier balances shift too.`,
       )
     }
     for (const l of removed) {
@@ -742,7 +771,7 @@ export function setSharing(
         notices.push(`${count(l.moved, 'pending transaction')} ${go} to ${homeAfter.ledger.name}, because the bank will post ${l.moved === 1 ? 'it' : 'them'} again.`)
       }
       notices.push(
-        `${l.ledger.name}’s new account keeps its balance of ${formatMoney(l.account.balanceMinor, account.currency)}, and ${account.name}’s total is the whole bank balance again, so that amount is also in ${sharing.opening.name} until you record how it was settled.`,
+        `${l.ledger.name}’s new account keeps its balance of ${balanceWords(l.account.balanceMinor, account)}, and ${account.name}’s total is the whole bank balance again, so that amount is also in ${sharing.opening.name} until you record how it was settled.`,
       )
     }
     report = {

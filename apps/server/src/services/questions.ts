@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
-import { formatMoney, type ISODate, type LedgerAction, type LedgerAnswers, type LedgerQuestion, type LedgerQuestions } from '@chipmunk/shared'
+import { type ISODate, type LedgerAction, type LedgerAnswers, type LedgerQuestion, type LedgerQuestions } from '@chipmunk/shared'
 import { aiEnabled } from '../ai/runner'
 import { bankAccounts } from '../db/schema'
 import { badRequest } from '../lib/http'
@@ -11,7 +11,7 @@ import type { AppContext, CtxOf } from './context'
 import { categorizeUncategorized } from './import'
 import { MOVE_LIMIT, moveTransactions, sendAsBankIds, sendAsDeleted } from './moves'
 import { today } from './settings'
-import { changeHome, moveChunks, splitNotice } from './sharing'
+import { changeHome, changeWords, moveChunks, splitNotice, stepWords } from './sharing'
 import { leaveSplits } from './splits'
 
 /**
@@ -207,7 +207,8 @@ function openingBase(m: PartsModel, me: string): number {
 
 /**
  * The note under the question about this ledger's transactions on an account: for each choice, the
- * change in each other ledger's balance on it, beyond what the opening balance going to the home
+ * change in each other ledger's balance on it, by its direction (what a credit card's ledger owes
+ * more or less), beyond what the opening balance going to the home
  * does (its notice has that). For a synced account it's as if a sync had then run with the bank
  * unchanged, which is when the opening ledger takes the difference: what changes at once and what
  * the sync then adds are both said, when they differ. While the new home is still to
@@ -215,7 +216,6 @@ function openingBase(m: PartsModel, me: string): number {
  * is spelled out when they differ by more than that.
  */
 function rowsNote(a: SharedAccount, m: PartsModel, options: Array<{ label: string; rows: RowsChoice }>): string {
-  const money = (minor: number) => formatMoney(minor, a.facts.currency, { signed: true })
   const others = a.ledgers.filter((l) => l !== a.me)
   const homes = a.me.isHome ? a.takers : [a.home]
   const effect = (home: AccountLedger, rows: RowsChoice, homeName: string) => {
@@ -226,9 +226,9 @@ function rowsNote(a: SharedAccount, m: PartsModel, options: Array<{ label: strin
       const now = (after.now.get(l.ledgerId) ?? 0) - (before.now.get(l.ledgerId) ?? 0)
       const synced = (after.synced.get(l.ledgerId) ?? 0) - (before.synced.get(l.ledgerId) ?? 0)
       if (!now && !synced) return []
-      const whose = `${l === home ? homeName : l.name}’s balance on ${a.facts.name}`
-      if (synced === now) return [`${whose} changes by ${money(now)}`]
-      return [now ? `${whose} changes by ${money(now)} now, and by ${money(synced - now)} more at the next sync` : `at the next sync, ${whose} changes by ${money(synced)}`]
+      const who = l === home ? homeName : l.name
+      if (synced === now) return [changeWords(who, now, a.facts)]
+      return [now ? `${changeWords(who, now, a.facts)} now, and ${stepWords(synced - now, a.facts)} at the next sync` : `at the next sync, ${changeWords(who, synced, a.facts)}`]
     })
     return changed.length ? list(changed) : `no other ledger’s balance on ${a.facts.name} changes`
   }
@@ -246,10 +246,12 @@ function rowsNote(a: SharedAccount, m: PartsModel, options: Array<{ label: strin
 
 /** The notice that the opening balance goes to the home, with what that adds to the home's balance today. */
 function openingNotice(a: SharedAccount, baseMinor: number, home: LedgerName | null, done = false): string {
-  const money = formatMoney(baseMinor, a.facts.currency, { signed: true })
-  const [move, changes, shift] = done ? ['moved', 'changed', 'shifted'] : ['move', 'changes', 'shift']
-  const whose = home ? `${home.name}’s balance` : 'Its balance'
-  return `${a.facts.name}’s opening balance and recorded balances ${move} to ${home ? home.name : 'its new home'}. ${whose} on ${a.facts.name} ${changes} by ${money}${done ? '' : ' today'}, and earlier balances ${shift} too.`
+  const [move, shift] = done ? ['moved', 'shifted'] : ['move', 'shift']
+  const who = home ? home.name : 'The new home'
+  const change = baseMinor
+    ? `${changeWords(who, baseMinor, a.facts, done)}${done ? '' : ' today'}`
+    : `${who}’s balance on ${a.facts.name} ${done ? 'didn’t change' : 'doesn’t change today'}`
+  return `${a.facts.name}’s opening balance and recorded balances ${move} to ${home ? home.name : 'its new home'}. ${change}, and earlier balances ${shift} too.`
 }
 
 const sharedAccounts: Topic = {

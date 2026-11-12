@@ -115,7 +115,7 @@ describe('GET /ledgers/:ledger/questions', () => {
         {
           id: `rows:${w.visa}`,
           text: 'Personal has 2 transactions on Visa. Delete them or move them?',
-          note: 'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family’s balance on Visa changes by -$280.00. Move to Trip: Trip’s balance on Visa changes by -$280.00.',
+          note: 'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family owes $280.00 more on Visa. Move to Trip: Trip owes $280.00 more on Visa.',
           options: [
             { value: 'delete', label: 'Delete them' },
             { value: 'move:family', label: 'Move to Family' },
@@ -123,7 +123,7 @@ describe('GET /ledgers/:ledger/questions', () => {
           ],
         },
       ],
-      notices: ['Visa’s opening balance and recorded balances move to its new home. Its balance on Visa changes by -$1,000.00 today, and earlier balances shift too.'],
+      notices: ['Visa’s opening balance and recorded balances move to its new home. The new home owes $1,000.00 more on Visa today, and earlier balances shift too.'],
       blockers: [],
     })
     expect((await w.call('GET', '/ledgers/personal/questions?action=archive')).body.questions.map((q: Json) => q.id)).toEqual([`home:${w.visa}`])
@@ -194,7 +194,7 @@ describe('the three actions over HTTP', () => {
         changes: [
           'Family is Visa’s home now.',
           'Personal’s 2 transactions on Visa moved to Trip.',
-          'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+          'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
           'Personal and all its data were deleted.',
         ],
         dryRun: false,
@@ -230,7 +230,7 @@ describe('the three actions over HTTP', () => {
       accounts: 1,
       changes: [
         'Trip is Visa’s home now.',
-        'Visa’s opening balance and recorded balances moved to Trip. Trip’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+        'Visa’s opening balance and recorded balances moved to Trip. Trip owes $1,000.00 more on Visa, and earlier balances shifted too.',
         'Personal was archived.',
       ],
       dryRun: false,
@@ -256,7 +256,7 @@ describe('dry runs and the safety copy', () => {
         changes: [
           'Family is Visa’s home now.',
           'Personal’s 2 transactions on Visa were deleted.',
-          'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+          'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
           'Personal and all its data were deleted.',
         ],
         dryRun: true,

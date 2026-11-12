@@ -168,14 +168,14 @@ describe('the questions', () => {
     const rows = {
       id: `rows:${w.visa}`,
       text: 'Personal has 2 transactions on Visa. Delete them or move them?',
-      note: 'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family’s balance on Visa changes by -$280.00. Move to Trip: Trip’s balance on Visa changes by -$280.00.',
+      note: 'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family owes $280.00 more on Visa. Move to Trip: Trip owes $280.00 more on Visa.',
       options: [
         { value: 'delete', label: 'Delete them' },
         { value: 'move:family', label: 'Move to Family' },
         { value: 'move:trip', label: 'Move to Trip' },
       ],
     }
-    const notice = 'Visa’s opening balance and recorded balances move to its new home. Its balance on Visa changes by -$1,000.00 today, and earlier balances shift too.'
+    const notice = 'Visa’s opening balance and recorded balances move to its new home. The new home owes $1,000.00 more on Visa today, and earlier balances shift too.'
     expect(w.ask(w.personal, 'delete')).toEqual({ questions: [home, rows], notices: [notice], blockers: [] })
     expect(w.ask(w.personal, 'erase')).toEqual({ questions: [home, rows], notices: [notice], blockers: [] })
     // Archiving keeps its transactions.
@@ -190,7 +190,7 @@ describe('the questions', () => {
         {
           id: `rows:${w.visa}`,
           text: 'Family has 2 transactions on Visa. Delete them or move them?',
-          note: 'Delete them: Personal’s balance on Visa changes by -$300.00. Move to Personal: Personal’s balance on Visa changes by -$420.00. Move to Trip: Trip’s balance on Visa changes by -$420.00.',
+          note: 'Delete them: Personal owes $300.00 more on Visa. Move to Personal: Personal owes $420.00 more on Visa. Move to Trip: Trip owes $420.00 more on Visa.',
           options: [
             { value: 'delete', label: 'Delete them' },
             { value: 'move:personal', label: 'Move to Personal' },
@@ -206,7 +206,7 @@ describe('the questions', () => {
       {
         text: 'Trip has 1 transaction on Visa. Delete it or move it?',
         // Trip's row is dated before the recorded balance too.
-        note: 'Delete it: Personal’s balance on Visa changes by -$50.00. Move to Personal: Personal’s balance on Visa changes by -$50.00. Move to Family: Family’s balance on Visa changes by -$50.00.',
+        note: 'Delete it: Personal owes $50.00 more on Visa. Move to Personal: Personal owes $50.00 more on Visa. Move to Family: Family owes $50.00 more on Visa.',
         options: [{ label: 'Delete it' }, { label: 'Move to Personal' }, { label: 'Move to Family' }],
       },
     ])
@@ -216,7 +216,7 @@ describe('the questions', () => {
     const w = basic({ recorded: true })
     // Personal's −$200.00 of 5 August is in the recorded balance: the opening ledger, which the new home becomes, takes it.
     expect(w.ask(w.personal, 'delete').questions[1]!.note).toBe(
-      'Delete them: the new home’s balance on Visa changes by -$200.00. Move to Family: Family’s balance on Visa changes by -$280.00. Move to Trip: Trip’s balance on Visa changes by -$280.00.',
+      'Delete them: the new home owes $200.00 more on Visa. Move to Family: Family owes $280.00 more on Visa. Move to Trip: Trip owes $280.00 more on Visa.',
     )
   })
 
@@ -230,7 +230,7 @@ describe('the questions', () => {
     const asked = b.ask(b.personal, 'delete')
     expect(asked.questions.map((q) => q.options.map((o) => o.value))).toEqual([['family'], ['delete', 'move:family']])
     // One ledger can be the home, so it's named.
-    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to Family. Family’s balance on Visa changes by -$1,000.00 today, and earlier balances shift too.'])
+    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to Family. Family owes $1,000.00 more on Visa today, and earlier balances shift too.'])
   })
 
   it('block the action when no other ledger can be the home, or the key can’t use every ledger that has the account', () => {
@@ -308,7 +308,7 @@ describe('deleting or erasing the home', () => {
     expect(w.act(w.personal, 'delete', { home: 'family', rows: 'delete' })).toEqual([
       'Family is Visa’s home now.',
       'Personal’s 2 transactions on Visa were deleted.',
-      'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+      'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
       'Personal and all its data were deleted.',
     ])
     expect(w.storage.registry.find(w.personal.ledger.id)).toBeUndefined()
@@ -334,7 +334,7 @@ describe('deleting or erasing the home', () => {
     expect(w.act(w.personal, 'erase', { home: 'trip', rows: 'move:family' })).toEqual([
       'Trip is Visa’s home now.',
       'Personal’s 2 transactions on Visa moved to Family.',
-      'Visa’s opening balance and recorded balances moved to Trip. Trip’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+      'Visa’s opening balance and recorded balances moved to Trip. Trip owes $1,000.00 more on Visa, and earlier balances shifted too.',
       'Personal’s data was erased.',
     ])
     // Family −420 − 280. Trip −50 − 1,000. Visa is still −1,750.
@@ -400,12 +400,12 @@ describe('deleting or erasing a ledger the account is shared with', () => {
     const asked = w.ask(w.personal, 'delete')
     expect(asked.questions.map((q) => q.id)).toEqual([`rows:${w.visa}`])
     expect(asked.questions[0]!.note).toBe(
-      'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family’s balance on Visa changes by -$280.00. Move to Trip: Trip’s balance on Visa changes by -$280.00.',
+      'Delete them: no other ledger’s balance on Visa changes. Move to Family: Family owes $280.00 more on Visa. Move to Trip: Trip owes $280.00 more on Visa.',
     )
-    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to Family. Family’s balance on Visa changes by -$1,000.00 today, and earlier balances shift too.'])
+    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to Family. Family owes $1,000.00 more on Visa today, and earlier balances shift too.'])
     expect(w.act(w.personal, 'delete', { rows: 'move:family' })).toEqual([
       'Personal’s 2 transactions on Visa moved to Family.',
-      'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+      'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
       'Personal and all its data were deleted.',
     ])
     // Family −420 − 1,000 − 280.
@@ -442,7 +442,7 @@ describe('deleting a ledger that takes part in split payments', () => {
     const before = w.history()
     expect(w.ask(w.family, 'delete').questions[0]).toMatchObject({
       text: 'Family has 6 transactions on Visa. Delete them or move them?',
-      note: 'Delete them: Personal’s balance on Visa changes by +$40.00, and Trip’s balance on Visa changes by +$20.00. Move to Personal: Personal’s balance on Visa changes by -$310.00. Move to Trip: Trip’s balance on Visa changes by -$310.00.',
+      note: 'Delete them: Personal owes $40.00 less on Visa, and Trip owes $20.00 less on Visa. Move to Personal: Personal owes $310.00 more on Visa. Move to Trip: Trip owes $310.00 more on Visa.',
     })
     expect(w.act(w.family, 'delete', { rows: 'delete' })).toEqual([
       'Family’s share of $40.00 of Personal’s payment on 2026-09-22 goes back to Personal.',
@@ -530,7 +530,7 @@ describe('a synced account', () => {
   it('says what the next sync does, which then does it: Personal takes what Family’s deleted rows were', async () => {
     const w = await synced()
     expect(w.ask(w.family, 'delete').questions[0]!.note).toBe(
-      'Delete them: at the next sync, Personal’s balance on Visa changes by -$200.00. Move to Personal: Personal’s balance on Visa changes by -$200.00. Move to Trip: Trip’s balance on Visa changes by -$200.00.',
+      'Delete them: at the next sync, Personal owes $200.00 more on Visa. Move to Personal: Personal owes $200.00 more on Visa. Move to Trip: Trip owes $200.00 more on Visa.',
     )
     expect(w.act(w.family, 'delete', { rows: 'delete' })).toEqual([
       'Family’s 2 transactions on Visa were deleted.',
@@ -576,10 +576,10 @@ describe('a synced account', () => {
     const w = await synced()
     const asked = w.ask(w.personal, 'delete')
     expect(asked.questions[1]!.note).toBe(
-      'Delete it: at the next sync, the new home’s balance on Visa changes by -$100.00. Move to Family: Family’s balance on Visa changes by -$100.00. Move to Trip: Trip’s balance on Visa changes by -$100.00.',
+      'Delete it: at the next sync, the new home owes $100.00 more on Visa. Move to Family: Family owes $100.00 more on Visa. Move to Trip: Trip owes $100.00 more on Visa.',
     )
     // The opening balance is the +$5.00 the first sync left there.
-    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to its new home. Its balance on Visa changes by +$5.00 today, and earlier balances shift too.'])
+    expect(asked.notices).toEqual(['Visa’s opening balance and recorded balances move to its new home. The new home owes $5.00 less on Visa today, and earlier balances shift too.'])
     w.act(w.personal, 'delete', { home: 'trip', rows: 'delete' })
     expect(w.check(w.personal)).toEqual({ trip: -3_500, family: -20_000 })
     expect(w.kept()).toEqual(['b1'])
@@ -652,7 +652,7 @@ describe('a synced account with a recorded balance', () => {
     // it at once, and its share of $150.00 comes back: −300 + 150. The sync then finds Visa −255 short
     // of the bank (−170 − 60 − 25), which Personal takes too.
     expect(w.ask(w.family, 'delete').questions[0]!.note).toBe(
-      'Delete them: Personal’s balance on Visa changes by -$150.00 now, and by -$255.00 more at the next sync. Move to Personal: Personal’s balance on Visa changes by -$405.00. Move to Trip: Trip’s balance on Visa changes by -$405.00.',
+      'Delete them: Personal owes $150.00 more on Visa now, and $255.00 more at the next sync. Move to Personal: Personal owes $405.00 more on Visa. Move to Trip: Trip owes $405.00 more on Visa.',
     )
     w.act(w.family, 'delete', { rows: 'delete' })
     expect(w.check(w.family)).toEqual({ personal: -120_000, trip: -4_000 })
@@ -808,7 +808,7 @@ describe('archiving', () => {
     const before = w.history()
     expect(w.act(w.personal, 'archive', { home: 'family', rows: 'delete' })).toEqual([
       'Family is Visa’s home now.',
-      'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+      'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
       'Personal was archived.',
     ])
     expect(w.storage.registry.get('personal').archivedAt).not.toBeNull()
@@ -841,10 +841,10 @@ describe('archiving', () => {
     const w = basic({ recorded: true })
     changeHome(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER)
     const before = w.history()
-    const notice = 'Visa’s opening balance and recorded balances move to Family. Family’s balance on Visa changes by -$1,000.00 today, and earlier balances shift too.'
+    const notice = 'Visa’s opening balance and recorded balances move to Family. Family owes $1,000.00 more on Visa today, and earlier balances shift too.'
     expect(w.ask(w.personal, 'archive')).toEqual({ questions: [], notices: [notice], blockers: [] })
     expect(w.act(w.personal, 'archive')).toEqual([
-      'Visa’s opening balance and recorded balances moved to Family. Family’s balance on Visa changed by -$1,000.00, and earlier balances shifted too.',
+      'Visa’s opening balance and recorded balances moved to Family. Family owes $1,000.00 more on Visa, and earlier balances shifted too.',
       'Personal was archived.',
     ])
     expect(w.check()).toEqual({ family: -142_000, personal: -28_000, trip: -5_000 })
