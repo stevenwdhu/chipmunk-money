@@ -364,6 +364,78 @@ describe('bank sync on a shared account', () => {
     w.check()
   })
 
+  it('adopts what Family entered by hand rather than restoring the dropped charge, when Plaid says which one the posted one replaces', async () => {
+    const w0 = sharedWorld()
+    const w = { ...w0, ...world(w0) }
+    plaid(w, [remote('p3', '2026-09-30', -4000, 'Corner Cafe', { pending: true })])
+    w.move(w.personal, ['p3'], w.family)
+    const p3 = w.row('p3')!
+    expect(plaid(w, [], [{ remoteId: 'p3' }])).toMatchObject({ removed: 1 })
+    expect(w.row('p3')).toMatchObject({ deleted: 1, removedAt: '2026-10-03T18:00:00.000Z' })
+
+    // Family sees it gone and enters the charge by hand. Then Plaid posts it, naming the one it replaces.
+    const mine = await createTransaction(
+      w.family,
+      transactionCreateSchema.parse({ accountId: w.visa, date: '2026-10-01', amountMinor: -4400, payee: 'Corner Cafe' }),
+      { useAi: false },
+    )
+    const posted = plaid(w, [remote('c3', '2026-10-01', -4400, 'Corner Cafe', { replaces: 'p3' })])
+    expect(posted).toMatchObject({ added: 0, updated: 0, adopted: 1, removed: 0 })
+    expect([...posted.byLedger]).toEqual([[w.family.ledger.id, { added: 0, updated: 0, adopted: 1, removed: 0 }]])
+    // One live row for the one charge: −$44.00 in Family, not −$88.00.
+    expect(w.rows()).toMatchObject([
+      { ledger: 'family', id: p3.id, externalId: 'p3', status: 'pending', deleted: 1 },
+      { ledger: 'family', id: mine.id, externalId: 'c3', origin: 'manual', status: 'cleared', amount: -4400, deleted: 0 },
+    ])
+    expect(expectPartsSumToAccount(w.storage, w.visa).parts).toEqual({ personal: 0, family: -4400 })
+    w.check()
+
+    // Without one entered by hand, the dropped one comes back as the posted one, where it is.
+    plaid(w, [remote('p6', '2026-09-30', -1500, 'Gas Bar', { pending: true })])
+    w.move(w.personal, ['p6'], w.family)
+    const p6 = w.row('p6')!
+    plaid(w, [], [{ remoteId: 'p6' }])
+    expect(plaid(w, [remote('c6', '2026-10-01', -1500, 'Gas Bar', { replaces: 'p6' })])).toMatchObject({ added: 0, updated: 1, adopted: 0 })
+    expect(w.row('c6')).toMatchObject({ ledger: 'family', id: p6.id, status: 'cleared', deleted: 0, removedAt: null })
+    w.check()
+  })
+
+  it('adopts what Family entered by hand rather than restoring the dropped charge, when the bank sends it again under its id', async () => {
+    const w = await synced({ balance: '-40.00', transactions: [tx('p3', '2026-09-30', '-40.00', 'Corner Cafe', { pending: true })] })
+    w.move(w.personal, ['p3'], w.family)
+    const p3 = w.row('p3')!
+    const dropped = w.card.transactions
+    w.card.transactions = []
+    w.card.balance = '0.00'
+    expect(await w.sync()).toMatchObject({ removed: 1 })
+
+    // Family sees it gone and enters the charge by hand. Then the bank reports it again, as it was.
+    const mine = await createTransaction(
+      w.family,
+      transactionCreateSchema.parse({ accountId: w.visa, date: '2026-09-30', amountMinor: -4000, payee: 'Corner Cafe' }),
+      { useAi: false },
+    )
+    w.card.transactions = dropped
+    w.card.balance = '-40.00'
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 0, adopted: 1, removed: 0 })
+    // One live row for the one charge, with the bank's id. The dropped one stays deleted, without it.
+    expect(w.rows()).toMatchObject([
+      { ledger: 'family', id: p3.id, externalId: null, deleted: 1 },
+      { ledger: 'family', id: mine.id, externalId: 'p3', origin: 'manual', status: 'pending', amount: -4000, deleted: 0 },
+    ])
+    expect(w.opening()).toMatchObject({ openingBalanceMinor: 0 })
+    expect(expectPartsSumToAccount(w.storage, w.visa).parts).toEqual({ personal: 0, family: -4000 })
+    w.check()
+
+    // The next sync knows it by its id, where it is, and a new amount goes to it.
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    w.card.transactions = [tx('p3', '2026-09-30', '-44.00', 'Corner Cafe', { pending: true })]
+    w.card.balance = '-44.00'
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 1, adopted: 0, removed: 0 })
+    expect(w.rows().filter((r) => !r.deleted)).toMatchObject([{ ledger: 'family', id: mine.id, externalId: 'p3', amount: -4400 }])
+    w.check()
+  })
+
   it('never brings back a pending charge the bank dropped for a later charge of the same amount at another merchant', async () => {
     const w = await synced({ balance: '-40.00', transactions: [tx('p1', '2026-09-30', '-40.00', 'Hotel Hold', { pending: true })] })
     w.move(w.personal, ['p1'], w.family)

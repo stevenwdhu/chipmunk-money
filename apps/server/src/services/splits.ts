@@ -677,6 +677,15 @@ export function followPayment(ctx: AppContext, ctxOf: CtxOf, paymentId: number):
   })
 }
 
+/**
+ * The ledgers that hold a split row of a payment this ledger holds, by id: its own and each with a
+ * share. For a sync or a switch, which settles each ledger a split row changed in.
+ */
+export function splitLedgers(ctx: AppContext, paymentId: number): string[] {
+  const payment = heldPayment(ctx, paymentId)
+  return ctx.accountWide.splitRows(payment.accountId, paymentId).map((r) => r.ledgerId)
+}
+
 /** What a ledger leaving an account did to one split it took part in (leaveSplits). */
 export interface LeftSplit {
   /**

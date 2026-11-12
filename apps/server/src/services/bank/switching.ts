@@ -8,7 +8,7 @@ import type { SwitchRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
 import { deleteTransaction, insertTransaction } from '../transactions'
 import { followBankPayee } from '../payee-names'
-import { followPayment, undoSplitFirst } from '../splits'
+import { followPayment, splitLedgers, undoSplitFirst } from '../splits'
 import { logPayloads } from './apply'
 import type { RemoteTransaction } from './types'
 
@@ -248,7 +248,9 @@ export function applySwitch(
       // Its payee is the new service's now.
       followBankPayee(at, l, r.payee)
       // A split payment's split rows follow it.
-      if (l.splitPayment) followPayment(at, ctxOf, l.id)
+      if (l.splitPayment) {
+        if (followPayment(at, ctxOf, l.id)) for (const ledgerId of splitLedgers(at, l.id)) result.ledgers.add(ledgerId)
+      }
       paired.add(l.id)
       pairedRemote.add(r.remoteId)
       result.matched++

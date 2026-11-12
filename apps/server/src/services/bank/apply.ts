@@ -6,7 +6,7 @@ import type { ActivityActor } from '../activity'
 import { paidOff, recalculateRecurring } from '../recurring'
 import { followBankPayee } from '../payee-names'
 import { payeeKeyOf } from '../payee-namer'
-import { followPayment, undoSplit } from '../splits'
+import { followPayment, splitLedgers, undoSplit } from '../splits'
 import { insertTransaction } from '../transactions'
 import type { RemoteTransaction } from './types'
 
@@ -34,6 +34,11 @@ export interface ApplyResult extends LedgerChanges {
    * where each row is. Only ledgers where something changed. For each one's activity and matching.
    */
   byLedger: Map<string, LedgerChanges>
+  /**
+   * Every ledger a row changed in (its id): byLedger's, and those whose split rows followed a payment
+   * the bank changed, or went when it removed one. Each settles afterwards.
+   */
+  ledgers: Set<string>
 }
 
 type LocalRow = BankRow
@@ -89,8 +94,10 @@ export type ApplyScope =
  *
  * A pending row another ledger holds that the bank removed in the last 7 days, and then sends again
  * (under its id, or posted under a new one), is restored where it is: otherwise the posted one would
- * land in the home, in the wrong ledger. Under a new id it's matched by its payee and amount, and
- * only after one you entered by hand had its chance. One a person deleted is never restored.
+ * land in the home, in the wrong ledger. Under a new id it's matched by its payee and amount. However
+ * the bank sends it again, one entered by hand for the same charge has its chance first: that one is
+ * adopted, and the removed row stays deleted, or one charge would be two rows. One a person deleted
+ * is never restored.
  *
  * A frozen row, which a ledger that stopped sharing the account kept on an account of its own
  * (`frozen`), is only known: nothing is added for its bank id, and it's never updated, adopted,
@@ -119,7 +126,7 @@ export function applyRemoteTransactions(
   const home = ctx.ledger.id
   const homeOf = ctx.accountWide.account(accountId)?.homeLedgerId
   if (homeOf !== undefined && homeOf !== home) throw new Error(`Account ${accountId} syncs in its home ${homeOf}, not in ${home}`)
-  const result: ApplyResult = { added: 0, updated: 0, adopted: 0, removed: 0, newIds: [], byLedger: new Map() }
+  const result: ApplyResult = { added: 0, updated: 0, adopted: 0, removed: 0, newIds: [], byLedger: new Map(), ledgers: new Set() }
   /** Recurring items that lose a payment, and whether each was a paid-off plan before, by ledger. */
   const losing = new Map<string, Map<number, boolean>>()
   /** Recurring items that get a payment back (a row restored), by ledger. */
@@ -153,11 +160,13 @@ export function applyRemoteTransactions(
     const changes = result.byLedger.get(ledgerId) ?? { added: 0, updated: 0, adopted: 0, removed: 0 }
     changes[what]++
     result.byLedger.set(ledgerId, changes)
+    result.ledgers.add(ledgerId)
     result[what]++
   }
   const restoreSince = new Date(ctx.now().getTime() - RESTORE_DAYS * 86_400_000).toISOString()
   /** A pending row another ledger holds, which the bank (not a person) removed in the last 7 days. */
-  const restorable = (t: LocalRow) => t.ledgerId !== home && t.status === 'pending' && !!t.deletedAt && !!t.removedAt && t.removedAt >= restoreSince
+  const restorable = (t: LocalRow) =>
+    t.ledgerId !== home && t.status === 'pending' && !!t.externalId && !!t.deletedAt && !!t.removedAt && t.removedAt >= restoreSince
 
   // The bank's category comes along when it has one (Plaid); otherwise what's there stays. An amount
   // and date you corrected stay too.
@@ -189,6 +198,23 @@ export function applyRemoteTransactions(
   const setBankCategory = (id: number, r: RemoteTransaction) =>
     one(ctx.q.run('UPDATE transactions SET bank_category = @bankCategory, bank_category_confident = @bankConfident WHERE id = @id AND ledger_id = @ledger', { id, ...bank(r) }), 'bank category', id)
 
+  const own = local.filter((t) => !t.frozen)
+  /** What you entered or imported yourself, which the bank's row can turn out to be. */
+  const candidates = own.filter((t) => !t.externalId && !t.deletedAt && t.origin !== 'sync')
+  /**
+   * Adopts the one you entered or imported that is the bank's row, in whichever ledger holds it.
+   * False when there's none. `before` runs first when there is one.
+   */
+  const adopt = (r: RemoteTransaction, key: string, before?: () => void) => {
+    const mine = candidates.find((t) => !used.has(t.id) && sameTransaction(t, r, key))
+    if (!mine) return false
+    before?.()
+    used.add(mine.id)
+    write(mine, r)
+    counted(mine.ledgerId, 'adopted')
+    return true
+  }
+
   ctx.q.transaction(() => {
     const fresh: RemoteTransaction[] = []
     // 1. Known ones.
@@ -200,6 +226,11 @@ export function applyRemoteTransactions(
       }
       used.add(row.id)
       if (row.frozen || (row.deletedAt && !restorable(row))) continue
+      // One the bank removed and sends again: the one entered by hand meanwhile is the bank's row
+      // now, with its id. The removed row stays deleted, without the id, so it's on one row only.
+      const handOver = () =>
+        one(holder(row).q.run('UPDATE transactions SET external_id = NULL WHERE id = @id AND ledger_id = @ledger AND deleted_at IS NOT NULL', { id: row.id }), 'handing over', row.id)
+      if (row.deletedAt && adopt(r, payeeKeyOf(ctx, r.payee), handOver)) continue
       const status = r.pending ? 'pending' : 'cleared'
       const differs =
         !!row.deletedAt ||
@@ -215,22 +246,23 @@ export function applyRemoteTransactions(
     // Rows whose id the bank no longer reports (inside the window we fetched), or that Plaid says were
     // removed: a pending one that posted under a new id (or was dropped), or one with a re-issued id.
     // And the pending ones other ledgers hold that the bank removed lately, which can come back.
-    const own = local.filter((t) => !t.frozen)
     const orphaned = own.filter((t) =>
       window
         ? t.origin === 'sync' && !t.deletedAt && t.externalId && !reported.has(t.externalId) && t.date >= addDays(window.from, -3) && t.date <= window.to
         : !t.deletedAt && t.externalId && removedIds.has(t.externalId),
     )
     const returning = own.filter((t) => restorable(t) && !used.has(t.id))
-    const candidates = own.filter((t) => !t.externalId && !t.deletedAt && t.origin !== 'sync')
 
     for (const r of fresh) {
       // 2. The same transaction under a new id. Plaid names the pending one a posted one replaces
-      // (if you deleted that one, the posted one stays deleted too).
+      // (if you deleted that one, the posted one stays deleted too). One another ledger holds that the
+      // bank removed lately comes back, unless one entered by hand is the charge: then that's adopted.
+      const key = payeeKeyOf(ctx, r.payee)
       const replaced = r.replaces ? byExternalId.get(r.replaces) : undefined
       if (replaced && !replaced.frozen && !used.has(replaced.id)) {
         used.add(replaced.id)
         const back = restorable(replaced)
+        if (back && adopt(r, key)) continue
         if (back) restore(replaced)
         write(replaced, r)
         if (!replaced.deletedAt || back) counted(replaced.ledgerId, 'updated')
@@ -240,7 +272,6 @@ export function applyRemoteTransactions(
       // when the payee is worded differently (another service's ids, after an account moves to it:
       // Plaid's "Golden Noodle" is Wealthsimple's "Tst-Golden Noodle House"), the only one with that amount
       // within 3 days.
-      const key = payeeKeyOf(ctx, r.payee)
       const unused = orphaned.filter((p) => !used.has(p.id))
       const sameAmount = unused.filter((p) => p.amount === r.amountMinor && Math.abs(daysBetween(p.date, r.date)) <= 3)
       const previous =
@@ -253,13 +284,7 @@ export function applyRemoteTransactions(
         continue
       }
       // 3. Adopt what you entered or imported, in whichever ledger holds it.
-      const mine = candidates.find((t) => !used.has(t.id) && sameTransaction(t, r, key))
-      if (mine) {
-        used.add(mine.id)
-        write(mine, r)
-        counted(mine.ledgerId, 'adopted')
-        continue
-      }
+      if (adopt(r, key)) continue
       // A pending row another ledger holds that the bank removed lately, back (posted, or under a new
       // id): only when nothing live is the bank's row, and only by its payee, never by the amount
       // alone. It was removed in an earlier sync, so any later charge of that amount could share it.
@@ -295,7 +320,9 @@ export function applyRemoteTransactions(
     }
 
     // The splits of the payments written follow them, in every ledger with a split row.
-    for (const row of following.values()) followPayment(holder(row), ctxOf, row.id)
+    for (const row of following.values()) {
+      if (followPayment(holder(row), ctxOf, row.id)) for (const ledgerId of splitLedgers(holder(row), row.id)) result.ledgers.add(ledgerId)
+    }
 
     // 5. Vanished pending ones inside the window we fetched. (Posted ones are kept: banks drop old
     // transactions from their listings, and a posted transaction doesn't un-happen.) Plaid says
@@ -310,7 +337,10 @@ export function applyRemoteTransactions(
       if (itemId && !items.has(itemId)) items.set(itemId, paidOff(at, itemId))
       losing.set(p.ledgerId, items)
       // A split payment's split goes first: each share back with the holder, which then loses the payment.
-      if (p.splitPayment) undoSplit(at, ctxOf, p.id, syncActor(provider))
+      if (p.splitPayment) {
+        for (const ledgerId of splitLedgers(at, p.id)) result.ledgers.add(ledgerId)
+        undoSplit(at, ctxOf, p.id, syncActor(provider))
+      }
       one(at.q.run('UPDATE transactions SET deleted_at = @now, removed_at = @now WHERE id = @id AND ledger_id = @ledger AND deleted_at IS NULL', { now, id: p.id }), 'removal', p.id)
       counted(p.ledgerId, 'removed')
     }

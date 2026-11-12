@@ -567,8 +567,11 @@ describe('when the bank changes a split payment', () => {
     })
     expect(w.everything()).toEqual(before)
 
-    // A new date: the split rows take it, in each ledger.
-    expect(w.apply([remote('p1', '2026-08-21', 10_000, { pending: true })])).toMatchObject({ updated: 1 })
+    // A new date: the split rows take it, in each ledger, and each of those is one the sync changed.
+    const moved = w.apply([remote('p1', '2026-08-21', 10_000, { pending: true })])
+    expect(moved).toMatchObject({ updated: 1 })
+    expect([...moved.byLedger.keys()]).toEqual([personal.ledger.id])
+    expect([...moved.ledgers].sort()).toEqual([personal, family, trip].map((c) => c.ledger.id).sort())
     expect(w.splitOf(paid)).toEqual([
       { ledger: 'personal', amount: -8_000, date: '2026-08-21', status: 'pending', payee: GIVEN_PAYEE },
       { ledger: 'family', amount: 5_000, date: '2026-08-21', status: 'pending', payee: PAYEE },
@@ -593,7 +596,7 @@ describe('when the bank changes a split payment', () => {
     expect(w.check()).toEqual({ personal: -18_000, family: -15_000, trip: -7_000 })
 
     // A new amount, $70: Personal, which holds the payment, absorbs it. It keeps −$10 now.
-    w.apply([remote('p2', '2026-08-22', 7_000)])
+    expect([...w.apply([remote('p2', '2026-08-22', 7_000)]).ledgers]).toEqual([personal.ledger.id])
     expect(w.splitOf(paid).map((r) => r.amount)).toEqual([-8_000, 5_000, 3_000])
     expect(getTransaction(personal, paid).split).toEqual({
       part: 'payment',
@@ -607,7 +610,9 @@ describe('when the bank changes a split payment', () => {
     expect(w.check()).toEqual({ personal: -21_000, family: -15_000, trip: -7_000 })
 
     // Plaid removes it: the split is undone first, each share back with Personal, then it's deleted.
-    expect(w.apply([], { removed: [{ remoteId: 'p2' }], floor: null })).toMatchObject({ removed: 1 })
+    const removed = w.apply([], { removed: [{ remoteId: 'p2' }], floor: null })
+    expect(removed).toMatchObject({ removed: 1 })
+    expect([...removed.ledgers].sort()).toEqual([personal, family, trip].map((c) => c.ledger.id).sort())
     expect(w.splitOf(paid)).toEqual([])
     expect(
       personal.q.get(

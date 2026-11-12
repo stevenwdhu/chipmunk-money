@@ -341,8 +341,10 @@ interface Kept {
  * 1. The account's total at today is read: every live row in every ledger, less those dated after
  *    today.
  * 2. Its pending rows with a bank id move home (moveTransactions, the categorizing deferred): the bank
- *    will post them under new ids, and only the account is synced. Its deleted ones go home still
- *    deleted (sendAsDeleted), so that the posted one Plaid says replaces one stays deleted too.
+ *    will post them under new ids, and only the account is synced. The ones a person deleted go
+ *    home still deleted (sendAsDeleted), so that the posted one Plaid says replaces one stays deleted
+ *    too. One the bank removed stays with the rest (sent home it would pass for one a person
+ *    deleted): the posted one that replaces it is new, in the home.
  * 3. A′ is made through its context: the account's name, type, currency, notes and opening date, its
  *    own institution, place and archive (its member row's), opening balance 0, no bank link and no
  *    import mapping. split_from_id names the account, the one it's split off from directly (which
@@ -370,7 +372,7 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
   }
   let sentAsDeleted = 0
   const gone = member.q.column<number>(
-    "SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NOT NULL AND status = 'pending' AND external_id IS NOT NULL ORDER BY id",
+    "SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NOT NULL AND removed_at IS NULL AND status = 'pending' AND external_id IS NOT NULL ORDER BY id",
     accountId,
   )
   for (let i = 0; i < gone.length; i += MOVE_LIMIT) sentAsDeleted += sendAsDeleted(member, ctxOf, { ids: gone.slice(i, i + MOVE_LIMIT), to: home.ledger.id })
@@ -464,7 +466,7 @@ function rebalance(home: AppContext, accountId: number, kept: Kept): number {
  *    categorizing deferred to the caller), its deleted ones go home still deleted (sendAsDeleted),
  *    and its recurring items on the account are on no account from then on. With "keep": they stay
  *    in it, on an account of its own (keepOnOwnAccount), but for its pending ones with a bank id,
- *    which go home (the deleted ones still deleted).
+ *    which go home (the ones a person deleted still deleted, and not the ones the bank removed).
  * 3. Its imports into the account go (it has some only if it was the home once).
  * 4. Its member row goes, then its institution if no other account is there (with "keep" its own
  *    account is).

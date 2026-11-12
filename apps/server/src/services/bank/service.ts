@@ -548,7 +548,7 @@ export class BankService {
     this.caughtUp(ctx, accountId, acct)
     this.settle(ctx, applied.newIds)
     // The ledgers the account is shared with whose rows changed settle too.
-    for (const ledgerId of applied.byLedger.keys()) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [])
+    for (const ledgerId of applied.ledgers) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [])
     return { added: applied.added, adopted: applied.adopted }
   }
 
@@ -1056,7 +1056,9 @@ export class BankService {
       touched.set(ledger.id, entry)
 
       // One entry in each ledger whose rows changed: the home's new and changed ones, and those of
-      // the ledgers it's shared with, where their rows are. Each of those settles too.
+      // the ledgers it's shared with, where their rows are. Each of those settles too, and so does
+      // one where only a split row followed its payment (no entry: the payment's ledger has it).
+      for (const ledgerId of applied.ledgers) if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: this.storage.ctxOf(ledgerId), newIds: [] })
       for (const [ledgerId, changes] of applied.byLedger) {
         const at = touched.get(ledgerId)?.ctx ?? this.storage.ctxOf(ledgerId)
         if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: at, newIds: [] })

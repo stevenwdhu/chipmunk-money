@@ -614,6 +614,31 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     w.check(own)
   })
 
+  it('keeps a pending row the bank removed, so the posted one Plaid says replaces it is added in the home', () => {
+    const w = world()
+    const { personal, family } = w
+    plaid(w, [remote('p1', '2026-09-30', -4_000, 'Cafe', { pending: true })])
+    const p1 = bankRow(personal, 'p1')
+    w.move(personal, [p1], family)
+    expect(plaid(w, [], [{ remoteId: 'p1' }])).toMatchObject({ removed: 1 })
+    const removed = family.q.get('SELECT deleted_at AS deletedAt, removed_at AS removedAt FROM transactions WHERE ledger_id = @ledger AND id = ?', p1)
+    expect(removed).toEqual({ deletedAt: '2026-10-03T18:00:00.000Z', removedAt: '2026-10-03T18:00:00.000Z' })
+
+    // It stays with Family, on its own account, still saying the bank removed it. Nothing goes home.
+    const change = w.set(personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+    const own = w.splitOff(family)
+    expect(change.removed).toMatchObject([{ moved: 0, sentAsDeleted: 0, kept: 1, account: { id: own, balanceMinor: 0 } }])
+    expect(w.rowsOn(personal, w.visa)).toEqual([])
+    expect(w.rowsOn(family, own)).toMatchObject([{ id: p1, externalId: 'p1', status: 'pending', deleted: 1 }])
+    expect(family.q.get('SELECT deleted_at AS deletedAt, removed_at AS removedAt FROM transactions WHERE ledger_id = @ledger AND id = ?', p1)).toEqual(removed)
+
+    // Posted, replacing it: the $40.00 charge is the home's, and Family's row is as it was.
+    expect(plaid(w, [remote('c1', '2026-10-01', -4_000, 'Cafe', { replaces: 'p1' })])).toMatchObject({ added: 1, updated: 0 })
+    expect(w.rowsOn(personal, w.visa)).toMatchObject([{ externalId: 'c1', status: 'cleared', amount: -4_000, deleted: 0 }])
+    expect(w.rowsOn(family, own)).toMatchObject([{ id: p1, externalId: 'p1', status: 'pending', deleted: 1 }])
+    w.check(own)
+  })
+
   it('leaves the account the bank ids of a split-off account that goes, so its sync and imports add nothing for them', () => {
     const w = world()
     const { personal, family, trip } = w
