@@ -11,7 +11,7 @@ import { allLedgers, appDatabase, ledgerMaintenance, LedgerQuery, type UnscopedQ
 import { databaseCopy, reclaimSpace, safetyCopy } from './db/maintenance'
 import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
-import { accountWideOn, type AccountWide } from './services/account-rows'
+import { accountReadsOn, accountWideOf, type AccountReads } from './services/account-rows'
 import { seedCatalog } from './services/catalog'
 import { refuseWhileSharing } from './services/sharing'
 import { slugify, ulid } from './lib/ids'
@@ -57,7 +57,7 @@ const DEFAULT_LEDGER_KEY = 'defaultLedger'
  * the shared connection.
  */
 export class LedgerRegistry {
-  private readonly accountWide: AccountWide
+  private readonly accountReads: AccountReads
 
   constructor(
     private sqlite: SQLite,
@@ -65,7 +65,7 @@ export class LedgerRegistry {
     private now: () => Date,
     private llm?: LlmCategorizer,
   ) {
-    this.accountWide = accountWideOn(sqlite)
+    this.accountReads = accountReadsOn(sqlite)
   }
 
   private rows(): LedgerRow[] {
@@ -100,7 +100,7 @@ export class LedgerRegistry {
       app: this.app,
       meta: this.app,
       ledger: { id: row.id, name: row.name, slug: row.slug },
-      accountWide: this.accountWide,
+      accountWide: accountWideOf(this.sqlite, this.accountReads, row.id),
       now: this.now,
       llm: this.llm,
     }

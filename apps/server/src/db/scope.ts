@@ -18,7 +18,8 @@ export { checkPinned, LedgerScopeError } from './pins'
  *   is empty, so a raw write to ledger data aborts too. They fire for rows changed by the content
  *   triggers and by foreign key actions as well. Two scopes span two ledgers: a move's (ledgerMove),
  *   which lets through only a transaction changing from one to the other, and a home change's
- *   (twoLedgers).
+ *   (twoLedgers), which lets through only the account tables of the two. Each is called at one
+ *   place only, in move-rows.ts (scope.test.ts checks it).
  * better-sqlite3 is synchronous, so nothing else runs on the connection while a scope is set.
  */
 
@@ -28,9 +29,23 @@ interface MoveScope {
   readonly to: string
 }
 
-type ScopeValue = 'all' | ReadonlySet<string> | MoveScope | null
+/** A home change's write scope: these tables' rows of these ledgers only (changeHome in move-rows.ts). */
+interface TablesScope {
+  readonly ledgers: ReadonlySet<string>
+  readonly tables: ReadonlySet<string>
+}
+
+type ScopeValue = 'all' | ReadonlySet<string> | MoveScope | TablesScope | null
 
 const isMove = (scope: ScopeValue): scope is MoveScope => !!scope && scope !== 'all' && 'from' in scope
+const isTables = (scope: ScopeValue): scope is TablesScope => !!scope && scope !== 'all' && 'tables' in scope
+
+/**
+ * What a home change writes: the account (its home, institution, sort, archive and opening ledger),
+ * the member rows, and the bank payloads that let go of rows. bank_payloads is a child of accounts,
+ * checked against the account's ledger.
+ */
+const HOME_CHANGE_TABLES: ReadonlySet<string> = new Set(['accounts', 'account_ledgers', 'bank_payloads'])
 
 interface Prepared {
   stmt: Database.Statement
@@ -68,17 +83,22 @@ export function installWriteGuards(sqlite: SQLite) {
   if (sqlite.pragma('recursive_triggers', { simple: true }) !== 1) throw new Error('The write guards need PRAGMA recursive_triggers = ON')
   const state: ConnectionState = { scope: null, statements: new Map() }
   states.set(sqlite, state)
-  // Whether a row of this ledger may be written. A null ledger (the shared category list, an
-  // app-wide AI call) only with every ledger in scope.
-  sqlite.function('chipmunk_in_scope', { deterministic: false }, (ledgerId: unknown) => {
+  // Whether a row of this ledger, in this table, may be written. A null ledger (the shared category
+  // list, an app-wide AI call) only with every ledger in scope.
+  sqlite.function('chipmunk_in_scope', { deterministic: false }, (ledgerId: unknown, table: unknown) => {
     const scope = state.scope
     if (scope === 'all') return 1
     if (!scope || isMove(scope) || ledgerId === null) return 0
+    if (isTables(scope)) return scope.tables.has(String(table)) && scope.ledgers.has(String(ledgerId)) ? 1 : 0
     return scope.has(String(ledgerId)) ? 1 : 0
   })
-  sqlite.function('chipmunk_scope_open', { deterministic: false }, () => {
+  // Whether rows of this table may be written at all (a child table's, whose ledger is its parent's).
+  sqlite.function('chipmunk_scope_open', { deterministic: false }, (table: unknown) => {
     const scope = state.scope
-    return scope === 'all' || (!!scope && !isMove(scope) && scope.size > 0) ? 1 : 0
+    if (scope === 'all') return 1
+    if (!scope || isMove(scope)) return 0
+    if (isTables(scope)) return scope.tables.has(String(table)) ? 1 : 0
+    return scope.size > 0 ? 1 : 0
   })
   // Whether a row's change of ledger is the move in scope: from its `from` to its `to`, nothing else.
   sqlite.function('chipmunk_moving', { deterministic: false }, (oldLedger: unknown, newLedger: unknown) => {
@@ -94,20 +114,22 @@ export function installWriteGuards(sqlite: SQLite) {
     if (t.kind === 'ledger' || t.kind === 'catalog') {
       // A row with no ledger in a table that needs one: its NOT NULL says so more plainly.
       const required = t.kind === 'ledger' && t.name !== 'ai_calls'
-      trigger(t.name, 'INSERT', required ? 'NEW.ledger_id IS NOT NULL AND NOT chipmunk_in_scope(NEW.ledger_id)' : 'NOT chipmunk_in_scope(NEW.ledger_id)')
-      const outside = 'NOT chipmunk_in_scope(OLD.ledger_id) OR NOT chipmunk_in_scope(NEW.ledger_id)'
+      const inScope = (row: 'NEW' | 'OLD') => `chipmunk_in_scope(${row}.ledger_id, '${t.name}')`
+      trigger(t.name, 'INSERT', required ? `NEW.ledger_id IS NOT NULL AND NOT ${inScope('NEW')}` : `NOT ${inScope('NEW')}`)
+      const outside = `NOT ${inScope('OLD')} OR NOT ${inScope('NEW')}`
       trigger(t.name, 'UPDATE', t.name === MOVES ? `NOT chipmunk_moving(OLD.ledger_id, NEW.ledger_id) AND (${outside})` : outside)
-      trigger(t.name, 'DELETE', 'NOT chipmunk_in_scope(OLD.ledger_id)')
+      trigger(t.name, 'DELETE', `NOT ${inScope('OLD')}`)
     } else if (t.kind === 'child') {
       // In the ledger of its parent rows. A parent that's gone (being deleted, or not inserted yet)
       // doesn't stop it: that parent's own guard, or its foreign key, covers it.
       const outside = (row: 'NEW' | 'OLD') =>
         t
-          .parents!.map((p) => `EXISTS (SELECT 1 FROM main."${p.table}" p WHERE p.id = ${row}."${p.column}" AND NOT chipmunk_in_scope(p.ledger_id))`)
+          .parents!.map((p) => `EXISTS (SELECT 1 FROM main."${p.table}" p WHERE p.id = ${row}."${p.column}" AND NOT chipmunk_in_scope(p.ledger_id, '${t.name}'))`)
           .join(' OR ')
-      trigger(t.name, 'INSERT', `NOT chipmunk_scope_open() OR ${outside('NEW')}`)
-      trigger(t.name, 'UPDATE', `NOT chipmunk_scope_open() OR ${outside('OLD')} OR ${outside('NEW')}`)
-      trigger(t.name, 'DELETE', `NOT chipmunk_scope_open() OR ${outside('OLD')}`)
+      const open = `chipmunk_scope_open('${t.name}')`
+      trigger(t.name, 'INSERT', `NOT ${open} OR ${outside('NEW')}`)
+      trigger(t.name, 'UPDATE', `NOT ${open} OR ${outside('OLD')} OR ${outside('NEW')}`)
+      trigger(t.name, 'DELETE', `NOT ${open} OR ${outside('OLD')}`)
     }
   }
   sqlite.exec(triggers.join(';\n'))
@@ -152,13 +174,15 @@ export function ledgerMove<T>(sqlite: SQLite, move: { from: string; to: string }
 }
 
 /**
- * Runs fn with two ledgers' rows writable and no pin checker: for changeHome (move-rows.ts), whose
- * statements write an account and its member rows in both the old home and the new one. The write
- * guards stay on, so nothing it does reaches a third ledger.
+ * Runs fn with no pin checker and only the account tables of two ledgers writable (accounts,
+ * account_ledgers, and bank_payloads, by their account): for changeHome (move-rows.ts), whose
+ * statements write an account and its member rows in both the old home and the new one, and the
+ * payloads that let go of rows. Nothing else of either ledger, no transaction, import batch or
+ * recurring item, and nothing of a third ledger can be written in it.
  */
 export function twoLedgers<T>(sqlite: SQLite, ledgers: { from: string; to: string }, fn: () => T): T {
   if (ledgers.from === ledgers.to) throw new Error('Two ledgers, not one')
-  return withScope(sqlite, new Set([ledgers.from, ledgers.to]), fn)
+  return withScope(sqlite, { ledgers: new Set([ledgers.from, ledgers.to]), tables: HOME_CHANGE_TABLES }, fn)
 }
 
 type Row = Record<string, unknown>

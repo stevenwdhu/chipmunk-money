@@ -29,8 +29,9 @@ export interface AppContext {
   /**
    * Reads of one account across every ledger that has it (account-rows.ts): sums, counts and
    * names, for a shared account. It isn't pinned to this ledger, so it hands out only those, never
-   * another ledger's rows. And the two writes that span two ledgers: a move's UPDATE (moveRows) and
-   * a home change (changeHome).
+   * another ledger's rows. And the two writes that span two ledgers, bound to this ledger: a move's
+   * UPDATE of this ledger's rows (moveRows), and a home change of an account this ledger is the home
+   * of (changeHome), the other ledger a context from ctxOf.
    */
   accountWide: AccountWide
   /** Injectable clock for tests. */

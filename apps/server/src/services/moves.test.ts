@@ -1,5 +1,5 @@
 import { HTTPException } from 'hono/http-exception'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { addDays, recurringCreateSchema, transactionCreateSchema } from '@chipmunk/shared'
 import type { LlmCategorizer } from '../ai/types'
 import { runDailyJobs } from '../jobs'
@@ -9,13 +9,21 @@ import { ledgerRows } from '../test/world'
 import { balancesAt } from './accounts'
 import { leaveSharedList } from './catalog'
 import { createTag, setCategoryEnabled, updateTag, upsertTags } from './categories'
+import { historySuggestion, learn } from './categorize'
 import type { AppContext } from './context'
 import { aiJobStatus, categorizeUncategorized } from './import'
 import { setLinks } from './links'
 import { matchTransactions } from './matching'
 import { MOVE_LIMIT, moveTransactions, type MoveInput } from './moves'
 import { addPayment, confirmRecurring, createRecurring, detectRecurring, getRecurring, listRecurring, updateRecurring } from './recurring'
-import { createTransaction, deleteTransaction, getTransaction, updateTransaction } from './transactions'
+import { payeeKeyOf } from './payee-namer'
+import { createTransaction, deleteTransaction, getTransaction, insertTransaction, updateTransaction } from './transactions'
+
+// The real categorizing, its calls recorded: what a move hands it.
+vi.mock('./import', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./import')>()
+  return { ...real, categorizeUncategorized: vi.fn(real.categorizeUncategorized) }
+})
 
 /**
  * Moving transactions between the ledgers that have a shared account (moves.ts), in three ledgers:
@@ -155,6 +163,77 @@ describe('moving transactions: categories', () => {
     expect(asked).toEqual(['Corner Cafe'])
     expect(getTransaction(family, cafe)).toMatchObject({ categoryId: categoryId(family, 'Dine out'), categorySource: 'ai' })
     w.check()
+  })
+
+  it('gives a row left without a category the other ledger’s history suggestion, as a synced row gets, with AI off', () => {
+    const w = world()
+    const { personal, family } = w
+    const dineOut = categoryId(family, 'Dine out')
+    for (let i = 0; i < 3; i++) learn(family, payeeKeyOf(family, 'Corner Cafe'), -1000, dineOut)
+    // Off in Family: Personal's Groceries isn't there, and Family's history says Dine out.
+    setCategoryEnabled(family, categoryId(family, 'Groceries'), { enabled: false })
+    const none = w.row(personal, '2026-09-03', -1000, { payee: 'Corner Cafe' })
+    const off = w.row(personal, '2026-09-04', -1200, { payee: 'Corner Cafe', category: 'Groceries' })
+    const unknown = w.row(personal, '2026-09-05', -1500, { payee: 'Bean Bar' })
+    const stats = () => family.q.all('SELECT payee_key, category_id, direction, count FROM payee_category_stats WHERE ledger_id = @ledger ORDER BY rowid')
+    const learned = stats()
+
+    // What a new synced row of Corner Cafe gets in Family.
+    const synced = insertTransaction(
+      family,
+      transactionCreateSchema.parse({ accountId: w.visa, date: '2026-09-06', amountMinor: -1000, payee: 'Corner Cafe', externalId: 's1' }),
+      { origin: 'sync', skipRecurring: true, suggestion: historySuggestion(family, 'Corner Cafe', -1000) },
+    )
+    const fields = (id: number) => {
+      const t = getTransaction(family, id)
+      return { categoryId: t.categoryId, categorySource: t.categorySource, categoryConfidence: t.categoryConfidence, needsReview: t.needsReview }
+    }
+    expect(fields(synced)).toEqual({ categoryId: dineOut, categorySource: 'history', categoryConfidence: 1, needsReview: true })
+
+    const result = w.move(personal, [none, off, unknown], family, { defer: true })
+    // Two of them are in another category than they were: none, and Groceries, both Dine out now.
+    expect(result).toMatchObject({ moved: 3, recategorized: 2 })
+    expect(fields(none)).toEqual(fields(synced))
+    expect(fields(off)).toEqual(fields(synced))
+    // No history for it: none, for AI (off here).
+    expect(fields(unknown)).toEqual({ categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false })
+    expect(result.deferred).toEqual([unknown])
+    // Family's history isn't taught anything by it.
+    expect(stats()).toEqual(learned)
+    w.check()
+  })
+
+  it('hands categorizing the rows the other ledger’s matching cleared, which a card credit stays out of', async () => {
+    for (const defer of [false, true]) {
+      const asked: string[] = []
+      const w = world({ llm: ai(asked) })
+      const { personal, family } = w
+      // A credit from Sport Store on the card, which Family's matching called a card payment.
+      const credit = w.row(family, '2026-09-20', 3000, { payee: 'Sport Store', category: 'Credit card payment', source: 'rule', origin: 'sync', externalId: 'c1' })
+      // A purchase there moves in: smaller than the credit, so not its refund, but a merchant the card buys from.
+      const purchase = w.row(personal, '2026-09-10', -1000, { payee: 'Sport Store', category: 'Groceries' })
+      const categorize = vi.mocked(categorizeUncategorized)
+      categorize.mockClear()
+
+      const result = w.move(personal, [purchase], family, { defer })
+      expect(result.matched).toEqual({ refunds: 0, transfers: 0, payments: 0, cleared: 1 })
+      expect(getTransaction(family, credit)).toMatchObject({ categoryId: null, categorySource: null })
+      if (defer) {
+        expect(result.deferred).toEqual([credit])
+        expect(categorize).not.toHaveBeenCalled()
+      } else {
+        expect(result.deferred).toBeNull()
+        expect(categorize).toHaveBeenCalledTimes(1)
+        expect(categorize.mock.calls[0]![0].ledger.id).toBe(family.ledger.id)
+        expect(categorize.mock.calls[0]![1]).toEqual({ ids: [credit] })
+      }
+      await settle()
+      // As after a sync: categorizing leaves money onto a card alone unless it's a reward, so it stays uncategorized.
+      expect(asked).toEqual([])
+      expect(getTransaction(family, credit)).toMatchObject({ categoryId: null, categorySource: null, needsReview: false })
+      expect(getTransaction(family, purchase).categoryId).toBe(categoryId(family, 'Groceries'))
+      w.check()
+    }
   })
 })
 

@@ -314,7 +314,7 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 
-  it('gives the home the opening balance when the opening ledger leaves, and says by how much its part changes', () => {
+  it('gives the home the opening balance when the opening ledger leaves, and says what that brings it', () => {
     for (const recorded of [false, true]) {
       const w = world({ shareWith: ['family', 'trip'], opening: -1_000 })
       const { personal, family, trip } = w
@@ -332,14 +332,23 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
       expect(dry).toMatchObject({ dryRun: true, removed: [{ ledger: { slug: 'personal' }, moved: 2 }] })
       const change = w.set(family, { ledgers: ['family', 'trip'], rows: { personal: 'home' } })
       expect(change).toEqual({ ...dry, dryRun: false })
-      // Family's part was its own −300. With the opening balance it's the total less Personal's and Trip's rows:
-      // −1560 + 210 + 50, or with the balance recorded, −2010 + 210 + 50.
-      const opening = recorded ? -1_450 : -1_000
-      expect(change.opening).toEqual({ from: { slug: 'personal', name: 'Personal' }, to: { slug: 'family', name: 'Family' }, changeMinor: opening })
+      // The base is measured before Personal's rows come home. Family's part was its own −300. With the
+      // opening balance it's −1000 − 300 = −1300, a base of −1000. With the balance recorded on 31 July
+      // it's −2000 less the rows up to then that others hold (Personal's −200, Trip's −50), so −1750,
+      // a base of −1450.
+      const base = recorded ? -1_450 : -1_000
+      expect(change.opening).toEqual({ from: { slug: 'personal', name: 'Personal' }, to: { slug: 'family', name: 'Family' }, baseMinor: base })
       expect(change.notices).toEqual([
-        `Visa’s opening balance and recorded balances move to Family. Family’s balance on Visa changes by ${recorded ? '-$14.50' : '-$10.00'} today, and earlier balances shift too.`,
+        `Visa’s opening balance and recorded balances move to Family: ${recorded ? '-$14.50' : '-$10.00'} of its balance today, and earlier balances shift too.`,
       ])
-      expect(change.parts).toEqual({ before: before.parts, after: { family: before.totalMinor + 50, trip: -50 } })
+      // The whole change is in the parts. Before: Personal −1000 − 200 − 10 = −1210, or −2000 − 10 less
+      // Family's −300 and Trip's −50 up to 31 July = −1660. After, Family holds −300 − 200 − 10 = −510:
+      // −1000 − 510 = −1510, or −2000 − 10 (after 31 July) less Trip's −50 = −1960. Its part changes by
+      // −1210, or −1660: Personal's part, all of it.
+      expect(change.parts).toEqual({
+        before: recorded ? { family: -300, personal: -1_660, trip: -50 } : { family: -300, personal: -1_210, trip: -50 },
+        after: recorded ? { family: -1_960, trip: -50 } : { family: -1_510, trip: -50 },
+      })
       expect(change.sharing).toMatchObject({ home: { slug: 'family' }, opening: { slug: 'family' }, members: [{ slug: 'trip' }] })
       expect(w.check()).toEqual({ parts: { family: before.totalMinor + 50, trip: -50 }, totalMinor: before.totalMinor })
       expect(w.storage.sqlite.prepare('SELECT opening_ledger_id FROM accounts WHERE id = ?').pluck().get(w.visa)).toBeNull()

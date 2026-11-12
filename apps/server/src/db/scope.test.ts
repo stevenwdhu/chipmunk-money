@@ -202,23 +202,45 @@ function unscopedCalls(source: string): { reasons: string[]; problems: string[] 
   return { reasons, problems }
 }
 
+/**
+ * The ledgerMove and twoLedgers calls in one file's source, comments left out: each one's name, and
+ * what's wrong with any other use (passed around, or imported under another name).
+ */
+function twoLedgerCalls(source: string): { calls: string[]; problems: string[] } {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const calls: string[] = []
+  const problems: string[] = []
+  for (const m of code.matchAll(/\b(ledgerMove|twoLedgers)\b/g)) {
+    const rest = code.slice(m.index + m[0].length)
+    const before = code.slice(0, m.index)
+    if (/import\s*\{[^}]*$/.test(before) && !/^\s+as\b/.test(rest)) continue
+    if (/^\s*\(/.test(rest) && !/\.\s*$/.test(before)) calls.push(m[1]!)
+    else problems.push(`${m[1]}${rest.slice(0, 30).split('\n')[0]}`)
+  }
+  return { calls, problems }
+}
+
+/** The server's source files, tests left out, by their path from apps/server. */
+function sourceFiles(): Array<{ rel: string; source: string }> {
+  const root = path.join(repoRoot, 'apps/server')
+  const files: string[] = []
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name)
+      if (statSync(full).isDirectory()) walk(full)
+      else if (name.endsWith('.ts') && !name.endsWith('.test.ts')) files.push(full)
+    }
+  }
+  walk(path.join(root, 'src'))
+  return files.map((file) => ({ rel: path.relative(root, file), source: readFileSync(file, 'utf8') }))
+}
+
 describe('unscoped sites', () => {
   it('lists every allLedgers call in the source, each reason used once, where it is', () => {
-    const root = path.join(repoRoot, 'apps/server')
-    const files: string[] = []
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const full = path.join(dir, name)
-        if (statSync(full).isDirectory()) walk(full)
-        else if (name.endsWith('.ts') && !name.endsWith('.test.ts')) files.push(full)
-      }
-    }
-    walk(path.join(root, 'src'))
     const found: string[] = []
-    for (const file of files) {
-      const rel = path.relative(root, file)
+    for (const { rel, source } of sourceFiles()) {
       if (rel === 'src/db/scope.ts' || rel === 'src/db/unscoped-sites.ts') continue
-      const { reasons, problems } = unscopedCalls(readFileSync(file, 'utf8'))
+      const { reasons, problems } = unscopedCalls(source)
       expect(problems, `${rel}: allLedgers must be called with its reason as a string literal`).toEqual([])
       found.push(...reasons.map((reason) => `${rel}: ${reason}`))
     }
@@ -233,6 +255,30 @@ describe('unscoped sites', () => {
     expect(unscopedCalls("const run = allLedgers\nrun(sqlite, 'anything', fn)").problems).toHaveLength(1)
     expect(unscopedCalls('allLedgers(sqlite, reason, fn)').problems).toHaveLength(1)
     expect(unscopedCalls("storage.allLedgers('full backup', (s) => s)")).toEqual({ reasons: ['full backup'], problems: [] })
+  })
+})
+
+describe('the two-ledger scopes', () => {
+  it('are each called once in the source, in move-rows.ts, and never passed around', () => {
+    const found: string[] = []
+    for (const { rel, source } of sourceFiles()) {
+      if (rel === 'src/db/scope.ts') continue
+      const { calls, problems } = twoLedgerCalls(source)
+      expect(problems, `${rel}: ledgerMove and twoLedgers are only called`).toEqual([])
+      found.push(...calls.map((name) => `${rel}: ${name}`))
+    }
+    expect(found.sort()).toEqual(['src/db/move-rows.ts: ledgerMove', 'src/db/move-rows.ts: twoLedgers'])
+  })
+
+  it('finds a call, one passed around, one renamed, and one through the module, and skips comments', () => {
+    expect(twoLedgerCalls("import { ledgerMove, twoLedgers } from './scope'\nledgerMove(sqlite, m, f)\ntwoLedgers (sqlite, c, g)")).toEqual({
+      calls: ['ledgerMove', 'twoLedgers'],
+      problems: [],
+    })
+    expect(twoLedgerCalls('const run = ledgerMove\nrun(sqlite, m, f)').problems).toHaveLength(1)
+    expect(twoLedgerCalls("import { twoLedgers as both } from './scope'").problems).toHaveLength(1)
+    expect(twoLedgerCalls('scope.twoLedgers(sqlite, c, g)').problems).toHaveLength(1)
+    expect(twoLedgerCalls('/** In a scope (ledgerMove). */\n// twoLedgers, for changeHome\nconst x = 1')).toEqual({ calls: [], problems: [] })
   })
 })
 

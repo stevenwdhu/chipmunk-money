@@ -4,6 +4,7 @@ import type { MovedCategory } from '../db/move-rows'
 import { badRequest } from '../lib/http'
 import { recordActivity, type ActivityActor } from './activity'
 import { upsertTags } from './categories'
+import { historySuggestion } from './categorize'
 import type { AppContext, CtxOf } from './context'
 import { categorizeUncategorized } from './import'
 import { releaseTransactionLinks, settleLinkedCategory } from './links'
@@ -149,10 +150,11 @@ function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[
 
 /**
  * Each moved row's category in `to`: its own when `to` uses it too (a shared category), else `to`'s
- * category of the same name, else none, for `to`'s categorizing. A row in a category left out of
- * totals (a card payment, a transfer) is never left without one, since money in without a category
- * counts as income: it takes `to`'s card payment or transfer category, as yours. Your history isn't
- * taught anything by it.
+ * category of the same name, else what `to`'s history suggests for it, as for a new row from a sync
+ * or an import (historySuggestion: to review unless it's a payee you always set one way), else none,
+ * for `to`'s AI. A row in a category left out of totals (a card payment, a transfer) is never left
+ * without one, since money in without a category counts as income: it takes `to`'s card payment or
+ * transfer category, as yours. Your history isn't taught anything by it.
  */
 function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<number, MovedCategory> {
   const now = from.q.all<CategoryNow>(
@@ -182,7 +184,14 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
     } else if (there) {
       out.set(c.id, { categoryId: there.id, categorySource: c.source, categoryConfidence: c.confidence, needsReview: !!c.needsReview })
     } else {
-      out.set(c.id, { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false })
+      const row = byId.get(c.id)!
+      const s = historySuggestion(to, row.payee, row.amount)
+      out.set(
+        c.id,
+        s?.categoryId
+          ? { categoryId: s.categoryId, categorySource: s.source === 'ai' ? 'ai' : 'history', categoryConfidence: s.confidence, needsReview: !s.autoApply }
+          : { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false },
+      )
     }
   }
   return out
@@ -199,7 +208,7 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
  * 3. A transfer is unpaired on both sides ("not a transfer", without remembering it as a rejected
  *    pair, which can't be kept across ledgers), and the rows' rejected pairs go.
  * 4. Recurring items let go of them (detachPayments).
- * 5. Category in `to` (categoriesIn).
+ * 5. Category in `to` (categoriesIn), from `to`'s history when it has none of its own there.
  * 6. Tags go by name, made in `to` when it has none of that name.
  * 7. Bank payloads that point at them point at no row: only the home's rows have payloads.
  * 8. One UPDATE changes their ledger (moveRows, through ctx.accountWide).
@@ -210,7 +219,8 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
  * 11. Nothing refers across the two ledgers afterwards, or it all rolls back.
  * After the commit, not in a dry run and not deferred: AI categorizes, in `to`, the moved rows
  * left without a category and the ones `to`'s matching uncategorized again (`cleared`), as after a
- * sync. A moved id is then not found in `from`.
+ * sync (and, as there, not money onto a card that isn't a reward). A moved id is then not found in
+ * `from`.
  */
 export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveInput, actor: ActivityActor): MoveResult {
   const ids = [...new Set(input.ids)]
@@ -277,7 +287,7 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     )
 
     // 8. The move.
-    const moved = fromCtx.accountWide.moveRows({ from, to, ids, fields })
+    const moved = fromCtx.accountWide.moveRows({ to: toCtx, ids, fields })
 
     // 9. In `to`, as new rows: their links, tags, matching and recurring items.
     for (const l of carried) {
@@ -388,7 +398,7 @@ export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: n
     )
 
     const none: MovedCategory = { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false }
-    const sent = fromCtx.accountWide.moveRows({ from: fromCtx.ledger.id, to: toCtx.ledger.id, ids, fields: new Map(ids.map((id) => [id, none])) })
+    const sent = fromCtx.accountWide.moveRows({ to: toCtx, ids, fields: new Map(ids.map((id) => [id, none])) })
     for (const item of detached) recalculateRecurring(fromCtx, item.itemId, { removed: true, followAmount: true, wasPaidOff: item.wasPaidOff })
     return sent
   })

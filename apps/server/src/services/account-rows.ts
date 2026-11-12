@@ -1,7 +1,8 @@
 import type { AccountType, ISODate } from '@chipmunk/shared'
 import type { SQLite } from '../db/client'
-import { changeHome, crossLedgerReferences, moveRows, type HomeChange, type RowsMove } from '../db/move-rows'
+import { changeHome, crossLedgerReferences, moveRows, type MovedCategory } from '../db/move-rows'
 import { allLedgers, type UnscopedQuery } from '../db/scope'
+import type { AppContext } from './context'
 
 /**
  * Reads of one account in every ledger that has it (by account_id, not by ledger): a shared
@@ -9,11 +10,13 @@ import { allLedgers, type UnscopedQuery } from '../db/scope'
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
  * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, never a row.
  *
- * A service reaches these through ctx.accountWide, bound to the connection (accountWideOn). To add a
- * read, add a function to READS: it takes the unscoped handle first, and is bound like the others.
- * Beside them are the two writes that span two ledgers, a move's UPDATE (moveRows in
- * db/move-rows.ts) and a home change's statements (changeHome there), each in its own two-ledger
- * scope, not with every ledger in scope.
+ * A service reaches these through ctx.accountWide: the reads bound to the connection once
+ * (accountReadsOn), shared by every context. To add a read, add a function to READS: it takes the
+ * unscoped handle first, and is bound like the others. Beside them are the two writes that span two
+ * ledgers, a move's UPDATE (moveRows in db/move-rows.ts) and a home change's statements (changeHome
+ * there), each in its own two-ledger scope, not with every ledger in scope. Those are bound to the
+ * context's own ledger (accountWideOf): it is the ledger the rows move from, or the home that
+ * changes, and the other ledger is a context its caller got from ctxOf.
  */
 
 /** A ledger that has the account: its home, or one it's shared with. */
@@ -163,24 +166,45 @@ const READS = {
 
 type Bound<F> = F extends (db: UnscopedQuery, ...args: infer A) => infer R ? (...args: A) => R : never
 
+/** This module's reads, bound to one connection: the same for every context. */
+export type AccountReads = { readonly [K in keyof typeof READS]: Bound<(typeof READS)[K]> }
+
 /**
- * This module's reads, bound to one connection (ctx.accountWide), and the two writes that span two
- * ledgers. It holds no connection of its own to hand out.
+ * The reads, and the two writes that span two ledgers, bound to one context's ledger (ctx.accountWide).
+ * It holds no connection of its own to hand out.
  */
-export type AccountWide = { readonly [K in keyof typeof READS]: Bound<(typeof READS)[K]> } & {
-  /** Moves transactions from one ledger to another that has their account (moveRows): the move's one UPDATE. Returns how many moved. */
-  readonly moveRows: (move: RowsMove) => number
-  /** Makes a ledger a shared account is shared with its home (changeHome): the home change's statements. */
-  readonly changeHome: (change: HomeChange) => { payloadsCleared: number }
+export type AccountWide = AccountReads & {
+  /**
+   * Moves this ledger's transactions to `to`, another ledger that has their account (moveRows): the
+   * move's one UPDATE. Each row's category in `to` is in `fields`, by id. Returns how many moved.
+   */
+  readonly moveRows: (move: { to: AppContext; ids: readonly number[]; fields: ReadonlyMap<number, MovedCategory> }) => number
+  /**
+   * Makes `to`, a ledger the account is shared with, its home (changeHome): the home change's
+   * statements. Throws unless this ledger is the account's home.
+   */
+  readonly changeHome: (accountId: number, to: AppContext) => { payloadsCleared: number }
 }
 
-/** The reads of READS on this connection, each run with every ledger in scope, and the two writes, each in its own scope. */
-export function accountWideOn(sqlite: SQLite): AccountWide {
+/** The reads of READS on this connection, each run with every ledger in scope. Built once per connection. */
+export function accountReadsOn(sqlite: SQLite): AccountReads {
   const bound: Record<string, unknown> = {}
   for (const [name, read] of Object.entries(READS) as Array<[string, (db: UnscopedQuery, ...args: unknown[]) => unknown]>) {
     bound[name] = (...args: unknown[]) => everyLedger(sqlite, (db) => read(db, ...args))
   }
-  bound.moveRows = (move: RowsMove) => moveRows(sqlite, move)
-  bound.changeHome = (change: HomeChange) => changeHome(sqlite, change)
-  return Object.freeze(bound) as AccountWide
+  return Object.freeze(bound) as AccountReads
+}
+
+/** One ledger's ctx.accountWide: the shared reads, and the two writes with this ledger as the one they act from, each in its own scope. */
+export function accountWideOf(sqlite: SQLite, reads: AccountReads, ledgerId: string): AccountWide {
+  return Object.freeze({
+    ...reads,
+    moveRows: (move: { to: AppContext; ids: readonly number[]; fields: ReadonlyMap<number, MovedCategory> }) =>
+      moveRows(sqlite, { from: ledgerId, to: move.to.ledger.id, ids: move.ids, fields: move.fields }),
+    changeHome: (accountId: number, to: AppContext) => {
+      const home = reads.account(accountId)?.homeLedgerId
+      if (home !== ledgerId) throw new Error(`Account ${accountId}'s home isn't ${ledgerId}`)
+      return changeHome(sqlite, { accountId, from: ledgerId, to: to.ledger.id })
+    },
+  })
 }

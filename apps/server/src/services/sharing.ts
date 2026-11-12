@@ -196,10 +196,10 @@ function swapHome(ctx: AppContext, ctxOf: CtxOf, account: Account, toLedgerId: s
   if (!to) badRequest(`${account.name} isn’t shared with that ledger.`)
   if (to.archived) badRequest(`${to.name} is archived, so it can’t be ${account.name}’s home.`)
 
+  const toCtx = ctxOf(to.ledgerId)
   const dates = checkedDates(ctx, account.id)
   const before = partsAt(ctx, ctxOf, account.id, dates)
-  const { payloadsCleared } = ctx.accountWide.changeHome({ accountId: account.id, from: home.ledgerId, to: to.ledgerId })
-  const toCtx = ctxOf(to.ledgerId)
+  const { payloadsCleared } = ctx.accountWide.changeHome(account.id, toCtx)
   const after = partsAt(toCtx, ctxOf, account.id, dates)
   // Nothing already recorded moves, so no ledger's balance on it changes, today or before.
   if (JSON.stringify(after) !== JSON.stringify(before)) {
@@ -289,8 +289,9 @@ function moveChunks(member: AppContext, accountId: number): number[][] {
 /**
  * Stops sharing the account with a ledger, in the caller's transaction, through the home's context
  * (`home`) and the leaving ledger's own:
- * 1. If it's the opening ledger, the home becomes the opening ledger (the change in the home's part
- *    today is returned).
+ * 1. If it's the opening ledger, the home becomes the opening ledger. What that alone adds to the
+ *    home's part today is returned (`openingBase`): measured before the rows move home, it's the
+ *    opening balance and recorded balances' share, not the whole change in the home's part.
  * 2. Its live rows on the account move home (moveTransactions, in chunks, the categorizing deferred
  *    to the caller), and its deleted ones go home still deleted (sendAsDeleted).
  * 3. Its recurring items on the account are on no account from then on.
@@ -305,18 +306,18 @@ function leave(
   ledgerId: string,
   rows: RowsChoice | null,
   actor: ActivityActor,
-): { left: Left; opening: number | null; deferred: number[] } {
+): { left: Left; openingBase: number | null; deferred: number[] } {
   const accountId = account.id
   const leaving = home.accountWide.ledgers(accountId).find((l) => l.ledgerId === ledgerId)!
   const member = ctxOf(ledgerId)
 
-  // 1. The opening ledger.
-  let opening: number | null = null
+  // 1. The opening ledger, measured before any row moves.
+  let openingBase: number | null = null
   if (leaving.isOpening) {
     const before = currentParts(home, accountId).parts.get(home.ledger.id) ?? 0
     const { changes } = home.q.run('UPDATE accounts SET opening_ledger_id = NULL WHERE ledger_id = @ledger AND id = ?', accountId)
     if (changes !== 1) throw new Error(`Expected to give account ${accountId}'s opening balance to its home, changed ${changes}`)
-    opening = (currentParts(home, accountId).parts.get(home.ledger.id) ?? 0) - before
+    openingBase = (currentParts(home, accountId).parts.get(home.ledger.id) ?? 0) - before
   }
 
   // 2. Its rows, live then deleted.
@@ -340,7 +341,7 @@ function leave(
   const { changes } = member.q.run('DELETE FROM account_ledgers WHERE ledger_id = @ledger AND account_id = ?', accountId)
   if (changes !== 1) throw new Error(`Expected to remove one member row of account ${accountId}, removed ${changes}`)
   const left: Left = { ledger: named(leaving), rows, moved, sentAsDeleted, recurringItems, importBatches }
-  const after = { rows, moved, sentAsDeleted, recurringItems, importBatches, ...(opening === null ? {} : { openingChangeMinor: opening }) }
+  const after = { rows, moved, sentAsDeleted, recurringItems, importBatches, ...(openingBase === null ? {} : { openingBaseMinor: openingBase }) }
   recordActivity(home, actor, {
     action: 'stop_sharing',
     entity: 'account',
@@ -367,7 +368,7 @@ function leave(
       before: removed,
     })
   }
-  return { left, opening, deferred }
+  return { left, openingBase, deferred }
 }
 
 /**
@@ -406,8 +407,12 @@ export interface SharingChange {
   added: LedgerName[]
   home: { from: LedgerName; to: LedgerName } | null
   removed: Left[]
-  /** The opening balance going to the home, because the ledger that had it left: the change in the home's part today. */
-  opening: { from: LedgerName; to: LedgerName; changeMinor: number } | null
+  /**
+   * The opening balance going to the home, because the ledger that had it left. `baseMinor` is what
+   * the opening balance and recorded balances alone add to the home's part today, before the leaving
+   * ledger's rows come home: not the whole change in its part, which `parts` has.
+   */
+  opening: { from: LedgerName; to: LedgerName; baseMinor: number } | null
   /** Each ledger's part today, by slug, before and after (a ledger that left has none after). */
   parts: { before: Record<string, number>; after: Record<string, number> }
   /** What to tell the owner about it, in words. */
@@ -426,7 +431,7 @@ export interface SharingChange {
  * Refused: under a member (409), while the home ledger is archived, a ledger that doesn't exist, the
  * current home left out without naming a new one, a home not in the list (400), and what each step
  * refuses. A dry run works it all out and reports it (the counts, each ledger's part before and
- * after, the opening balance going to the home), then changes nothing. After the commit, and not in
+ * after, what the opening balance going to the home brings it), then changes nothing. After the commit, and not in
  * a dry run, AI categorizes in the home what came to it uncategorized (when AI is on).
  */
 export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number, input: SharingInput, opts: { dryRun?: boolean; actor: ActivityActor }): SharingChange {
@@ -455,7 +460,7 @@ export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number,
       const out = leave(homeAfter, ctxOf, account, r.ledger.ledgerId, r.rows, opts.actor)
       removed.push(out.left)
       deferred.push(...out.deferred)
-      if (out.opening !== null) opening = { from: named(r.ledger), to: named(newHome), changeMinor: out.opening }
+      if (out.openingBase !== null) opening = { from: named(r.ledger), to: named(newHome), baseMinor: out.openingBase }
     }
 
     const sharing = getSharing(homeAfter, accountId)
@@ -466,7 +471,7 @@ export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number,
     }
     if (opening) {
       notices.push(
-        `${account.name}’s opening balance and recorded balances move to ${opening.to.name}. ${opening.to.name}’s balance on ${account.name} changes by ${formatMoney(opening.changeMinor, account.currency)} today, and earlier balances shift too.`,
+        `${account.name}’s opening balance and recorded balances move to ${opening.to.name}: ${formatMoney(opening.baseMinor, account.currency)} of its balance today, and earlier balances shift too.`,
       )
     }
     report = {
