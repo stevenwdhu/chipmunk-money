@@ -9,6 +9,8 @@ import type {
   AccountTransactionPage,
   ActivityPage,
   AiJobStatus,
+  AiRecord,
+  AiRetry,
   ApiKey,
   ApiKeyCreate,
   ApiKeyCreated,
@@ -243,8 +245,36 @@ export function useChatgpt(waiting: MaybeRefOrGetter<boolean>) {
   }
 }
 
+/** What AI was asked to do. Checked often while a failed request is being asked again. */
 export function useAiUsage() {
-  return useQuery({ queryKey: keys.aiUsage, queryFn: () => api.get<AiUsage>('/ai/usage') })
+  return useQuery({
+    queryKey: keys.aiUsage,
+    queryFn: () => api.get<AiUsage>('/ai/usage'),
+    refetchInterval: (q) => (q.state.data?.retrying ? 1500 : false),
+  })
+}
+
+/**
+ * Asks AI again about one failed request, or every one that can be retried, in the background
+ * (see useAiUsage). The usage is read again whatever the answer: a request that was refused may have
+ * been answered or stopped being needed since it was listed.
+ */
+export function useAiRetryMutations() {
+  const qc = useQueryClient()
+  const started = () => {
+    // What shows AI at work elsewhere: a ledger's categorizing and the naming of payees.
+    void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'l' && q.queryKey[2] === 'ai-status' })
+    void qc.invalidateQueries({ queryKey: [...keys.payeeNames, 'tidy'] })
+  }
+  const onSettled = () => qc.invalidateQueries({ queryKey: keys.aiUsage })
+  return {
+    one: useMutation({
+      mutationFn: (record: Pick<AiRecord, 'id' | 'ledgerSlug'>) => api.post<AiRetry>(ledgerPath(`/ai/usage/${record.id}/retry`, record.ledgerSlug)),
+      onSuccess: started,
+      onSettled,
+    }),
+    all: useMutation({ mutationFn: () => api.post<AiRetry>('/ai/usage/retry'), onSuccess: started, onSettled }),
+  }
 }
 
 // Accounts ------------------------------------------------------------------
