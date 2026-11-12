@@ -103,7 +103,7 @@ function world() {
       { actor: TESTER, usable: null },
     )
   const set = (ctx: AppContext, input: SharingInput, dryRun = false) =>
-    setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER })
+    setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER, usable: null })
   /** Every split row in the database, on any account, by ledger slug. */
   const splitRows = () =>
     ledgers.flatMap((c) =>

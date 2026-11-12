@@ -110,6 +110,58 @@ export const accountSharingSchema = z
   .meta({ id: 'AccountSharing' })
 export type AccountSharing = z.output<typeof accountSharingSchema>
 
+const leftSplitSchema = z.object({
+  done: z
+    .enum(['detachedSplit', 'droppedShare', 'detachedShare'])
+    .describe(
+      '`detachedSplit`: a payment the leaving ledger holds, whose split rows are ordinary transactions now, each where it is. `droppedShare`: its share of another ledger’s payment went back to that ledger. `detachedShare`: its share is an ordinary transaction of its own now, and so is what the payment’s holder gave for it.',
+    ),
+  holder: ledgerRef.describe('The ledger that holds the payment.'),
+  date,
+  paymentMinor: minor.describe('The payment’s amount.'),
+  amountMinor: minor.describe('The leaving ledger’s share, or what it gave the others of a payment it holds, as a positive number.'),
+  currency: z.string(),
+})
+
+const sharingLeftSchema = z.object({
+  ledger: ledgerRef,
+  rows: z.enum(['home', 'keep']).nullable().describe('What was said of its transactions on the account, or null when it had none.'),
+  moved: z.number().int().describe('Transactions it moved to the home: with `keep`, its pending ones with a bank id, which the bank will post again.'),
+  sentAsDeleted: z.number().int().describe('Deleted transactions it sent to the home, still deleted.'),
+  kept: z.number().int().describe('With `keep`: its transactions now on its own account, deleted ones included.'),
+  account: z
+    .object({ id, name: z.string(), balanceMinor: minor })
+    .nullable()
+    .describe('With `keep`: the manual account made for them in that ledger, with its balance. Null otherwise.'),
+  recurringItems: z.number().int().describe('Its recurring items that were on the account: on no account now, or with `keep` on its own account.'),
+  importBatches: z.number().int().describe('Its imports into the account (it has some only if it was the home once), which go.'),
+  splits: z.array(leftSplitSchema).describe('The split payments it took part in, let go of before its transactions went.'),
+})
+
+export const sharingChangeSchema = z
+  .object({
+    dryRun: z.boolean(),
+    sharing: accountSharingSchema.describe('The sharing afterwards, as the home (the new one, after a home change) has it.'),
+    added: z.array(ledgerRef).describe('The ledgers the account is now shared with too. Nothing moved, so no balance changed.'),
+    home: z.object({ from: ledgerRef, to: ledgerRef }).nullable().describe('The home change, or null when the home stays.'),
+    removed: z.array(sharingLeftSchema).describe('The ledgers that no longer have the account, each with what happened to what it had on it.'),
+    opening: z
+      .object({
+        from: ledgerRef,
+        to: ledgerRef,
+        baseMinor: minor.describe('What the opening balance and recorded balances alone add to the home’s balance on the account today, before the leaving ledger’s transactions come home.'),
+      })
+      .nullable()
+      .describe('The opening balance and recorded balances going to the home, because the ledger that carried them left. Null otherwise.'),
+    parts: z
+      .object({ before: z.record(z.string(), minor), after: z.record(z.string(), minor) })
+      .describe('Each ledger’s balance on the account today, by slug, before and after. A ledger that left has none after.'),
+    notices: z.array(z.string()).describe('What to tell the owner about it, in words.'),
+  })
+  .meta({ id: 'SharingChange' })
+  .describe('What a change to how an account is shared did, or with `dryRun` would do.')
+export type SharingChange = z.output<typeof sharingChangeSchema>
+
 export const balanceSnapshotSchema = z
   .object({ id, date, balanceMinor: minor, source: z.enum(['manual', 'sync']) })
   .meta({ id: 'BalanceSnapshot' })
@@ -410,6 +462,43 @@ export const transactionPageSchema = z
   })
   .meta({ id: 'TransactionPage' })
 export type TransactionPage = z.output<typeof transactionPageSchema>
+
+export const moveResultSchema = z
+  .object({
+    moved: z.number().int(),
+    carried: z.number().int().describe('Links kept, because both their sides moved (a purchase with its refund).'),
+    unlinked: z.number().int().describe('Links let go, because one side moved and the other stayed.'),
+    unpaired: z.number().int().describe('Transfers no longer paired with their other side, which stayed.'),
+    recategorized: z.number().int().describe('Moved transactions whose category there isn’t the one they had (by name), or that have none there.'),
+    recurringDetached: z.number().int().describe('Moved transactions taken off a recurring item.'),
+    tagsCreated: z.number().int().describe('Tags the ledger they went to didn’t have, added for them.'),
+    matched: z
+      .object({ refunds: z.number().int(), transfers: z.number().int(), payments: z.number().int(), cleared: z.number().int() })
+      .describe('What the matching of the ledger they went to found afterwards, as POST /transactions/match counts it.'),
+    dropped: z
+      .object({
+        links: z.array(z.object({ moneyIn: id, moneyOut: id, kind: z.enum(LINK_KINDS), amountMinor: minor })),
+        partlyLinked: z
+          .array(z.object({ id, ledger: z.string().describe('The ledger that holds it, by slug.'), payee: z.string(), leftMinor: minor }))
+          .describe('Money in that keeps some of its links and loses others: `leftMinor` of it is no longer paid back, and counts as income in the ledger that holds it.'),
+        pairs: z.array(z.object({ id, pairId: id })),
+        recurring: z.array(z.object({ id, itemId: id, item: z.string() })),
+      })
+      .describe('What the move lets go of, one by one: for a dry run to say before it happens.'),
+    dryRun: z.boolean(),
+  })
+  .meta({ id: 'MoveResult' })
+export type MoveResult = z.output<typeof moveResultSchema>
+
+export const splitResultSchema = z
+  .object({
+    transaction: transactionSchema.describe('The payment, as it is with the split.'),
+    keptMinor: minor.describe('What the ledger that holds it keeps: its amount less the shares.'),
+    shares: z.array(transactionSplitShareSchema).describe('Each other ledger’s share. Empty when the split was undone.'),
+    dryRun: z.boolean(),
+  })
+  .meta({ id: 'SplitResult' })
+export type SplitResult = z.output<typeof splitResultSchema>
 
 export const accountTransactionSplitSchema = z
   .object({
@@ -1114,10 +1203,13 @@ const previewLocal = z.object({
   payee: z.string(),
   amountMinor: minor,
   deleted: z.boolean().describe('You deleted it: matched, it stays deleted.'),
+  split: z.boolean().describe('It’s a card payment split between the ledgers that have the account: it can be paired, and not removed (409) until its split is undone.'),
   elsewhere: z
     .object({ ledger: z.object({ slug: z.string(), name: z.string() }), account: z.string().nullable().describe('The account it’s on there. Null: this one.') })
     .optional()
-    .describe('Another ledger has it, on this shared account: the switch changes or deletes it there. Left out for this ledger’s own.'),
+    .describe(
+      'Another ledger has it, on this shared account, or on an account split off from it when that ledger stopped sharing it: the switch changes or deletes it there (one on a split-off account only takes the bank’s id, and can’t be removed). Left out for this ledger’s own.',
+    ),
 })
 const previewRemote = z.object({ remoteId: z.string(), date, payee: z.string(), amountMinor: minor, pending: z.boolean() })
 

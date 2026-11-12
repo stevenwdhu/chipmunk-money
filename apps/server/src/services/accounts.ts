@@ -191,8 +191,8 @@ function sharedAccounts(ctx: AppContext, ids: number[]): Map<number, Shared> {
 function toDTO(r: AccountRow, links: Map<number, BankLink>, month: (id: number) => number, shared?: Shared): Account {
   const base = r.snap_balance ?? r.opening_balance_minor
   const balance = base + r.tx_after_snap
-  // The opening balance and the recorded balances are the home's to show: the other ledgers that
-  // have a shared account show what they hold.
+  // The opening balance, the recorded balances and the import mapping are the home's to show: the
+  // other ledgers that have a shared account show what they hold.
   const own = r.home_ledger_id === r.ledger_id
   return {
     id: r.id,
@@ -211,7 +211,7 @@ function toDTO(r: AccountRow, links: Map<number, BankLink>, month: (id: number) 
     monthMinor: month(r.id),
     balanceAsOf: own ? r.snap_date : null,
     transactionCount: r.tx_count,
-    importMapping: r.import_mapping ? (JSON.parse(r.import_mapping) as ColumnMapping) : null,
+    importMapping: own && r.import_mapping ? (JSON.parse(r.import_mapping) as ColumnMapping) : null,
     bank: links.get(r.id) ?? null,
     sharing: shared?.sharing ?? null,
   }

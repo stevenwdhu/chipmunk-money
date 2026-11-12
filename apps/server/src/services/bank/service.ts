@@ -648,10 +648,11 @@ export class BankService {
         .map((l) => [l.id, { slug: l.slug, name: l.name }]),
     )
     // Each side as it shows: its name, or what the payee name rules call its payee. One another ledger
-    // holds says which, and one a split-off account has says which account too.
+    // holds says which, and one a split-off account has says which account too. A payment split
+    // between the ledgers says so: it can be paired, and not removed.
     const side = (id: number) => {
       const l = L.get(id)!
-      const shown = { id: l.id, date: l.date, payee: l.name ?? payeeNameOf(ctx, l.payee).name, amountMinor: l.amountMinor, deleted: l.deleted }
+      const shown = { id: l.id, date: l.date, payee: l.name ?? payeeNameOf(ctx, l.payee).name, amountMinor: l.amountMinor, deleted: l.deleted, split: l.splitPayment }
       return l.ledgerId === ctx.ledger.id && l.splitOff === null ? shown : { ...shown, elsewhere: { ledger: ledgers.get(l.ledgerId)!, account: l.splitOff } }
     }
     const remoteSide = (id: string) => {

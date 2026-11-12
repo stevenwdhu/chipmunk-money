@@ -125,7 +125,7 @@ function world(opts: Parameters<typeof sharedWorld>[0] = {}) {
   const deleteVisa = () => {
     const h = home()
     const others = h.accountWide.ledgers(w.visa).filter((l) => !l.isHome)
-    setSharing(h, w.ctxOf, w.visa, { ledgers: [h.ledger.slug], rows: Object.fromEntries(others.map((l) => [l.slug, 'home'])) }, { actor: TESTER })
+    setSharing(h, w.ctxOf, w.visa, { ledgers: [h.ledger.slug], rows: Object.fromEntries(others.map((l) => [l.slug, 'home'])) }, { actor: TESTER, usable: null })
     deleteAccount(h, w.ctxOf, w.visa)
     expect(storage.sqlite.pragma('foreign_key_check')).toEqual([])
   }
@@ -618,7 +618,7 @@ describe('a ledger with only deleted rows on the account, or an account split of
       const sent = [remote('k1', '2026-09-20', -9_000, 'Book Shop'), remote('k2', '2026-09-21', -1_200, 'Gas Bar')]
       w.plaid(sent)
       w.move(w.personal, [w.bankRow(w.personal, 'k1')], w.family)
-      setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER })
+      setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER, usable: null })
       // Visa isn't shared any more, so nothing is asked. A key must still reach Personal, where the bank ids go.
       expect(w.ask(w.family, action)).toEqual({ questions: [], notices: [], blockers: [] })
       expect(w.ask(w.family, action, [w.family.ledger.id]).blockers).toEqual([

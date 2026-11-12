@@ -27,6 +27,9 @@ import {
  * - Writes: the other's rows (every table) are the same after the subject's writes, except for an
  *   app-wide change, which changes both ledgers the same way.
  * - Keys: a key limited to the other gets 403 on the subject.
+ * - Shared accounts: the routes that may reach another ledger say so (`across`). With the subject's
+ *   card shared with the other ledger, a key limited to the subject is refused by each of them, and
+ *   every other read still shows nothing of the other's.
  * All of it in both directions, with both ledgers on the shared category list and on their own.
  * The cases come from the API's own specs and the MCP server's tools/list: a new route or tool
  * without a case fails the test.
@@ -58,6 +61,14 @@ interface Case {
   appWide?: boolean
   /** What may differ between captures for reasons outside the ledgers (bank accounts are app-wide). */
   normalize?: (body: Json) => Json
+  /**
+   * It may read or change another ledger: one that has an account shared with this one. Between
+   * the twins nothing is shared, so it stays in its ledger like any other route. This is the
+   * request to make once the subject's card is shared with the other ledger (the case's own where
+   * left out): a key limited to the subject gets `status` for it (403 unless given), and nothing
+   * changes in either ledger.
+   */
+  across?: (c: C) => { params?: Record<string, number>; query?: Record<string, unknown>; body?: unknown; status?: number }
 }
 
 const MISSING = 999_999_999
@@ -69,6 +80,8 @@ const find = (c: C, sql: string, ...params: unknown[]) => one<number>(c.me.ctx, 
 const column = (c: C, sql: string) => c.me.ctx.q.column<number>(sql)
 const tx = (c: C, payee: string) => find(c, 'SELECT id FROM transactions WHERE ledger_id = @ledger AND payee = ? ORDER BY id DESC LIMIT 1', payee)
 const payeeKey = (c: C, id: number) => one<string>(c.me.ctx, 'SELECT payee_key FROM transactions WHERE ledger_id = @ledger AND id = ?', id)
+/** A card payment onto the subject's card, which the shared-account test adds: one that can be split. */
+const PAYMENT = 'TWIN PAYMENT'
 const tagName = (c: C) => one<string>(c.me.ctx, 'SELECT name FROM tags WHERE ledger_id = @ledger AND id = ?', ids(c).tag)
 /**
  * The category list's rows as they are now: leaving or joining the shared list gives a ledger's
@@ -141,6 +154,9 @@ const READS: Case[] = [
   { route: 'GET /ledgers/:ledger/accounts/:id', params: (c) => ({ id: ids(c).chequing }), kinds: { id: 'chequing' } },
   { route: 'GET /ledgers/:ledger/accounts/:id/history', params: (c) => ({ id: ids(c).investment }), query: () => ({ months: 24 }), kinds: { id: 'investment' } },
   { route: 'GET /ledgers/:ledger/accounts/:id/snapshots', params: (c) => ({ id: ids(c).investment }), kinds: { id: 'investment' } },
+  { route: 'GET /ledgers/:ledger/accounts/:id/sharing', params: (c) => ({ id: ids(c).card }) },
+  // Only for a shared account, and then only for a caller allowed in every ledger that has it.
+  { route: 'GET /ledgers/:ledger/accounts/:id/transactions', params: (c) => ({ id: ids(c).card }), status: () => 409, across: () => ({}) },
   { route: 'GET /ledgers/:ledger/categories' },
   { route: 'GET /ledgers/:ledger/categories/sharing' },
   { route: 'GET /ledgers/:ledger/tags' },
@@ -237,6 +253,27 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'POST /ledgers/:ledger/transactions/accept-all' },
     { route: 'POST /ledgers/:ledger/transactions/match', query: () => ({ dryRun: true }), body: () => ({ since: '2026-01-01' }) },
     { route: 'POST /ledgers/:ledger/transactions/match', body: () => ({}) },
+    // Between ledgers that share an account: the twins share none, so these are refused.
+    {
+      route: 'POST /ledgers/:ledger/transactions/move',
+      body: (c) => ({ ids: [ids(c).purchase], to: c.other.slug }),
+      status: () => 400,
+      across: (c) => ({ body: { ids: [ids(c).purchase], to: c.other.slug } }),
+    },
+    {
+      route: 'PUT /ledgers/:ledger/transactions/:id/split',
+      params: (c) => ({ id: ids(c).purchase }),
+      body: (c) => ({ shares: [{ ledger: c.other.slug, amountMinor: 100 }] }),
+      status: () => 400,
+      across: (c) => ({ params: { id: tx(c, PAYMENT) }, body: { shares: [{ ledger: c.other.slug, amountMinor: 100 }] } }),
+    },
+    { route: 'PUT /ledgers/:ledger/accounts/:id/sharing', params: (c) => ({ id: ids(c).card }), query: () => ({ dryRun: true }), body: (c) => ({ ledgers: [c.me.slug, c.other.slug] }) },
+    {
+      route: 'PUT /ledgers/:ledger/accounts/:id/sharing',
+      params: (c) => ({ id: ids(c).card }),
+      body: (c) => ({ ledgers: [c.me.slug] }),
+      across: (c) => ({ body: { ledgers: [c.me.slug], rows: { [c.other.slug]: 'home' } } }),
+    },
     { route: 'PUT /ledgers/:ledger/transactions/:id/links', params: (c) => ({ id: ids(c).moneyIn }), body: (c) => ({ links: [{ transactionId: ids(c).purchase, amountMinor: 1_200, kind: 'refund' }] }), kinds: { id: 'moneyIn' } },
     { route: 'PUT /ledgers/:ledger/transactions/links', body: (c) => ({ sets: [{ id: ids(c).moneyIn, links: [] }] }) },
     { route: 'PATCH /ledgers/:ledger/transactions/:id', params: (c) => ({ id: ids(c).purchase }), body: () => ({ notes: 'edited', tags: ['edited'] }) },
@@ -248,9 +285,21 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'PATCH /ledgers/:ledger/institutions/:id', params: (c) => ({ id: ids(c).institution }), body: () => ({ name: 'TD Bank' }) },
     { route: 'DELETE /ledgers/:ledger/institutions/:id', params: (c) => ({ id: find(c, "SELECT id FROM institutions WHERE ledger_id = @ledger AND name = 'Twin Credit Union'") }) },
     { route: 'POST /ledgers/:ledger/accounts', body: (c) => ({ name: 'Twin Savings', type: 'savings', institutionId: ids(c).institution, openingBalanceMinor: 10_000 }) },
-    { route: 'POST /ledgers/:ledger/accounts/:id/bank/preview', params: (c) => ({ id: ids(c).cash }), body: () => ({ bankAccountId: FREE_BANK_ACCOUNT }), kinds: { id: 'cash' } },
+    {
+      route: 'POST /ledgers/:ledger/accounts/:id/bank/preview',
+      params: (c) => ({ id: ids(c).cash }),
+      body: () => ({ bankAccountId: FREE_BANK_ACCOUNT }),
+      kinds: { id: 'cash' },
+      across: (c) => ({ params: { id: ids(c).card }, body: { bankAccountId: ids(c).bankAccount } }),
+    },
     { route: 'DELETE /ledgers/:ledger/accounts/:id/bank/preview', params: (c) => ({ id: ids(c).cash }), kinds: { id: 'cash' } },
-    { route: 'PUT /ledgers/:ledger/accounts/:id/bank', params: (c) => ({ id: ids(c).cash }), body: () => ({ bankAccountId: FREE_BANK_ACCOUNT }), kinds: { id: 'cash' } },
+    {
+      route: 'PUT /ledgers/:ledger/accounts/:id/bank',
+      params: (c) => ({ id: ids(c).cash }),
+      body: () => ({ bankAccountId: FREE_BANK_ACCOUNT }),
+      kinds: { id: 'cash' },
+      across: (c) => ({ params: { id: ids(c).card }, body: { bankAccountId: ids(c).bankAccount } }),
+    },
     { route: 'DELETE /ledgers/:ledger/accounts/:id/bank', params: (c) => ({ id: ids(c).cash }), kinds: { id: 'cash' } },
     {
       route: 'POST /ledgers/:ledger/accounts/:id/bank/switch',
@@ -260,6 +309,7 @@ function writeCases(ownLists: boolean): Case[] {
         return { bankAccountId: FREE_BANK_ACCOUNT, from: p.from, version: p.version, pairs: [], skip: [], remove: [] }
       },
       kinds: { id: 'cash' },
+      across: (c) => ({ params: { id: ids(c).card }, body: { bankAccountId: ids(c).bankAccount, from: '2026-09-01', version: 'x', pairs: [], skip: [], remove: [] } }),
     },
     { route: 'DELETE /ledgers/:ledger/accounts/:id/bank', params: (c) => ({ id: ids(c).cash }), kinds: { id: 'cash' } },
     { route: 'POST /ledgers/:ledger/accounts', body: () => ({ name: 'Linked Savings', type: 'savings', bank: { bankAccountId: FREE_BANK_ACCOUNT } }) },
@@ -318,12 +368,16 @@ const importRows = [
   { line: 2, date: '2026-10-02', payee: 'HYDRO ONE', amountMinor: -9_100 },
 ]
 
+/** What a key limited to the subject gets for archiving or deleting it: the ledger the app opens isn't its to change (403) before anything is asked. */
+const goes = (c: C) => (c.t.storage.registry.defaultLedger().id === ledgerOf(c) ? 403 : 409)
+
 /** After the MCP tools: the ledger as a whole. */
 const ENDINGS: Case[] = [
-  { route: 'PATCH /ledgers/:ledger', body: (c) => ({ color: '#16a34a', name: `${c.me.ctx.ledger.name} renamed` }) },
-  { route: 'POST /ledgers/:ledger/erase', body: () => ({ confirm: 'erase' }) },
+  // A ledger that has a shared account is asked what happens to it first, and a key that can't use every ledger that has it can't answer (409).
+  { route: 'PATCH /ledgers/:ledger', body: (c) => ({ color: '#16a34a', name: `${c.me.ctx.ledger.name} renamed` }), across: (c) => ({ body: { archived: true }, status: goes(c) }) },
+  { route: 'POST /ledgers/:ledger/erase', body: () => ({ confirm: 'erase' }), across: () => ({ status: 409 }) },
   { route: 'POST /ledgers/:ledger/setup/demo' },
-  { route: 'DELETE /ledgers/:ledger', body: (c) => ({ confirm: c.t.storage.registry.get(ledgerOf(c)).name }) },
+  { route: 'DELETE /ledgers/:ledger', body: (c) => ({ confirm: c.t.storage.registry.get(ledgerOf(c)).name }), across: (c) => ({ status: goes(c) }) },
 ]
 
 // MCP ------------------------------------------------------------------------------------------
@@ -508,7 +562,8 @@ for (const world of WORLDS) {
           const out = new Map<string, Json>()
           for (const k of READS) {
             const { req, res } = await run(c, k)
-            expect([k.route, res.status, res.message]).toEqual([k.route, 200, undefined])
+            const refused = k.status?.(c)
+            expect([k.route, res.status, refused ? undefined : res.message]).toEqual([k.route, refused ?? 200, undefined])
             out.set(label(k, req), k.normalize ? k.normalize(res.body) : res.body)
           }
           for (const x of MCP_READS) {
@@ -674,6 +729,55 @@ for (const world of WORLDS) {
         await client.close()
         expect(ledgerHash(t.storage, c.me.ctx.ledger.id)).toEqual(meBefore)
       })
+
+      it(`${direction.name}, with its card shared with the other ledger, refuse a key limited to it wherever the other is reached`, async () => {
+        const t = twins({ own: world.own })
+        const c: C = { t, ...direction.pick(t) }
+        const base = `/ledgers/${ledgerOf(c)}`
+        const ok = async (req: Req) => {
+          const res = await send(t.app, req)
+          expect(res.status, `${req.method} ${req.path} → ${res.message ?? ''}`).toBeLessThan(300)
+          return res.body
+        }
+        // The card is shared, and each ledger holds rows on it: one moved to the other, one the other entered, and a payment to split.
+        await ok({ method: 'PUT', path: `${base}/accounts/${ids(c).card}/sharing`, body: { ledgers: [c.me.slug, c.other.slug] } })
+        await ok({ method: 'POST', path: `${base}/transactions/move`, body: { ids: [ids(c).suggestion], to: c.other.slug } })
+        const theirs = { accountId: ids(c).card, date: '2026-10-01', amountMinor: -4_321, payee: 'THEIRS ON OURS', notes: `note ${c.other.canary}` }
+        await ok({ method: 'POST', path: `/ledgers/${c.other.slug}/transactions`, body: theirs })
+        c.other.ctx.q.run("UPDATE transactions SET notes = 'note ' || @canary WHERE ledger_id = @ledger AND id = @id", { canary: c.other.canary, id: ids(c).suggestion })
+        const cardPayment = find(c, "SELECT id FROM ledger_categories WHERE ledger_id = @ledger AND name LIKE 'Credit card payment%'")
+        await ok({ method: 'POST', path: `${base}/transactions`, body: { accountId: ids(c).card, date: '2026-10-01', amountMinor: 50_000, payee: PAYMENT, categoryId: cardPayment } })
+        await settle()
+        // The app sees the whole account, the other ledger's rows too.
+        const whole = await ok({ method: 'GET', path: `${base}/accounts/${ids(c).card}/transactions`, query: { limit: 500 } })
+        expect(whole.items.filter((x: Json) => !x.here).map((x: Json) => x.payee).sort()).toEqual(['NEW GROCER', 'THEIRS ON OURS'])
+
+        const limited = await apiKey(t.app, ['admin'], [c.me.ctx.ledger.id])
+        const before = [ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]
+        const answers: unknown[] = []
+        // Every read that isn't for the whole account: its own rows, the account's total and the other ledger's name, and nothing else of the other's.
+        for (const k of READS) {
+          if (k.across) continue
+          const req = await request(c, k)
+          const res = await send(t.app, req, limited)
+          if (res.status !== 200 || holds(res.body, c.other.canary) || holds(res.body, 'THEIRS ON OURS')) answers.push([label(k, req), res.status])
+        }
+        const mine = (await send(t.app, { method: 'GET', path: `${base}/accounts/${ids(c).card}` }, limited)).body
+        expect(mine.sharing).toMatchObject({ isHome: true, ledgers: [{ slug: c.me.slug }, { slug: c.other.slug }], totalBalanceMinor: whole.items[0].balanceAfterMinor })
+        expect(mine.balanceMinor).not.toBe(mine.sharing.totalBalanceMinor)
+        // Every route that may reach the other ledger.
+        const across = [...READS, ...writeCases(world.own), ...ENDINGS].filter((k) => k.across)
+        expect(across.length).toBeGreaterThan(8)
+        for (const k of across) {
+          const a = k.across!(c)
+          const req = await request(c, { ...k, params: a.params ? () => a.params! : k.params, query: a.query ? () => a.query! : undefined, body: 'body' in a ? () => a.body : k.body })
+          const res = await send(t.app, req, limited)
+          if (res.status !== (a.status ?? 403) || holds(res.body, c.other.canary)) answers.push([label(k, req), res.status, res.message])
+        }
+        expect(answers).toEqual([])
+        await settle()
+        expect([ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]).toEqual(before)
+      })
     }
   })
 }
@@ -707,6 +811,7 @@ function bodyProbes(c: C, ownLists: boolean): Array<{ name: string; make: (id: I
     r('PATCH transaction accountId', 'PATCH', `/transactions/${i.purchase}`, (id) => ({ accountId: id('card') })),
     r('PATCH transaction recurringItemId', 'PATCH', `/transactions/${i.purchase}`, (id) => ({ recurringItemId: id('recurring') })),
     r('bulk ids', 'POST', '/transactions/bulk', (id) => ({ ids: [id('purchase')], addTags: ['probe'] })),
+    r('move ids', 'POST', '/transactions/move', (id) => ({ ids: [id('purchase')], to: c.other.slug })),
     r('bulk delete', 'POST', '/transactions/bulk', (id) => ({ ids: [id('purchase')], delete: true })),
     r('links transactionId', 'PUT', `/transactions/${i.moneyIn}/links`, (id) => ({ links: [{ transactionId: id('purchase'), amountMinor: 100, kind: 'refund' }] })),
     r('links together id', 'PUT', '/transactions/links', (id) => ({ sets: [{ id: id('refund'), links: [] }] })),

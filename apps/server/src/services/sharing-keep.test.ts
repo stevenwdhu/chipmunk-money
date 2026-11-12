@@ -60,7 +60,7 @@ const remote = (remoteId: string, date: string, amountMinor: number, payee: stri
 function world(opts: Parameters<typeof sharedWorld>[0] = {}) {
   const w = sharedWorld(opts)
   const ledgers = [w.personal, w.family, w.trip]
-  const set = (ctx: AppContext, input: SharingInput, dryRun = false) => setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER })
+  const set = (ctx: AppContext, input: SharingInput, dryRun = false) => setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER, usable: null })
   const move = (from: AppContext, ids: number[], to: AppContext) => moveTransactions(from, w.ctxOf, { ids, to: to.ledger.id }, TESTER)
   /** Each ledger's own live rows on an account, summed up to `d` (all of them without it). */
   const own = (ctx: AppContext, account: number, d?: string) =>
@@ -311,7 +311,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     // account, the one it was split off from directly. Visa reaches it through that one.
     addMember(trip, w.ctxOf, own, family.ledger.id, TESTER)
     moveTransactions(trip, w.ctxOf, { ids: [rows[1]!], to: family.ledger.id }, TESTER)
-    setSharing(trip, w.ctxOf, own, { ledgers: ['trip'], rows: { family: 'keep' } }, { actor: TESTER })
+    setSharing(trip, w.ctxOf, own, { ledgers: ['trip'], rows: { family: 'keep' } }, { actor: TESTER, usable: null })
     const again = w.splitOff(family, own)
     expect(w.storage.sqlite.prepare('SELECT id FROM accounts WHERE split_from_id = ? ORDER BY id').pluck().all(w.visa)).toEqual([own])
     expect(personal.accountWide.splitOffs(w.visa).map((s) => s.id)).toEqual([own, again])
@@ -576,7 +576,7 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     const pizza = family.q.pluck<number>("SELECT id FROM transactions WHERE ledger_id = @ledger AND payee = 'Pizza Place'")!
     const bakery = w.addTx(trip, '2026-09-15', -600, { account: own, payee: 'Bakery' })
     w.move(family, [old, pizza], trip)
-    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER })
+    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER, usable: null })
     const again = w.splitOff(trip, own)
     expect(w.storage.sqlite.prepare('SELECT split_from_id FROM accounts WHERE id = ?').pluck().get(again)).toBe(own)
     expect(trip.q.column('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? ORDER BY id', again)).toEqual([old, pizza, bakery])
@@ -672,7 +672,7 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
       background: false,
     })
     w.move(family, [k1], trip)
-    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER })
+    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER, usable: null })
     const again = w.splitOff(trip, own)
 
     // Family's account goes, the one in the middle: Visa keeps its bank ids, as deleted rows in its home, with nothing else of theirs.

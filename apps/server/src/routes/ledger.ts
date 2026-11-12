@@ -4,6 +4,10 @@ import {
   accountBankLinkSchema,
   accountCreateSchema,
   accountSchema,
+  accountSharingSchema,
+  accountSharingSetSchema,
+  accountTransactionPageSchema,
+  accountTransactionsQuerySchema,
   accountUpdateSchema,
   activityPageSchema,
   activityQuerySchema,
@@ -41,6 +45,8 @@ import {
   importBatchSchema,
   importCommitSchema,
   transactionMatchSchema,
+  transactionMoveSchema,
+  transactionSplitSetSchema,
   linkCandidateSchema,
   linkedTransactionSchema,
   linkCandidatesQuerySchema,
@@ -67,6 +73,7 @@ import {
   monthOf,
   monthSummarySchema,
   monthTotalsSchema,
+  moveResultSchema,
   netWorthReportSchema,
   payeeChoiceQuerySchema,
   payeeChoiceSchema,
@@ -86,6 +93,8 @@ import {
   recurringUpdateSchema,
   reorderSchema,
   setupStatusSchema,
+  sharingChangeSchema,
+  splitResultSchema,
   recategorizeSchema,
   suggestCategorySchema,
   tagCreateSchema,
@@ -116,7 +125,7 @@ import { actorName, requireLedger, type Actor } from '../api/auth'
 import { ApiRouter } from '../api/router'
 import { aiEnabled } from '../ai/runner'
 import * as accounts from '../services/accounts'
-import { activityActors, diff, listActivity, recordActivity, type ActivityEntry } from '../services/activity'
+import { activityActors, diff, listActivity, recordActivity, type ActivityActor, type ActivityEntry } from '../services/activity'
 import { joinPreview, requireOwnList, setCategorySharing, usesSharedList, type JoinResolution } from '../services/catalog'
 import * as cats from '../services/categories'
 import * as customReports from '../services/custom-reports'
@@ -129,11 +138,14 @@ import type { AppContext } from '../services/context'
 import * as imports from '../services/import'
 import * as institutions from '../services/institutions'
 import { matchTransactions } from '../services/matching'
+import { moveTransactions } from '../services/moves'
 import { questionsFor } from '../services/questions'
 import * as recurring from '../services/recurring'
 import * as reports from '../services/reports'
 import { today } from '../services/settings'
 import * as setup from '../services/setup'
+import { getSharing, setSharing } from '../services/sharing'
+import { setSplit } from '../services/splits'
 import { setLinks, setLinksTogether } from '../services/links'
 import * as txs from '../services/transactions'
 import { latestBankPayload } from '../services/bank/apply'
@@ -165,10 +177,12 @@ export function toCsv(rows: Array<Record<string, unknown>>, text: ReadonlySet<st
   return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c], c)).join(','))].join('\n')
 }
 
+/** Whoever made the request, as the activity log names them: for a service that records in several ledgers. */
+const acting = (c: C): ActivityActor => ({ name: actorName(c.var.actor), apiKeyId: c.var.actor.kind === 'key' ? c.var.actor.key.id : null })
+
 /** Records a change in this ledger's activity log, as whoever made the request. */
 function log(c: C, entry: ActivityEntry) {
-  const actor = c.var.actor
-  recordActivity(c.var.ctx, { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null }, entry)
+  recordActivity(c.var.ctx, acting(c), entry)
 }
 
 /** Whether the caller is a key limited to some ledgers. */
@@ -210,6 +224,10 @@ const money = (t: { amountMinor: number; currency?: string }) => formatMoney(t.a
 const andReports = (n: number) => (n ? ` and ${n} custom report${n === 1 ? '' : 's'}` : '')
 const describe = (t: Transaction) => `${t.payee} ${money(t)} on ${t.date}`
 
+/** What a key limited to some ledgers is told by the routes that reach another ledger a shared account is in. */
+const ACROSS =
+  ' A key limited to some ledgers must be allowed in every ledger this touches (403 otherwise). An id another ledger holds is answered like one that doesn’t exist.'
+
 /** Routes for one ledger's data, mounted at /api/v1/ledgers/:ledger. */
 export function ledgerRoutes(storage: Storage, bank: BankService) {
   const r = new ApiRouter<LedgerEnv>({ mount: '/ledgers/:ledger', tag: 'Ledgers', sqlite: storage.sqlite })
@@ -228,7 +246,8 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...tx,
       scope: 'read',
       summary: 'List transactions',
-      description: 'Newest first. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`.',
+      description:
+        'Newest first. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`. On a shared account, only the transactions this ledger holds: GET /accounts/{id}/transactions lists every ledger’s.',
       query: transactionQuerySchema,
       response: transactionPageSchema,
     },
@@ -342,6 +361,31 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       return { ...result, dryRun }
     },
   )
+  r.post(
+    '/transactions/move',
+    {
+      ...tx,
+      scope: 'write',
+      summary: 'Move transactions to another ledger',
+      description:
+        'For transactions on a shared account: they go to another ledger that has the account (`to`), which holds them from then on, and each ledger’s balance on the account changes by them. All of them move, or none (400 naming the one that doesn’t fit: one this ledger doesn’t hold, a deleted one, one whose account `to` doesn’t have, a split payment or a share of one, or `to` archived). Up to 1,000 at a time. The other ledger treats them as new: links to transactions that stay are let go (a refund moving with its purchase keeps its link), a transfer is no longer paired, recurring items let go of them, tags go by name, and the category is the one of the same name there, else what that ledger’s history suggests, else none (a card payment or transfer takes that ledger’s category for it). Then that ledger’s matching runs, and AI categorizes what’s left without a category. There’s no undo: move them back with another move, from the other ledger. Afterwards their ids are not found here (404). Try it with `dryRun=true` first: `dropped` lists what would be let go.' +
+        ACROSS,
+      body: transactionMoveSchema,
+      response: moveResultSchema,
+      dryRun: true,
+    },
+    (c, { body, dryRun }) => {
+      const usable = usableLedgers(c)
+      const to = storage.registry.find(body.to)
+      // The same answer for a ledger the key can't use and one that doesn't exist: it doesn't say which ledgers there are.
+      if (usable && !(to && usable.includes(to.id))) {
+        throw new HTTPException(403, { message: `This key can’t use “${body.to}”, so it can’t move transactions there.` })
+      }
+      if (!to) badRequest(`There’s no ledger “${body.to}”.`)
+      const { deferred: _, ...result } = moveTransactions(c.var.ctx, storage.ctxOf, { ids: body.ids, to: to.id, dryRun }, acting(c))
+      return { ...result, dryRun }
+    },
+  )
   r.get('/transactions/:id', { ...tx, scope: 'read', summary: 'Get a transaction', response: transactionSchema }, (c, { params }) =>
     txs.getTransaction(c.var.ctx, params.id),
   )
@@ -419,6 +463,21 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       after.forEach((a, i) => logUpdate(c, 'transaction', a.id, `Linked ${describe(before[i]!)}`, before[i]!, a))
       return after
     },
+  )
+  r.put(
+    '/transactions/:id/split',
+    {
+      ...tx,
+      scope: 'write',
+      summary: 'Split a card payment between ledgers',
+      description:
+        'For a payment onto a shared credit card that this ledger holds: gives each other ledger that has the card its share, so each ledger’s balance on the card goes down by what it paid. The payment itself stays as the bank sent it. Each share is a transaction in its ledger (`split.part` is `share`), and one beside the payment takes them off this ledger (`given`). They sum to zero, sit in each ledger’s category for card payments, and change with the split only (409 otherwise). `shares` replaces the split, and an empty list undoes it. Only a card payment can be split (400): money onto the card that’s a transfer or in a category left out of totals, not deleted and not linked. Every ledger in it needs a category for card payments (400). While it’s split, the payment can’t be deleted, moved or given another date by hand. Try it with `dryRun=true` first.' +
+        ACROSS,
+      body: transactionSplitSetSchema,
+      response: splitResultSchema,
+      dryRun: true,
+    },
+    (c, { params, body, dryRun }) => ({ ...setSplit(c.var.ctx, storage.ctxOf, params.id, body, { dryRun, actor: acting(c), usable: usableLedgers(c) }), dryRun }),
   )
   r.patch(
     '/transactions/:id',
@@ -541,8 +600,17 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
   )
 
   // Accounts -------------------------------------------------------------
-  r.get('/accounts', { ...acc, scope: 'read', summary: 'List accounts', description: 'Includes current balances. Archived accounts come last.', response: z.array(accountSchema) }, (c) =>
-    accounts.listAccounts(c.var.ctx),
+  r.get(
+    '/accounts',
+    {
+      ...acc,
+      scope: 'read',
+      summary: 'List accounts',
+      description:
+        'Includes current balances. Archived accounts come last. An account shared between ledgers has `sharing`: its home, every ledger that has it and its total balance, and `balanceMinor` is what this ledger holds of it. In a ledger it’s shared with it has no opening balance, recorded balance, import mapping or bank link: those are its home’s.',
+      response: z.array(accountSchema),
+    },
+    (c) => accounts.listAccounts(c.var.ctx),
   )
   r.post(
     '/accounts',
@@ -603,7 +671,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Switch an account to synced',
       description:
-        'Syncs the account from a bank account from now on. It takes the bank account’s transactions kept from its syncs straight away (when nothing was fetched for it yet, its connection’s next sync brings them), all of them unless `syncFrom` says from when. Transactions you already have are matched where the amount, date and payee say so. For an account with transactions, review the switch first with POST /accounts/{id}/bank/preview, since another service words payees differently.',
+        'Syncs the account from a bank account from now on, in the account’s home (409 in a ledger it’s shared with). A key limited to some ledgers can’t do it for a shared account unless it’s allowed in every ledger that has it (403). It takes the bank account’s transactions kept from its syncs straight away (when nothing was fetched for it yet, its connection’s next sync brings them), all of them unless `syncFrom` says from when. Transactions you already have are matched where the amount, date and payee say so. For an account with transactions, review the switch first with POST /accounts/{id}/bank/preview, since another service words payees differently.',
       body: accountBankLinkSchema,
       response: accountSchema,
     },
@@ -628,7 +696,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Compare an account with a bank account before switching',
       description:
-        'Pairs the bank account’s transactions kept from its syncs (nothing is fetched) with the account’s: the same amount within a day, with the payee telling apart ones with the same amount and day. Lists what’s paired, guessed, nearly the same, and only on one side. Nothing changes. Then POST /accounts/{id}/bank/switch with what to do, or DELETE this when you don’t. Meanwhile the connections involved don’t sync on their own (for 15 minutes at most).',
+        'Pairs the bank account’s transactions kept from its syncs (nothing is fetched) with the account’s: the same amount within a day, with the payee telling apart ones with the same amount and day. Lists what’s paired, guessed, nearly the same, and only on one side. A shared account’s transactions are compared in every ledger that holds them: one another ledger has says which (`elsewhere`), and a payment split between ledgers says so (`split`). So a key limited to some ledgers must be allowed in every ledger that has the account (403 otherwise), and it’s done in the account’s home (409 elsewhere). Nothing changes. Then POST /accounts/{id}/bank/switch with what to do, or DELETE this when you don’t. Meanwhile the connections involved don’t sync on their own (for 15 minutes at most).',
       body: accountBankPreviewSchema,
       response: linkPreviewSchema,
     },
@@ -658,7 +726,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Switch an account to sync from a bank account, as reviewed',
       description:
-        'Links the account to the bank account and applies the review, to the same transactions it showed: `pairs` take the bank’s ids, dates and times, the bank’s others are added except `skip`, and yours it doesn’t have are kept except `remove`. Its balance becomes the bank’s. When either side changed since the review (`version`), nothing changes and you get a 409.',
+        'Links the account to the bank account and applies the review, to the same transactions it showed: `pairs` take the bank’s ids, dates and times, the bank’s others are added except `skip`, and yours it doesn’t have are kept except `remove`. Its balance becomes the bank’s. A shared account’s transactions change in the ledger that holds each, and new ones land in its home. When either side changed since the review (`version`: a sync, or an edit or a move in any ledger that has the account), nothing changes and you get a 409. Removing a payment split between ledgers is a 409 too (undo its split first), and so is removing a transaction on an account split off from this one. A key limited to some ledgers must be allowed in every ledger that has the account (403 otherwise).',
       body: accountBankSwitchSchema,
       response: z.object({ account: accountSchema, result: switchResultSchema }),
     },
@@ -731,7 +799,8 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...acc,
       scope: 'write',
       summary: 'Delete an account',
-      description: 'Deletes the account and all of its transactions, and its institution if no other account is there. To keep the history, archive it instead.',
+      description:
+        'Deletes the account and all of its transactions, and its institution if no other account is there. To keep the history, archive it instead. A shared account can’t be deleted (409): stop sharing it first, with PUT /accounts/{id}/sharing.',
       status: 204,
     },
     (c, { params }) => {
@@ -783,6 +852,47 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       const before = accounts.deleteSnapshot(c.var.ctx, params.id, params.snapshotId)
       log(c, { action: 'delete_balance', entity: 'account', entityId: params.id, summary: `Deleted the balance recorded on ${before.date}`, before })
     },
+  )
+
+  r.get(
+    '/accounts/:id/sharing',
+    {
+      ...acc,
+      scope: 'read',
+      summary: 'Get how an account is shared',
+      description:
+        'The account’s home (this ledger), the ledger whose balance carries its opening balance, and each other ledger it’s shared with, each with how many transactions it holds on the account and its balance on it. For any account: one that isn’t shared has no `members`. In a ledger the account is shared with, a 409 naming its home.',
+      response: accountSharingSchema,
+    },
+    (c, { params }) => getSharing(c.var.ctx, params.id),
+  )
+  r.put(
+    '/accounts/:id/sharing',
+    {
+      ...acc,
+      scope: 'admin',
+      summary: 'Share an account with other ledgers',
+      description:
+        'Sets every ledger that has the account (`ledgers`, its home included) and which one is its home, in the account’s home. Only credit cards can be shared (400). A ledger added gets the account under an institution of the same name. Nothing already recorded moves and no balance changes: each ledger’s balance on it is what it holds, and new transactions from sync and CSV go to the home. With `home`, another ledger in the list becomes the home: the bank link, recorded balances and the account’s settings go with it, and no balance changes. A ledger taken out that holds transactions on it needs `rows` (400 otherwise): `home` moves them to the home, `keep` keeps them in that ledger on a new manual account, and the account’s total is the bank’s whole balance again. Adds come first, then the home change, then the ledgers taken out. Refused in a ledger the account is shared with (409 naming its home), and with the home or a ledger added archived (400). Try it with `dryRun=true` first: it answers the counts, each ledger’s balance before and after, and `notices` to read.' +
+        ' A key limited to some ledgers must be allowed in every ledger added or made the home, and to take a ledger out in every ledger that has the account (403 otherwise).',
+      body: accountSharingSetSchema,
+      response: sharingChangeSchema,
+      dryRun: true,
+    },
+    (c, { params, body, dryRun }) => setSharing(c.var.ctx, storage.ctxOf, params.id, body, { dryRun, actor: acting(c), usable: usableLedgers(c) }),
+  )
+  r.get(
+    '/accounts/:id/transactions',
+    {
+      ...acc,
+      scope: 'read',
+      summary: 'List a shared account’s transactions in every ledger',
+      description:
+        'Newest first, from `from` to `to`, each with the ledger that holds it (`here`: this one), its category by name, and the account’s total balance after it, so the list reads like the bank’s statement. A payment split between the ledgers is listed once, with its shares. Only for a shared account (409 otherwise), from any ledger that has it. A key limited to some ledgers must be allowed in every ledger that has the account (403 otherwise). To change one another ledger holds, use that ledger’s routes, or move it here first.',
+      query: accountTransactionsQuerySchema,
+      response: accountTransactionPageSchema,
+    },
+    (c, { params, query }) => txs.listAccountTransactions(c.var.ctx, params.id, query, usableLedgers(c)),
   )
 
   // Categories & tags ----------------------------------------------------
@@ -1401,7 +1511,8 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...imp,
       scope: 'read',
       summary: 'Preview an import',
-      description: 'For parsed rows, shows which ones look like duplicates and the category each would get. Changes nothing.',
+      description:
+        'For parsed rows, shows which ones look like duplicates and the category each would get. Changes nothing. Into a shared account, in its home (409 elsewhere): a row that looks like a transaction another ledger holds is a duplicate too (`duplicateElsewhere`), without that transaction’s id.',
       body: importPreviewSchema,
       response: z.array(importPreviewRowSchema),
     },
@@ -1413,7 +1524,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...imp,
       scope: 'write',
       summary: 'Import transactions',
-      description: 'Adds the rows that aren’t duplicates as one batch. Rows with an `externalId` the account already has are skipped. To take an import back, delete its transactions.',
+      description: 'Adds the rows that aren’t duplicates as one batch. Rows with an `externalId` the account already has are skipped, in any ledger that has a shared account. To take an import back, delete its transactions.',
       body: importCommitSchema,
       response: importResultSchema,
       status: 201,

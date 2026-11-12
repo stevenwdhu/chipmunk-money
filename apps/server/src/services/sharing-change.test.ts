@@ -39,7 +39,7 @@ const settle = () => new Promise((r) => setTimeout(r, 20))
 
 function world(opts: Parameters<typeof sharedWorld>[0] = {}) {
   const w = sharedWorld(opts)
-  const set = (ctx: AppContext, input: SharingInput, dryRun = false) => setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER })
+  const set = (ctx: AppContext, input: SharingInput, dryRun = false) => setSharing(ctx, w.ctxOf, w.visa, input, { dryRun, actor: TESTER, usable: null })
   /** What every sharing change leaves: the parts sum to the account, and nothing refers across ledgers. */
   const check = () => {
     const parts = expectPartsSumToAccount(w.storage, w.visa)
@@ -502,7 +502,7 @@ describe('setSharing', () => {
     refused({ ledgers: ['personal', 'family'], home: 'trip' }, 'Trip isn’t in the list, so it can’t be Visa’s home.')
     refused({ ledgers: ['personal'] }, 'Say whether Family’s 1 transaction goes home or stays in Family.')
     refused({ ledgers: ['personal'], rows: { family: 'elsewhere' } }, 'Say “home” or “keep” for Family’s transactions.')
-    expect(status(() => setSharing(personal, w.ctxOf, chequing, { ledgers: ['personal', 'family'] }, { actor: TESTER }))).toEqual({
+    expect(status(() => setSharing(personal, w.ctxOf, chequing, { ledgers: ['personal', 'family'] }, { actor: TESTER, usable: null }))).toEqual({
       status: 400,
       message: 'Only credit cards can be shared for now, and Chequing isn’t one.',
     })

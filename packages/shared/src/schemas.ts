@@ -385,6 +385,46 @@ export const bulkUpdateSchema = z.object({
 })
 export type BulkUpdate = z.input<typeof bulkUpdateSchema>
 
+export const transactionMoveSchema = z.object({
+  ids: z.array(id).min(1).max(1000).describe('Transactions this ledger holds, not deleted, on accounts shared with `to`. All of them move, or none.'),
+  to: z.string().trim().min(1).max(100).describe('The ledger they go to, by slug or id: another ledger that has their account.'),
+})
+export type TransactionMove = z.input<typeof transactionMoveSchema>
+
+export const transactionSplitSetSchema = z.object({
+  shares: z
+    .array(
+      z.object({
+        ledger: z.string().trim().min(1).max(100).describe('A ledger that has the account, by slug. Not the account’s home, which keeps the rest.'),
+        amountMinor: minor.describe('What that ledger counts as paid onto the account: whole cents, above zero.'),
+      }),
+    )
+    .max(100)
+    .describe(
+      'One amount for each ledger other than the account’s home that gets part of the payment. Together they can’t be more than the payment. When the ledger that holds the payment isn’t the home, its own amount is what it keeps, and the home gets the rest. Empty: the split is undone.',
+    ),
+})
+export type TransactionSplitSet = z.input<typeof transactionSplitSetSchema>
+
+export const accountSharingSetSchema = z.object({
+  ledgers: z.array(z.string().trim().min(1).max(100)).min(1).max(100).describe('Every ledger that will have the account, by slug, its home included. Only the home: the account is no longer shared.'),
+  home: z.string().trim().min(1).max(100).optional().describe('The ledger that will be its home, by slug: one of `ledgers`. The current home when left out.'),
+  rows: z
+    .record(z.string().max(100), z.string().max(20))
+    .optional()
+    .describe(
+      'For each ledger taken out that holds transactions on the account, by slug: `home` moves them to the home, `keep` keeps them in that ledger on a new manual account of its own (its pending ones from the bank still go home).',
+    ),
+})
+export type AccountSharingSet = z.input<typeof accountSharingSetSchema>
+
+export const accountTransactionsQuerySchema = z.object({
+  from: isoDate.optional(),
+  to: isoDate.optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  cursor: z.string().max(100).optional().describe('The `nextCursor` of the page before.'),
+})
+
 export const recategorizeSchema = z.object({
   ids: z.array(id).min(1).max(1000).describe('Transactions to ask AI about again.'),
 })

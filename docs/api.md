@@ -146,12 +146,14 @@ Money in and out of an account. Amounts are in minor units (cents): negative is 
 | POST | `/ledgers/{ledger}/transactions/bulk` | Change many transactions. Accepts `?dryRun=true`. | write |
 | POST | `/ledgers/{ledger}/transactions/accept-all` | Accept all suggested categories. Accepts `?dryRun=true`. | write |
 | POST | `/ledgers/{ledger}/transactions/match` | Find refunds and card payments. Accepts `?dryRun=true`. | write |
+| POST | `/ledgers/{ledger}/transactions/move` | Move transactions to another ledger. Accepts `?dryRun=true`. | write |
 | GET | `/ledgers/{ledger}/transactions/{id}` | Get a transaction. | read |
 | GET | `/ledgers/{ledger}/transactions/{id}/bank-data` | Get what the bank last sent for a transaction. | read |
 | GET | `/ledgers/{ledger}/transactions/{id}/link-candidates` | Find what a transaction could pay back, or be paid back by. | read |
 | GET | `/ledgers/{ledger}/transactions/{id}/links` | List what a transaction pays back, or what paid it back. | read |
 | PUT | `/ledgers/{ledger}/transactions/{id}/links` | Set what a transaction pays back, or what paid it back. | write |
 | PUT | `/ledgers/{ledger}/transactions/links` | Set what several money in pays back, together. | write |
+| PUT | `/ledgers/{ledger}/transactions/{id}/split` | Split a card payment between ledgers. Accepts `?dryRun=true`. | write |
 | PATCH | `/ledgers/{ledger}/transactions/{id}` | Update a transaction. | write |
 | DELETE | `/ledgers/{ledger}/transactions/{id}` | Delete a transaction. | write |
 | POST | `/ledgers/{ledger}/transactions/{id}/restore` | Restore a deleted transaction. | write |
@@ -184,6 +186,9 @@ Institutions, and the accounts at them: bank accounts, cards, investments, loans
 | GET | `/ledgers/{ledger}/accounts/{id}/history` | Get an account’s balance history. | read |
 | GET | `/ledgers/{ledger}/accounts/{id}/snapshots` | List recorded balances. | read |
 | DELETE | `/ledgers/{ledger}/accounts/{id}/snapshots/{snapshotId}` | Delete a recorded balance. | write |
+| GET | `/ledgers/{ledger}/accounts/{id}/sharing` | Get how an account is shared. | read |
+| PUT | `/ledgers/{ledger}/accounts/{id}/sharing` | Share an account with other ledgers. Accepts `?dryRun=true`. | admin |
+| GET | `/ledgers/{ledger}/accounts/{id}/transactions` | List a shared account’s transactions in every ledger. | read |
 
 ### Bank sync
 

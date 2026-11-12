@@ -131,7 +131,7 @@ describe('matching on a shared account', () => {
     w.commit([{ line: 2, date: '2026-09-10', payee: 'BEST BUY #123', amountMinor: -12_000 }])
     w.move(w.personal, ['BEST BUY #123'], w.family)
     // Family stops sharing Visa and keeps the purchase: Visa is shared with no one now.
-    setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER })
+    setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER, usable: null })
     expect(w.personal.accountWide.isShared(w.visa)).toBe(false)
 
     w.commit([{ line: 2, date: '2026-09-20', payee: 'Unrelated Withdrawal', amountMinor: -12_000 }], chequing)

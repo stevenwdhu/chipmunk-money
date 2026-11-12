@@ -5,6 +5,7 @@ import { aiEnabled } from '../ai/runner'
 import { ledgers as ledgersTable } from '../db/schema'
 import { badRequest } from '../lib/http'
 import type { AccountLedger } from './account-rows'
+import type { UsableLedgers } from './bank/service'
 import { balancesAt, currentParts, getAccount, requireHome, setBalance } from './accounts'
 import { recordActivity, type ActivityActor } from './activity'
 import type { AppContext, CtxOf } from './context'
@@ -43,9 +44,22 @@ function ledgerArchived(ctx: AppContext, ledgerId: string): boolean {
   return !!ctx.app.db.select({ archivedAt: ledgersTable.archivedAt }).from(ledgersTable).where(eq(ledgersTable.id, ledgerId)).get()?.archivedAt
 }
 
-/** A ledger by its slug: a 400 when there's none. */
-function ledgerBySlug(ctx: AppContext, slug: string): LedgerName & { id: string } {
-  const row = ctx.app.db.select({ id: ledgersTable.id, slug: ledgersTable.slug, name: ledgersTable.name }).from(ledgersTable).where(eq(ledgersTable.slug, slug)).get()
+/** A ledger by its slug, if there is one. */
+function findLedger(ctx: AppContext, slug: string): (LedgerName & { id: string }) | undefined {
+  return ctx.app.db.select({ id: ledgersTable.id, slug: ledgersTable.slug, name: ledgersTable.name }).from(ledgersTable).where(eq(ledgersTable.slug, slug)).get()
+}
+
+/**
+ * A ledger named in a sharing change, by its slug. One that has the account already is known to
+ * the caller (the account lists them). Any other is a ledger the caller adds, which a caller limited
+ * to some ledgers (`usable`) must be allowed in: a 403, the same for a ledger that doesn't exist, so
+ * the answer doesn't say which ledgers there are. A 400 when there's none.
+ */
+function ledgerNamed(ctx: AppContext, account: Account, ledgers: AccountLedger[], slug: string, usable: UsableLedgers): LedgerName & { id: string } {
+  const has = ledgers.find((l) => l.slug === slug)
+  if (has) return { id: has.ledgerId, slug: has.slug, name: has.name }
+  const row = findLedger(ctx, slug)
+  if (usable && !(row && usable.includes(row.id))) throw new HTTPException(403, { message: `This key can’t use “${slug}”, so it can’t share ${account.name} with it.` })
   if (!row) badRequest(`There’s no ledger “${slug}”.`)
   return row
 }
@@ -643,24 +657,43 @@ export interface SharingChange {
  *    that ledger kept is in both ledgers until someone records how it was settled. The notices say so.
  * Refused: under a member (409), while the home ledger is archived, a ledger that doesn't exist, the
  * current home left out without naming a new one, a home not in the list (400), and what each step
- * refuses. A dry run works it all out and reports it (the counts, each ledger's part before and
+ * refuses. A caller limited to some ledgers (`usable`, null for every ledger) must be allowed in the
+ * home and in every ledger added or made the home, and, when a ledger is taken out, in every ledger
+ * that has the account, since letting a split go can write in any of them: 403 otherwise. A dry run works it all out and reports it (the counts, each ledger's part before and
  * after, what the opening balance going to the home brings it, what happens to each split payment a
  * leaving ledger took part in, and with "keep" what's kept, what goes home and the new account's
  * balance), then changes nothing. After the commit, and not in a dry run, AI categorizes in the
  * home what came to it uncategorized (when AI is on).
  */
-export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number, input: SharingInput, opts: { dryRun?: boolean; actor: ActivityActor }): SharingChange {
+export function setSharing(
+  homeCtx: AppContext,
+  ctxOf: CtxOf,
+  accountId: number,
+  input: SharingInput,
+  opts: { dryRun?: boolean; actor: ActivityActor; usable: UsableLedgers },
+): SharingChange {
   const { account, ledgers, home } = inHome(homeCtx, accountId)
+  const usable = opts.usable
+  const cant = (message: string): never => {
+    throw new HTTPException(403, { message })
+  }
+  if (usable && !usable.includes(home.ledgerId)) cant(`This key can’t use ${home.name}, so it can’t change how ${account.name} is shared.`)
   if (ledgerArchived(homeCtx, home.ledgerId)) badRequest(`${home.name} is archived. Restore it before changing how ${account.name} is shared.`)
-  const wanted = [...new Map(input.ledgers.map((slug) => ledgerBySlug(homeCtx, slug)).map((l) => [l.id, l])).values()]
+  const wanted = [...new Map(input.ledgers.map((slug) => ledgerNamed(homeCtx, account, ledgers, slug, usable)).map((l) => [l.id, l])).values()]
   if (!wanted.length) badRequest(`List the ledgers that will have ${account.name}, its home included.`)
   if (input.home === undefined && !wanted.some((l) => l.id === home.ledgerId)) {
     badRequest(`${home.name} is ${account.name}’s home. Keep it in the list, or name the new home.`)
   }
-  const newHome = input.home === undefined ? { id: home.ledgerId, slug: home.slug, name: home.name } : ledgerBySlug(homeCtx, input.home)
+  const newHome = input.home === undefined ? { id: home.ledgerId, slug: home.slug, name: home.name } : ledgerNamed(homeCtx, account, ledgers, input.home, usable)
   if (!wanted.some((l) => l.id === newHome.id)) badRequest(`${newHome.name} isn’t in the list, so it can’t be ${account.name}’s home.`)
+  if (usable && !usable.includes(newHome.id)) cant(`This key can’t use ${newHome.name}, so it can’t make it ${account.name}’s home.`)
   const adds = wanted.filter((l) => !ledgers.some((m) => m.ledgerId === l.id))
-  const removes = ledgers.filter((m) => !wanted.some((l) => l.id === m.ledgerId)).map((m) => ({ ledger: m, rows: rowsChoiceFor(homeCtx, account, m, input.rows?.[m.slug]) }))
+  const leaving = ledgers.filter((m) => !wanted.some((l) => l.id === m.ledgerId))
+  // Before anything is said of a leaving ledger's transactions: how many it has isn't this key's to know.
+  if (usable && leaving.length && ![...ledgers.map((l) => l.ledgerId), ...adds.map((l) => l.id)].every((id) => usable.includes(id))) {
+    cant(`This key can’t use every ledger that has ${account.name}, so it can’t stop sharing it with ${leaving[0]!.name}. Do it in the app.`)
+  }
+  const removes = leaving.map((m) => ({ ledger: m, rows: rowsChoiceFor(homeCtx, account, m, input.rows?.[m.slug]) }))
 
   const before = partsToday(homeCtx, accountId)
   const homeAfter = newHome.id === home.ledgerId ? homeCtx : ctxOf(newHome.id)
@@ -733,12 +766,12 @@ export function removeMember(
   accountId: number,
   ledgerId: string,
   actor: ActivityActor,
-  opts: { rows?: RowsChoice; dryRun?: boolean } = {},
+  opts: { rows?: RowsChoice; dryRun?: boolean; usable?: UsableLedgers } = {},
 ): AccountSharing {
   const { account, ledgers, home } = inHome(ctx, accountId)
   if (ledgerId === home.ledgerId) badRequest(`${home.name} is ${account.name}’s home, so it keeps the account.`)
   const leaving = ledgers.find((l) => l.ledgerId === ledgerId)
   if (!leaving) badRequest(`${account.name} isn’t shared with that ledger.`)
   const input: SharingInput = { ledgers: ledgers.filter((l) => l !== leaving).map((l) => l.slug), ...(opts.rows ? { rows: { [leaving.slug]: opts.rows } } : {}) }
-  return setSharing(ctx, ctxOf, accountId, input, { dryRun: opts.dryRun, actor }).sharing
+  return setSharing(ctx, ctxOf, accountId, input, { dryRun: opts.dryRun, actor, usable: opts.usable ?? null }).sharing
 }

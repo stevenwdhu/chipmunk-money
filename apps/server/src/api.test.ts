@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { ApiKeyCreated, BulkResult, Transaction } from '@chipmunk/shared'
+import type { z } from 'zod'
+import { moveResultSchema, sharingChangeSchema, type ApiKeyCreated, type BulkResult, type Transaction } from '@chipmunk/shared'
 import { createApi, createApp, type AppOptions } from './app'
 import { openApiPath } from './api/openapi'
 import { withDryRun } from './api/router'
@@ -85,12 +86,23 @@ describe('API coverage', () => {
       recurring: await first('/recurring'),
     }
     const query: Record<string, string> = { from: '2026-01-01', to: '2026-10-31' }
+    // A card shared with another ledger, which holds one of its transactions: for the sharing block and the all-ledgers list.
+    const card = ((await call('GET', '/ledgers/personal/accounts')).body as Array<{ id: number; type: string }>).find((a) => a.type === 'credit')!.id
+    expect((await call('POST', '/ledgers', { name: 'Family' })).status).toBe(201)
+    const exact = (schema: z.ZodType, res: { status: number; body: unknown }, what: string) => {
+      expect(res.status, `${what}: ${JSON.stringify(res.body)}`).toBe(200)
+      expect(schema.parse(res.body), `${what} returns fields the schema doesn't list`).toEqual(res.body)
+    }
+    exact(sharingChangeSchema, await call('PUT', `/ledgers/personal/accounts/${card}/sharing`, { ledgers: ['personal', 'family'] }), 'PUT sharing')
+    const onCard = ((await call('GET', `/ledgers/personal/transactions?accountId=${card}&limit=50`)).body.items as Array<{ id: number }>).at(-1)!.id
+    exact(moveResultSchema, await call('POST', '/ledgers/personal/transactions/move', { ids: [onCard], to: 'family' }), 'POST move')
+    exact(sharingChangeSchema, await call('PUT', `/ledgers/personal/accounts/${card}/sharing?dryRun=true`, { ledgers: ['personal'], rows: { family: 'keep' } }), 'PUT sharing, keep')
 
     let checked = 0
     for (const s of specs.filter((x) => x.method === 'get' && x.response)) {
       const path = s.path
         .replace(':ledger', 'personal')
-        .replace(/\/(\w[\w-]*)\/:id/, (_m, resource: string) => `/${resource}/${ids[resource] ?? 1}`)
+        .replace(/\/(\w[\w-]*)\/:id/, (_m, resource: string) => `/${resource}/${s.path.endsWith('/accounts/:id/transactions') ? card : (ids[resource] ?? 1)}`)
       const qs =
         path.includes('/reports/') && !/summary|trend|income|net-worth/.test(path)
           ? `?${new URLSearchParams(query)}`
