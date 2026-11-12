@@ -27,9 +27,9 @@ import {
  * - Writes: the other's rows (every table) are the same after the subject's writes, except for an
  *   app-wide change, which changes both ledgers the same way.
  * - Keys: a key limited to the other gets 403 on the subject.
- * - Shared accounts: the routes that may reach another ledger say so (`across`). With the subject's
- *   card shared with the other ledger, a key limited to the subject is refused by each of them, and
- *   every other read still shows nothing of the other's.
+ * - Shared accounts: the routes and tools that may reach another ledger say so (`across`). With the
+ *   subject's card shared with the other ledger, a key limited to the subject is refused by each of
+ *   them, and every other read still shows nothing of the other's.
  * All of it in both directions, with both ledgers on the shared category list and on their own.
  * The cases come from the API's own specs and the MCP server's tools/list: a new route or tool
  * without a case fails the test.
@@ -387,6 +387,12 @@ interface ToolCase {
   args: (c: C) => Record<string, unknown>
   /** It answers with an error on purpose (a key limited to some ledgers can't do it, say). */
   error?: (c: C) => boolean
+  /**
+   * It may read or change another ledger that has an account shared with this one. These are its
+   * arguments once the subject's card is shared with the other ledger: a key limited to the subject
+   * gets an error for them, and nothing changes in either ledger.
+   */
+  across?: (c: C) => Record<string, unknown>
 }
 
 const L = (c: C) => ({ ledger: c.me.slug })
@@ -426,6 +432,23 @@ const MCP_WRITES: ToolCase[] = [
   { tool: 'accept_suggestions', args: (c) => ({ ...L(c), all: true }) },
   { tool: 'set_payee_choice', args: (c) => ({ ...L(c), payee: 'HYDRO ONE', mode: 'ask' }) },
   { tool: 'delete_transactions', args: (c) => ({ ...L(c), ids: [tx(c, 'MCP SHOP')] }) },
+  // Between the twins nothing is shared, and a key limited to this ledger can't name the other: each is an error. With the card shared, each still is.
+  {
+    tool: 'move_transactions',
+    args: (c) => ({ ...L(c), ids: [ids(c).purchase], to: c.other.slug }),
+    error: () => true,
+    across: (c) => ({ ...L(c), ids: [ids(c).purchase], to: c.other.slug }),
+  },
+  { tool: 'move_transactions', args: (c) => ({ ...L(c), ids: [ids(c).purchase], to: c.me.slug, dryRun: true }), error: () => true },
+  {
+    tool: 'split_transaction',
+    args: (c) => ({ ...L(c), id: ids(c).purchase, shares: [{ ledger: c.other.slug, amount: 10 }] }),
+    error: () => true,
+    across: (c) => ({ ...L(c), id: tx(c, PAYMENT), shares: [{ ledger: c.other.slug, amount: 10 }] }),
+  },
+  { tool: 'split_transaction', args: (c) => ({ ...L(c), id: ids(c).purchase, shares: [] }), error: () => true },
+  // The whole account, row by row: only for a shared account, and a key that can use every ledger that has it.
+  { tool: 'list_account_transactions', args: (c) => ({ ...L(c), account: ids(c).card }), error: () => true, across: (c) => ({ ...L(c), account: ids(c).card }) },
   { tool: 'create_account', args: (c) => ({ ...L(c), name: 'MCP Cash', type: 'cash', institution: 'Wallet' }) },
   { tool: 'update_account', args: (c) => ({ ...L(c), account: find(c, "SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND name = 'MCP Cash'"), notes: 'from mcp' }) },
   { tool: 'rename_institution', args: (c) => ({ ...L(c), institution: ids(c).institution, newName: 'TD Canada Trust' }) },
@@ -460,8 +483,17 @@ const MCP_WRITES: ToolCase[] = [
   { tool: 'sync_banks', args: () => ({}) },
   // For the whole app: a key limited to some ledgers can't.
   { tool: 'create_ledger', args: () => ({ name: 'MCP ledger' }), error: () => true },
+  // Sharing with a ledger the key can't use, and stopping it, which needs every ledger that has the account.
+  {
+    tool: 'share_account',
+    args: (c) => ({ ...L(c), account: ids(c).card, ledgers: [c.me.slug, c.other.slug] }),
+    error: () => true,
+    across: (c) => ({ ...L(c), account: ids(c).card, ledgers: [c.me.slug] }),
+  },
+  { tool: 'share_account', args: (c) => ({ ...L(c), account: ids(c).card, ledgers: [c.me.slug], home: c.other.slug, dryRun: true }), error: () => true },
   // The default ledger can't be archived by a key limited to some ledgers (it would change which opens).
-  { tool: 'archive_ledger', args: (c) => ({ ledger: c.me.slug }), error: (c) => c.t.storage.registry.defaultLedger().id === ledgerOf(c) },
+  // A shared account's home asks first, and a key that can't use every ledger that has it is told it can't, as the result.
+  { tool: 'archive_ledger', args: (c) => ({ ledger: c.me.slug }), error: (c) => c.t.storage.registry.defaultLedger().id === ledgerOf(c), across: (c) => ({ ledger: c.me.slug }) },
 ]
 
 // Running cases ------------------------------------------------------------------------------
@@ -759,8 +791,13 @@ for (const world of WORLDS) {
         for (const k of READS) {
           if (k.across) continue
           const req = await request(c, k)
-          const res = await send(t.app, req, limited)
-          if (res.status !== 200 || holds(res.body, c.other.canary) || holds(res.body, 'THEIRS ON OURS')) answers.push([label(k, req), res.status])
+          // Every page of a paged one.
+          let cursor: string | undefined
+          do {
+            const res = await send(t.app, { ...req, query: { ...req.query, cursor } }, limited)
+            if (res.status !== 200 || holds(res.body, c.other.canary) || holds(res.body, 'THEIRS ON OURS')) answers.push([label(k, req), res.status])
+            cursor = k.pages && res.status === 200 ? (res.body?.nextCursor ?? undefined) : undefined
+          } while (cursor)
         }
         const mine = (await send(t.app, { method: 'GET', path: `${base}/accounts/${ids(c).card}` }, limited)).body
         expect(mine.sharing).toMatchObject({ isHome: true, ledgers: [{ slug: c.me.slug }, { slug: c.other.slug }], totalBalanceMinor: whole.items[0].balanceAfterMinor })
@@ -775,6 +812,26 @@ for (const world of WORLDS) {
           if (res.status !== (a.status ?? 403) || holds(res.body, c.other.canary)) answers.push([label(k, req), res.status, res.message])
         }
         expect(answers).toEqual([])
+
+        // The same over MCP: the read tools show its own rows only, and each tool that may reach the other ledger is refused.
+        const client = await mcpClient(t.app, limited)
+        const toolAnswers: unknown[] = []
+        for (const x of MCP_READS) {
+          const res = await client.call(x.tool, x.args(c))
+          if (res.isError || holds(res, c.other.canary) || holds(res, 'THEIRS ON OURS')) toolAnswers.push([x.tool, res.text])
+        }
+        const listed = (await client.call('list_accounts', L(c))).data.accounts.find((a: Json) => a.id === ids(c).card)
+        expect(listed).toMatchObject({ balanceMinor: mine.balanceMinor, sharing: { home: c.me.slug, isHome: true, ledgers: [c.me.slug, c.other.slug], totalBalanceMinor: mine.sharing.totalBalanceMinor } })
+        const reaching = MCP_WRITES.filter((x) => x.across)
+        expect(reaching.map((x) => x.tool)).toEqual(['move_transactions', 'split_transaction', 'list_account_transactions', 'share_account', 'archive_ledger'])
+        for (const x of reaching) {
+          const res = await client.call(x.tool, x.across!(c))
+          // Archiving answers with what stops it, and archives nothing.
+          const stopped = x.tool === 'archive_ledger' && !res.isError ? res.data.blockers?.length > 0 && !res.data.ledger : res.isError
+          if (!stopped || SERVER_ERROR.test(res.text) || holds(res, c.other.canary)) toolAnswers.push([x.tool, res.text])
+        }
+        expect(toolAnswers).toEqual([])
+        await client.close()
         await settle()
         expect([ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]).toEqual(before)
       })
@@ -883,6 +940,9 @@ function toolProbes(): Array<{ tool: string; args: (c: C, id: Id) => Record<stri
     { tool: 'get_report', args: (c, id) => ({ ...L(c), report: id('report') }) },
     { tool: 'delete_custom_report', args: (c, id) => ({ ...L(c), report: id('report') }) },
     { tool: 'import_transactions', args: (c, id) => ({ ...L(c), account: id('chequing'), rows: [{ date: '2026-10-01', payee: 'PROBE', amount: -1 }] }) },
+    { tool: 'split_transaction', args: (c, id) => ({ ...L(c), id: id('purchase'), shares: [] }) },
+    { tool: 'list_account_transactions', args: (c, id) => ({ ...L(c), account: id('card') }) },
+    { tool: 'share_account', args: (c, id) => ({ ...L(c), account: id('card'), ledgers: [c.me.slug], dryRun: true }) },
   ]
 }
 

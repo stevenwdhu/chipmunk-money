@@ -597,7 +597,7 @@ describe('the bank and a shared account over HTTP', () => {
     // Removing the split payment is refused before anything changes.
     const remove = await w.unchanged(() => w.call('POST', `${url}/switch`, { bankAccountId: 'bank-card', from: preview.body.from, version: preview.body.version, pairs: [], skip: [], remove: [pay] }))
     expect(remove.status).toBe(409)
-    expect(remove.message).toMatch(/^Undo the split of /)
+    expect(remove.message).toBe('Undo the split of the $100.00 payment onto Visa on 2026-10-01 first.')
   })
 
   it('syncs with a key for the home alone, wherever the rows are held', async () => {

@@ -84,7 +84,12 @@ describe('MCP server', () => {
     expect(write).toEqual(expect.arrayContaining(['add_transactions', 'set_categories', 'list_review_queue', 'sync_banks']))
     expect(read).not.toContain('sync_banks')
     expect(write).not.toContain('create_ledger')
-    expect(admin).toEqual(expect.arrayContaining(['create_ledger', 'archive_ledger']))
+    expect(admin).toEqual(expect.arrayContaining(['create_ledger', 'archive_ledger', 'share_account']))
+    // Sharing an account is for a full-access key. Moving and splitting are writes, and the all-ledgers list a read.
+    expect(write).toEqual(expect.arrayContaining(['move_transactions', 'split_transaction']))
+    expect(write).not.toContain('share_account')
+    expect(read).toContain('list_account_transactions')
+    expect(read).not.toContain('move_transactions')
     // Destructive admin actions stay in the app.
     for (const hidden of ['erase_ledger', 'restore_backup', 'delete_ledger', 'create_api_key']) expect(admin).not.toContain(hidden)
 
@@ -295,5 +300,66 @@ describe('MCP server', () => {
     expect(done.data).toMatchObject({ committed: true, newRows: 2 })
     const again = await call(agent, 'import_transactions', { account: 'TD Chequing', rows, confirm: true })
     expect(again.data).toMatchObject({ committed: true, newRows: 0, duplicates: 2 })
+  })
+
+  it('archives a shared account’s home only once its question is answered, and refuses what a key for one ledger can’t reach', async () => {
+    const { key, connect, call, api } = await setup()
+    await api('POST', '/ledgers', { name: 'Family' })
+    const admin = await connect(await key('Admin', ['admin']))
+    const visa = ((await call(admin, 'list_accounts')).data.accounts as Json[]).find((a) => a.type === 'credit')
+    expect(visa.sharing).toBeNull()
+    // Sharing is changed in the home, with ledgers given by name or slug.
+    const shared = await call(admin, 'share_account', { account: visa.id, ledgers: ['personal', 'Family'] })
+    expect(shared.isError).toBe(false)
+    expect(shared.data).toMatchObject({ home: 'personal', added: ['family'], ledgers: [{ ledger: 'personal' }, { ledger: 'family', transactionCount: 0, balanceMinor: 0 }] })
+    expect(shared.text).toContain(`${visa.name} is shared by Personal (${visa.balance}), Family ($0.00): ${visa.balance} in all. Its home is Personal.`)
+    expect((await call(admin, 'share_account', { ledger: 'family', account: visa.id, ledgers: ['family'] })).text).toBe(`${visa.name}’s home is Personal. Its sharing is changed there.`)
+    expect((await call(admin, 'share_account', { account: 'TD Chequing', ledgers: ['personal', 'family'] })).text).toBe('Only credit cards can be shared for now, and TD Chequing isn’t one.')
+    expect((await call(admin, 'share_account', { account: visa.id, ledgers: ['personal', 'nowhere'] })).text).toContain('There\'s no ledger called “nowhere”.')
+
+    // The default ledger opens the app, so Family is made the default before Personal is archived.
+    const family = ((await api('GET', '/ledgers')) as Json[]).find((l) => l.slug === 'family')
+    await api('PATCH', `/ledgers/${family.id}`, { isDefault: true })
+    const asked = await call(admin, 'archive_ledger', { ledger: 'personal' })
+    expect(asked.isError).toBe(false)
+    expect(asked.data).toEqual({
+      questions: [{ id: `home:${visa.id}`, text: `${visa.name}’s home is Personal. Which ledger becomes its home?`, note: 'New transactions from sync and CSV go to the new home. Nothing already recorded moves.', options: [{ value: 'family', label: 'Family' }] }],
+      notices: asked.data.notices,
+      blockers: [],
+    })
+    expect(asked.data.notices[0]).toContain(`${visa.name}’s opening balance and recorded balances move to Family.`)
+    expect(asked.text).toContain(`Personal wasn’t archived. Answer first, in \`answers\`:\nhome:${visa.id}: ${visa.name}’s home is Personal. Which ledger becomes its home? New transactions from sync and CSV go to the new home. Nothing already recorded moves.\n  "family": Family`)
+    expect(((await api('GET', '/ledgers')) as Json[]).find((l) => l.slug === 'personal').archived).toBe(false)
+    expect((await call(admin, 'archive_ledger', { ledger: 'personal', answers: { [`home:${visa.id}`]: 'nowhere' } })).isError).toBe(true)
+
+    // A key for Personal alone can't answer: applying the answer writes in Family.
+    const limited = await connect(await key('Personal only', ['admin'], ['personal']))
+    const blocked = await call(limited, 'archive_ledger', { ledger: 'personal' })
+    expect(blocked.data.blockers).toHaveLength(1)
+    expect(blocked.data.ledger).toBeUndefined()
+    expect(blocked.text).toContain('Personal can’t be archived:')
+    // Nor move, split, stop sharing or list the whole account, and it sees its part beside the total.
+    const purchase = ((await call(limited, 'search_transactions', { account: visa.id, limit: 1 })).data.transactions as Json[])[0]
+    for (const [tool, args] of [
+      ['move_transactions', { ids: [purchase.id], to: 'family' }],
+      ['split_transaction', { id: purchase.id, shares: [{ ledger: 'family', amount: 1 }] }],
+      ['share_account', { account: visa.id, ledgers: ['personal'] }],
+      ['list_account_transactions', { account: visa.id }],
+    ] as const) {
+      expect([tool, (await call(limited, tool, args)).isError]).toEqual([tool, true])
+    }
+    expect((await call(limited, 'share_account', { account: visa.id, ledgers: ['personal'] })).text).toBe(`Not allowed: This key can’t use every ledger that has ${visa.name}, so it can’t stop sharing it with Family. Do it in the app.`)
+    expect((await call(limited, 'list_account_transactions', { account: visa.id })).text).toBe(`Not allowed: This key can’t see every ledger that has ${visa.name}`)
+    expect(((await call(limited, 'list_accounts')).data.accounts as Json[]).find((a) => a.id === visa.id)).toMatchObject({
+      balanceMinor: visa.balanceMinor,
+      sharing: { home: 'personal', isHome: true, ledgers: ['personal', 'family'], totalBalanceMinor: visa.balanceMinor },
+    })
+
+    const done = await call(admin, 'archive_ledger', { ledger: 'personal', answers: { [`home:${visa.id}`]: 'family' } })
+    expect(done.isError).toBe(false)
+    expect(done.data.ledger).toMatchObject({ slug: 'personal', archived: true })
+    expect(done.data.changes[0]).toBe(`Family is ${visa.name}’s home now.`)
+    expect(done.text).toContain(`Archived Personal.\nFamily is ${visa.name}’s home now.`)
+    expect(((await call(admin, 'list_accounts', { ledger: 'family' })).data.accounts as Json[])[0]).toMatchObject({ id: visa.id, sharing: { home: 'family', isHome: true } })
   })
 })
