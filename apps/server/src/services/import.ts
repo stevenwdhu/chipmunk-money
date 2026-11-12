@@ -398,7 +398,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
               bankCategory: first.bankCategory,
               bankConfident: !!first.bankConfident,
               // About a category that's there, it isn't the payee's uncategorized transactions that were asked about.
-              again: first.categoryId !== null ? list.map((r) => ({ id: r.id, categoryId: r.categoryId!, review: !!r.review })) : undefined,
+              again: first.categoryId !== null ? list.map((r) => ({ id: r.id, categoryId: r.categoryId!, review: !!r.review, source: r.source })) : undefined,
               record: records?.get(first.id),
             })
             const pick = s?.categoryId

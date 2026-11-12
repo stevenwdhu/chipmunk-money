@@ -1099,7 +1099,7 @@ describe('AI request records: Ask AI again, and archived ledgers', () => {
     expect(usage.recent).toEqual([expect.objectContaining({ kind: 'categorize', subject: 'BEAN BAR', again: true, status: 'failed', canRetry: true, noRetry: null, tries: 2 })])
     const id = usage.recent[0]!.id
     expect(JSON.parse(records(t.s.personal)[0].asked)).toEqual(
-      expect.arrayContaining(t.ids.map((tx) => ({ id: tx, categoryId: t.dineOut, review: true }))),
+      expect.arrayContaining(t.ids.map((tx) => ({ id: tx, categoryId: t.dineOut, review: true, source: 'ai' }))),
     )
     expect(t.remembered()).toEqual([t.ids])
     /** Retry on the record, to its end. */
@@ -1174,6 +1174,49 @@ describe('AI request records: Ask AI again, and archived ledgers', () => {
     const t = await askedAgainFailed()
     for (const id of t.ids) updateTransaction(t.s.personal, id, { categoryId: t.dineOut })
     await t.unneeded()
+  })
+
+  it('counts a category set by hand since as yours, also when it’s the one it had and nothing waited for review', async () => {
+    const t = beanBar()
+    t.s.personal.q.run("UPDATE transactions SET category_source = 'history', needs_review = 0 WHERE ledger_id = @ledger")
+    t.ai.down = true
+    await t.askAgain(t.ids)
+    t.ai.down = false
+    t.ai.asked.length = 0
+    expect(await t.s.usage()).toMatchObject({ failed: 1, retryable: 1 })
+    const fuel = categoryId(t.s.personal, 'Fuel')
+    for (const id of t.ids) {
+      updateTransaction(t.s.personal, id, { categoryId: fuel })
+      updateTransaction(t.s.personal, id, { categoryId: t.dineOut })
+    }
+    const before = t.rows()
+    expect(before.map((r: Json) => [r.category_id, r.category_source])).toEqual(t.ids.map(() => [t.dineOut, 'user']))
+    expect(await t.s.usage()).toMatchObject({ failed: 0, retryable: 0 })
+    expect((await t.s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 0, working: 0 })
+    expect(t.ai.asked).toEqual([])
+    expect(t.rows()).toEqual(before)
+  })
+
+  it('has one record remember a transaction: asked again under another payee, the first record lets it go', async () => {
+    const t = beanBar()
+    t.ai.down = true
+    await t.askAgain([t.ids[0]!])
+    // Its payee changes while others of the old payee stay, so the first record stays with them.
+    updateTransaction(t.s.personal, t.ids[0]!, { payee: 'CAFE NERO' })
+    await t.askAgain([t.ids[0]!])
+    expect(
+      t
+        .remembered()
+        .filter((list) => list !== null)
+        .flat(),
+    ).toEqual([t.ids[0]])
+    expect(await t.s.usage()).toMatchObject({ failed: 1, retryable: 1 })
+    t.ai.down = false
+    t.ai.asked.length = 0
+    expect((await t.s.call('POST', '/ai/usage/retry')).body).toEqual({ started: 1, working: 0 })
+    await idle(t.s)
+    expect(t.ai.asked).toEqual(['CAFE NERO'])
+    expect(await t.s.usage()).toMatchObject({ failed: 0, retryable: 0 })
   })
 
   it('retries only the transactions still open, and leaves one categorized by hand exactly as it is', async () => {

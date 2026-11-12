@@ -43,6 +43,8 @@ export interface Asked {
   categoryId: number
   /** It waited for review. */
   review: boolean
+  /** Where its category came from (the transaction's category source). Not kept on a list from before it was. */
+  source?: string | null
 }
 
 /** What came of it, and who answered when no call was logged (a test's stand-in). */
@@ -80,7 +82,11 @@ export function askedOf(list: string | null): Asked[] {
     const rows: unknown = JSON.parse(list ?? '[]')
     if (!Array.isArray(rows)) return []
     return (rows as Array<Partial<Asked> | null>).filter(
-      (a): a is Asked => typeof a?.id === 'number' && typeof a.categoryId === 'number' && typeof a.review === 'boolean',
+      (a): a is Asked =>
+        typeof a?.id === 'number' &&
+        typeof a.categoryId === 'number' &&
+        typeof a.review === 'boolean' &&
+        (a.source === undefined || a.source === null || typeof a.source === 'string'),
     )
   } catch {
     return []
@@ -89,19 +95,21 @@ export function askedOf(list: string | null): Asked[] {
 
 /** Two lists as one: each transaction once, as the first list has it. */
 const joined = (first: Asked[], second: Asked[]) => [...first, ...second.filter((a) => !first.some((b) => b.id === a.id))]
-const listed = (asked: Asked[]) => (asked.length ? JSON.stringify(asked.map(({ id, categoryId, review }) => ({ id, categoryId, review }))) : null)
+const listed = (asked: Asked[]) =>
+  asked.length ? JSON.stringify(asked.map(({ id, categoryId, review, source }) => ({ id, categoryId, review, ...(source === undefined ? {} : { source }) }))) : null
 
 /**
  * The remembered transactions that are still open: in this ledger and not deleted, with the category
- * each had when asked, still waiting for review if it was then (confirming AI's pick closes it), and
- * one “Ask AI again” would ask about now (ASKED_AGAIN_ABOUT, and its payee isn't always set one way).
+ * each had when asked and from the same source (one you set since is yours, also when you set the
+ * same category), still waiting for review if it was then (confirming AI's pick closes it), and one
+ * “Ask AI again” would ask about now (ASKED_AGAIN_ABOUT, and its payee isn't always set one way).
  */
 export function stillOpen(ctx: AppContext, asked: Asked[]): Asked[] {
   if (!asked.length) return []
   const now = new Map(
     ctx.q
-      .all<{ id: number; categoryId: number | null; review: number }>(
-        `SELECT t.id, t.category_id AS categoryId, t.needs_review AS review FROM transactions t
+      .all<{ id: number; categoryId: number | null; review: number; source: string | null }>(
+        `SELECT t.id, t.category_id AS categoryId, t.needs_review AS review, t.category_source AS source FROM transactions t
          WHERE t.ledger_id = @ledger AND t.id IN (SELECT value FROM json_each(?)) AND ${ASKED_AGAIN_ABOUT}
            AND NOT EXISTS (SELECT 1 FROM payee_rules r WHERE r.ledger_id = @ledger AND r.payee_key = t.payee_key AND r.mode = 'always')`,
         JSON.stringify(asked.map((a) => a.id)),
@@ -110,7 +118,7 @@ export function stillOpen(ctx: AppContext, asked: Asked[]): Asked[] {
   )
   return asked.filter((a) => {
     const t = now.get(a.id)
-    return !!t && t.categoryId === a.categoryId && (!a.review || !!t.review)
+    return !!t && t.categoryId === a.categoryId && (!a.review || !!t.review) && (a.source === undefined || t.source === a.source)
   })
 }
 
@@ -268,6 +276,20 @@ function write(ctx: AppContext, ask: AiAsk, log: AiAttempt[], latencyMs: number,
       (ask.key !== null
         ? ctx.q.pluck<number>('SELECT id FROM ai_calls WHERE ledger_id = @ledger AND kind = ? AND subject_key = ? AND ok = 0', ask.kind, ask.key)
         : undefined)
+    // A transaction is remembered by one record: the one about it now. Another open one that had it (it was
+    // asked under the payee it had then, and that record stayed with the rest of that payee) lets it go.
+    if (ask.asked?.length) {
+      const mine = new Set(ask.asked.map((a) => a.id))
+      const others = ctx.q.all<{ id: number; asked: string }>(
+        "SELECT id, asked FROM ai_calls WHERE ledger_id = @ledger AND kind = 'categorize' AND ok = 0 AND asked IS NOT NULL AND id IS NOT ?",
+        open ?? null,
+      )
+      for (const other of others) {
+        const had = askedOf(other.asked)
+        const rest = had.filter((a) => !mine.has(a.id))
+        if (rest.length !== had.length) ctx.q.run('UPDATE ai_calls SET asked = ? WHERE ledger_id = @ledger AND id = ?', listed(rest), other.id)
+      }
+    }
     if (open !== undefined) {
       // What it remembers that this didn't ask about and is still open: it's failed for those, whatever came of this.
       const about = ask.asked ?? []
