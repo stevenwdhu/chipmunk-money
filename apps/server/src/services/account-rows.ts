@@ -405,15 +405,30 @@ const READS = {
 
   /**
    * The row of the account that has this bank id, in whichever ledger holds it (deleted or not), or
-   * undefined. A frozen row (MATCHED) counts, the account's own first.
+   * undefined. A frozen row (MATCHED) counts, the account's own first. The account's own row is one
+   * read of the unique index on the account and bank id. The frozen rows are read only when it has
+   * none and the account has an account split off from it, from those accounts' rows, by the same
+   * index (CROSS JOIN keeps SQLite from reading every row first): the bank code asks this once for
+   * each payload a sync logs.
    */
   holder(db: UnscopedQuery, accountId: number, externalId: string): BankIdHolder | undefined {
-    const row = db.get<{ id: number; ledgerId: string; deleted: number; frozen: number }>(
-      `${SPLIT_OFFS}
-       SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted, ${FROZEN} AS frozen FROM transactions t
-       WHERE ${MATCHED} AND t.external_id = @externalId ORDER BY ${FROZEN}, t.id LIMIT 1`,
+    type Held = { id: number; ledgerId: string; deleted: number; frozen: number }
+    const own = db.get<Held>(
+      `SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted, 0 AS frozen FROM transactions t
+       WHERE t.account_id = @accountId AND t.external_id = @externalId`,
       { accountId, externalId },
     )
+    const row =
+      own ??
+      (db.pluck<number>('SELECT 1 FROM accounts WHERE split_from_id = ? LIMIT 1', accountId)
+        ? db.get<Held>(
+            `${SPLIT_OFFS}
+             SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted, 1 AS frozen
+             FROM split_offs b CROSS JOIN transactions t ON t.account_id = b.id AND t.external_id = @externalId
+             WHERE t.created_at <= b.bound ORDER BY t.id LIMIT 1`,
+            { accountId, externalId },
+          )
+        : undefined)
     return row ? { ...row, deleted: !!row.deleted, frozen: !!row.frozen } : undefined
   },
 
