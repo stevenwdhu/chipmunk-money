@@ -72,7 +72,8 @@ const preview = ref<Array<ImportPreviewRow & { include: boolean; categoryId: num
 const result = ref<(ImportResult & { batchId: number }) | null>(null)
 
 watch(
-  () => accounts.active.value,
+  // An account shared with this ledger takes its CSV in its home, so it isn't offered.
+  () => accounts.managed.value,
   (list) => {
     if (!accountId.value && list.length) accountId.value = list.find((a) => !accountTypeInfo(a.type).revalued)?.id ?? list[0]!.id
   },
@@ -272,8 +273,8 @@ function onPick(e: Event) {
       <CardContent class="grid gap-4">
         <div class="grid max-w-sm gap-1.5">
           <Label for="imp-account">Import into</Label>
-          <AccountSelect id="imp-account" v-model="accountId" />
-          <p v-if="!accounts.active.value.length" class="text-sm text-muted-foreground">
+          <AccountSelect id="imp-account" v-model="accountId" managed />
+          <p v-if="!accounts.managed.value.length" class="text-sm text-muted-foreground">
             <RouterLink :to="{ name: 'accounts', query: { new: '1' } }" class="underline">Add an account</RouterLink> first.
           </p>
         </div>

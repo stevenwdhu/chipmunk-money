@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useLedgers } from '@/composables/queries'
+import { useAccounts, useLedgers } from '@/composables/queries'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { FROM_ANOTHER_LEDGER } from '@/lib/ledger'
 import { cn } from '@/lib/utils'
@@ -22,15 +22,21 @@ const props = withDefaults(defineProps<{ variant?: 'sidebar' | 'compact' }>(), {
 const route = useRoute()
 const router = useRouter()
 const { active, current } = useLedgers()
+const accounts = useAccounts()
 const newOpen = ref(false)
 const isDesktop = useIsDesktop()
 
-/** Same page in the other ledger, except pages tied to one record (an account) go to its list. */
+/**
+ * Same page in the other ledger, except pages tied to one record (an account) go to its list. An
+ * account shared with the other ledger is the same record there, so its page stays.
+ */
 function switchTo(ledger: Ledger) {
   if (ledger.slug === current.value?.slug) return
-  const name = route.name === 'account' ? 'accounts' : route.params.ledger ? (route.name as string) : 'overview'
+  const account = route.name === 'account' ? accounts.byId.value.get(Number(route.params.id)) : undefined
+  const there = !!account?.sharing?.ledgers.some((l) => l.slug === ledger.slug)
+  const name = route.name === 'account' && !there ? 'accounts' : route.params.ledger ? (route.name as string) : 'overview'
   const query = name === route.name ? Object.fromEntries(Object.entries(route.query).filter(([k]) => !FROM_ANOTHER_LEDGER.includes(k))) : undefined
-  router.push({ name, params: { ledger: ledger.slug }, query })
+  router.push({ name, params: there ? { ledger: ledger.slug, id: route.params.id } : { ledger: ledger.slug }, query })
 }
 </script>
 

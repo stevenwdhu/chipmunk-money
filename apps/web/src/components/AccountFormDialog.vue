@@ -62,6 +62,11 @@ const error = ref('')
 
 const isLiability = computed(() => accountTypeInfo(type.value).liability)
 const editing = computed(() => !!props.account)
+/**
+ * A shared account in a ledger it's shared with: its name, type, starting balance, notes and how it
+ * updates are its home's to change. Here only its institution is, which each ledger has its own of.
+ */
+const member = computed(() => !!props.account?.sharing && !props.account.sharing.isHome)
 
 const settings = useSettings()
 const isDesktop = useIsDesktop()
@@ -173,6 +178,19 @@ function switched(result: SwitchResult) {
 async function submit() {
   if (!name.value.trim()) return (error.value = 'Give the account a name')
   if (!institution.value) return (error.value = 'Choose the institution, or type the name of a new one')
+  if (props.account && member.value) {
+    error.value = ''
+    try {
+      const where = institution.value.id === null ? { institution: institution.value.name } : { institutionId: institution.value.id }
+      const saved = await m.update.mutateAsync({ id: props.account.id, ...where })
+      open.value = false
+      emit('saved', saved)
+      toast.success('Account saved')
+    } catch (err) {
+      error.value = errorMessage(err)
+    }
+    return
+  }
   if (mode.value === 'synced' && !bankAccountId.value) return (error.value = 'Choose the bank account to sync from')
   const amount = balanceText.value ? parseMoney(balanceText.value) : 0
   if (amount === null) return (error.value = 'Enter the balance as a number, like 1250.00')
@@ -245,15 +263,18 @@ async function submit() {
         <DialogDescription>
           <template v-if="showLedger && !account && ledgers.current.value">To the {{ ledgers.current.value.name }} ledger. </template>Balances are in
           {{ account?.currency ?? (mode === 'synced' ? chosen?.currency : null) ?? 'CAD' }}.
+          <template v-if="member && account?.sharing">
+            {{ account.name }}’s home is {{ account.sharing.home.name }}. Its name, type, starting balance and notes are changed there.
+          </template>
         </DialogDescription>
       </DialogHeader>
       <form class="grid min-w-0 gap-4" @submit.prevent="submit">
         <!-- Syncing is set up from a computer: on a phone, a synced account says where it syncs from. -->
-        <p v-if="!isDesktop && account?.bank" class="text-sm text-muted-foreground">
+        <p v-if="!isDesktop && account?.bank && !member" class="text-sm text-muted-foreground">
           Syncs from {{ account.bank.institution ?? account.bank.name }} through {{ BANK_PROVIDER_LABELS[account.bank.provider] }}. Change how it
           updates from a computer.
         </p>
-        <template v-if="isDesktop">
+        <template v-if="isDesktop && !member">
         <div class="grid gap-1.5">
           <FieldLabel hint="Synced accounts get their transactions and balance from your bank, through a bank sync service in App settings (SimpleFIN, Plaid or Wealthsimple). You can switch either way at any time.">
             Updates
@@ -319,7 +340,7 @@ async function submit() {
         </p>
         </template>
 
-        <div class="grid gap-1.5">
+        <div v-if="!member" class="grid gap-1.5">
           <Label for="acc-name">Name</Label>
           <Input id="acc-name" v-model="name" placeholder="TD Chequing" autocomplete="off" />
         </div>
@@ -330,16 +351,17 @@ async function submit() {
           </FieldLabel>
           <InstitutionPicker id="acc-inst" v-model="institution" />
         </div>
-        <div class="grid gap-1.5">
+        <!-- Only credit cards can be shared, so a shared account keeps its type. -->
+        <div v-if="!member" class="grid gap-1.5">
           <Label for="acc-type">Type</Label>
-          <Select v-model="type">
+          <Select v-model="type" :disabled="!!account?.sharing">
             <SelectTrigger id="acc-type" class="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem v-for="t in ACCOUNT_TYPES" :key="t.value" :value="t.value">{{ t.label }}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <div v-if="!balanceFromBank" class="grid grid-cols-2 gap-3">
+        <div v-if="!balanceFromBank && !member" class="grid grid-cols-2 gap-3">
           <div class="grid min-w-0 gap-1.5">
             <Label for="acc-balance">{{ isLiability ? 'Amount owed' : 'Starting balance' }}</Label>
             <Input id="acc-balance" v-model="balanceText" inputmode="decimal" placeholder="0.00" class="tabular" />
@@ -349,11 +371,11 @@ async function submit() {
             <Input id="acc-date" v-model="openingDate" type="date" :max="today" />
           </div>
         </div>
-        <div class="grid gap-1.5">
+        <div v-if="!member" class="grid gap-1.5">
           <Label for="acc-notes">Notes</Label>
           <Textarea id="acc-notes" v-model="notes" rows="2" />
         </div>
-        <p v-if="balanceFromBank" class="text-xs text-muted-foreground">Its balance is the bank’s: each sync sets it to what the bank shows.</p>
+        <p v-if="balanceFromBank && !member" class="text-xs text-muted-foreground">Its balance is the bank’s: each sync sets it to what the bank shows.</p>
         <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
         <DialogFooter>
           <Button type="button" variant="outline" @click="open = false">Cancel</Button>

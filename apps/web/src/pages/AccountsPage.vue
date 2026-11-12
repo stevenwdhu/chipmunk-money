@@ -12,6 +12,7 @@ import InstitutionDialog from '@/components/InstitutionDialog.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import MoneyText from '@/components/MoneyText.vue'
 import SegmentedToggle from '@/components/SegmentedToggle.vue'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -145,6 +146,8 @@ const position = (i: Institution) => (institutions.data.value ?? []).findIndex((
 
 /** How the balance is kept up to date. */
 function status(a: Account): { text: string; warn?: boolean } {
+  // Shared with this ledger: its bank, CSV and balance are looked after in its home.
+  if (a.sharing && !a.sharing.isHome) return { text: `Managed in ${a.sharing.home.name}` }
   if (a.bank?.error) return { text: 'Needs attention', warn: true }
   if (a.bank) return { text: a.bank.lastSyncedAt ? `Synced ${timeAgo(a.bank.lastSyncedAt)}` : 'Waiting for first sync' }
   // One whose value moves on its own (an investment, property): when you last recorded it.
@@ -272,6 +275,7 @@ const change = computed(() => {
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center gap-1.5 text-sm font-medium">
                         <span class="truncate">{{ a.name }}</span>
+                        <Badge v-if="a.sharing" variant="secondary" class="shrink-0">Shared</Badge>
                         <AlertTriangle v-if="a.bank?.error" class="size-3.5 shrink-0 text-amber-600" :aria-label="a.bank.error" />
                         <RefreshCw v-else-if="a.bank" class="size-3 shrink-0 text-muted-foreground" aria-label="Syncs from your bank" />
                       </div>
@@ -281,12 +285,13 @@ const change = computed(() => {
                     </div>
                     <span class="hidden w-28 truncate text-sm text-muted-foreground @2xl:block">{{ accountTypeInfo(a.type).label }}</span>
                     <span class="hidden w-40 truncate text-sm @2xl:block" :class="status(a).warn ? 'text-amber-600' : 'text-muted-foreground'">{{ status(a).text }}</span>
-                    <MoneyText
-                      :amount="statementBalance(a.balanceMinor, a.type)"
-                      :colored="false"
-                      :class="overdrawn(a) && 'text-negative'"
-                      class="text-sm font-medium @2xl:w-28 @2xl:text-right"
-                    />
+                    <!-- A shared account: this ledger's part, and under it the whole account's. -->
+                    <span class="flex shrink-0 flex-col items-end @2xl:w-28">
+                      <MoneyText :amount="statementBalance(a.balanceMinor, a.type)" :colored="false" :class="overdrawn(a) && 'text-negative'" class="text-sm font-medium" />
+                      <span v-if="a.sharing" class="text-xs whitespace-nowrap text-muted-foreground">
+                        of <MoneyText :amount="statementBalance(a.sharing.totalBalanceMinor, a.type)" :colored="false" />
+                      </span>
+                    </span>
                     <ChevronRight class="size-4 shrink-0 text-muted-foreground" />
                   </RouterLink>
                 </li>

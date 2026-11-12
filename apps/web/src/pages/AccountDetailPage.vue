@@ -2,17 +2,19 @@
 import { computed, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
-import { AlertTriangle, Archive, ArchiveRestore, Loader2, Pencil, Plus, FileInput, RefreshCw, Scale, Trash2, X } from '@lucide/vue'
-import { accountTypeInfo, formatDateLong, formatDateShort, formatMonth, formatMonthShort, statementBalance } from '@chipmunk/shared'
+import { AlertTriangle, Archive, ArchiveRestore, Loader2, Pencil, Plus, FileInput, RefreshCw, Scale, Trash2, Users, X } from '@lucide/vue'
+import { accountTypeInfo, formatDateLong, formatDateShort, formatMonth, formatMonthShort, statementBalance, type SharingChange } from '@chipmunk/shared'
 import AccountFormDialog from '@/components/AccountFormDialog.vue'
 import BalanceDialog from '@/components/BalanceDialog.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import MoneyText from '@/components/MoneyText.vue'
+import ShareAccountDialog from '@/components/sharing/ShareAccountDialog.vue'
 import TransactionFilterBar from '@/components/TransactionFilterBar.vue'
 import TransactionTable from '@/components/TransactionTable.vue'
 import TransactionTotals from '@/components/TransactionTotals.vue'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -25,6 +27,7 @@ import {
   useAccountMutations,
   useAccounts,
   useBankMutations,
+  useLedgers,
   useSettings,
   useSnapshots,
   useTransactions,
@@ -34,6 +37,7 @@ import { useTransactionFilters } from '@/composables/useTransactionFilters'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { errorMessage } from '@/lib/api'
 import { money, timeAgo } from '@/lib/format'
+import { currentLedger } from '@/lib/ledger'
 import { useUiStore } from '@/stores/ui'
 
 const route = useRoute()
@@ -44,7 +48,17 @@ const id = computed(() => Number(route.params.id))
 const accounts = useAccounts()
 const account = computed(() => accounts.byId.value.get(id.value))
 const history = useAccountHistory(id, 12)
-const snapshots = useSnapshots(id)
+const ledgers = useLedgers()
+/** How it's shared between ledgers, when it is. */
+const sharing = computed(() => account.value?.sharing ?? null)
+/** This ledger looks after it: it's the account's home, or the only ledger that has it. A ledger it's shared with only holds transactions on it. */
+const managed = computed(() => !sharing.value || sharing.value.isHome)
+const sharedWith = computed(() => {
+  const names = (sharing.value?.ledgers ?? []).filter((l) => l.slug !== currentLedger.value).map((l) => l.name)
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+})
+// The recorded balances are the home's.
+const snapshots = useSnapshots(id, managed)
 // The same list as the Transactions page, with its filters in the URL and a running balance.
 const f = useTransactionFilters()
 const list = useTransactions(() => ({ accountId: id.value, ...f.filters.value }), 100, { keep: true })
@@ -80,6 +94,14 @@ async function syncNow() {
 const editOpen = ref(false)
 const balanceOpen = ref(false)
 const deleteOpen = ref(false)
+const shareOpen = ref(false)
+
+/** This ledger may no longer have the account: it goes to the one made for what it kept, or to its accounts. */
+function shared(change: SharingChange) {
+  if ([change.sharing.home, ...change.sharing.members].some((l) => l.slug === currentLedger.value)) return
+  const kept = change.removed.find((l) => l.ledger.slug === currentLedger.value)?.account
+  router.replace(kept ? { name: 'account', params: { id: kept.id } } : { name: 'accounts' })
+}
 
 /** Credit cards are paid off every month, so their chart shows each month's spending on its own. */
 const monthly = computed(() => !!account.value && accountTypeInfo(account.value.type).paidMonthly)
@@ -131,28 +153,38 @@ async function removeSnapshot(snapshotId: number) {
       :subtitle="[account.institution, accountTypeInfo(account.type).label].filter(Boolean).join(' · ')"
       menu-label="Account actions"
     >
+      <template v-if="sharing" #title>
+        <div class="flex min-w-0 items-center gap-2">
+          <h1 class="truncate text-base font-semibold md:text-lg">{{ account.name }}</h1>
+          <Badge variant="secondary" class="shrink-0">Shared</Badge>
+        </div>
+      </template>
       <template #actions>
         <Button class="hidden md:inline-flex" @click="ui.openAdd({ accountId: account.id })"><Plus />Add transaction</Button>
       </template>
       <template #menu>
         <DropdownMenuItem @select="editOpen = true"><Pencil />Edit account</DropdownMenuItem>
-        <!-- A synced account's balance is the bank's. -->
-        <DropdownMenuItem v-if="!account.bank" @select="balanceOpen = true"><Scale />Update balance</DropdownMenuItem>
-        <DropdownMenuItem v-if="isDesktop" as-child>
-          <RouterLink :to="{ name: 'import', query: { accountId: account.id } }"><FileInput />Import CSV</RouterLink>
-        </DropdownMenuItem>
+        <!-- A shared account's balance, CSV, sharing and deletion are its home's. A synced account's balance is the bank's. -->
+        <template v-if="managed">
+          <DropdownMenuItem v-if="!account.bank" @select="balanceOpen = true"><Scale />Update balance</DropdownMenuItem>
+          <DropdownMenuItem v-if="isDesktop" as-child>
+            <RouterLink :to="{ name: 'import', query: { accountId: account.id } }"><FileInput />Import CSV</RouterLink>
+          </DropdownMenuItem>
+          <!-- Only credit cards can be shared. -->
+          <DropdownMenuItem v-if="account.type === 'credit' && ledgers.all.value.length > 1" @select="shareOpen = true"><Users />Share with…</DropdownMenuItem>
+        </template>
         <DropdownMenuSeparator />
         <DropdownMenuItem @select="toggleArchive">
           <component :is="account.archived ? ArchiveRestore : Archive" />{{ account.archived ? 'Restore' : 'Archive' }}
         </DropdownMenuItem>
-        <DropdownMenuItem variant="destructive" @select="deleteOpen = true"><Trash2 />Delete account</DropdownMenuItem>
+        <DropdownMenuItem v-if="managed" variant="destructive" @select="deleteOpen = true"><Trash2 />Delete account</DropdownMenuItem>
       </template>
     </PageHeader>
 
     <main class="flex flex-col gap-4 p-4 md:gap-6 md:p-6">
       <Card class="gap-4">
         <CardHeader>
-          <CardDescription>{{ account.isLiability ? 'Owed' : 'Balance' }}</CardDescription>
+          <CardDescription>{{ account.isLiability ? 'Owed' : 'Balance' }}<template v-if="sharing && ledgers.current.value"> in {{ ledgers.current.value.name }}</template></CardDescription>
           <CardTitle class="text-3xl tabular" :class="!account.isLiability && account.balanceMinor < 0 && 'text-negative'">
             {{ money(shown(account.balanceMinor)) }}
           </CardTitle>
@@ -160,6 +192,12 @@ async function removeSnapshot(snapshotId: number) {
             <template v-if="account.balanceAsOf">Last balance update {{ formatDateShort(account.balanceAsOf) }}. </template>
             <template v-if="monthly">This month <span class="tabular">{{ money(shown(account.monthMinor)) }}</span> · </template>
             {{ account.transactionCount }} transaction{{ account.transactionCount === 1 ? '' : 's' }}
+          </p>
+          <!-- A shared account: this ledger's part is above, and here the whole account's, as the bank has it. -->
+          <p v-if="sharing" class="col-span-full text-sm text-muted-foreground">
+            <span class="tabular">{{ money(shown(sharing.totalBalanceMinor)) }}</span>{{ account.isLiability ? ' owed' : '' }} on the whole account ·
+            <template v-if="sharing.isHome">Shared with {{ sharedWith }}</template>
+            <template v-else>Home: {{ sharing.home.name }}</template>
           </p>
           <div v-if="account.bank" class="col-span-full mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
             <span class="flex items-center gap-1.5 text-muted-foreground">
@@ -205,7 +243,7 @@ async function removeSnapshot(snapshotId: number) {
         </TransactionTable>
       </section>
 
-      <Card v-if="snapshots.data.value?.length" class="gap-2">
+      <Card v-if="managed && snapshots.data.value?.length" class="gap-2">
         <CardHeader>
           <CardTitle>Balance updates</CardTitle>
           <CardDescription>{{ account.bank ? 'From your bank, or recorded by hand' : 'Recorded by hand' }}</CardDescription>
@@ -228,6 +266,7 @@ async function removeSnapshot(snapshotId: number) {
 
     <AccountFormDialog v-model:open="editOpen" :account="account" />
     <BalanceDialog v-model:open="balanceOpen" :account="account" />
+    <ShareAccountDialog v-model:open="shareOpen" :account="account" @saved="shared" />
     <Dialog v-model:open="deleteOpen">
       <DialogContent class="sm:max-w-sm">
         <DialogHeader>

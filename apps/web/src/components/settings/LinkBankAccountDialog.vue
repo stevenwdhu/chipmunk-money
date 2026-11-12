@@ -37,7 +37,8 @@ const kind = computed(() => (props.bankAccount ? accountKind(guessType(props.ban
 const distance = (a: Account) => Math.abs(a.balanceMinor - (props.bankAccount?.balanceMinor ?? 0))
 /** Your accounts at the same bank: the same kind first, closest balance first. */
 const atBank = computed(() =>
-  (accounts.active.value ?? [])
+  // An account shared with this ledger syncs into its home, so it isn't offered.
+  (accounts.managed.value ?? [])
     .filter((a) => a.bank?.bankAccountId !== props.bankAccount?.id && similarNames(a.institution, bankName.value))
     .sort((a, b) => Number(accountKind(b.type) === kind.value) - Number(accountKind(a.type) === kind.value) || distance(a) - distance(b)),
 )

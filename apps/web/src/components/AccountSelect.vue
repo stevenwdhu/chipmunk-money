@@ -4,12 +4,13 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { useAccounts, useGroupedAccounts } from '@/composables/queries'
 
 const props = withDefaults(
-  defineProps<{ id?: string; exclude?: number | null; placeholder?: string; allowAll?: boolean; allLabel?: string; class?: string }>(),
+  defineProps<{ id?: string; exclude?: number | null; placeholder?: string; allowAll?: boolean; allLabel?: string; class?: string; managed?: boolean }>(),
   { placeholder: 'Pick an account', allLabel: 'All accounts' },
 )
 const model = defineModel<number | null>({ default: null })
-const { active } = useAccounts()
-const options = computed(() => active.value.filter((a) => a.id !== props.exclude))
+const { active, managed } = useAccounts()
+/** `managed`: only the accounts this ledger looks after, without the ones shared with it (a CSV goes into an account's home). */
+const options = computed(() => (props.managed ? managed.value : active.value).filter((a) => a.id !== props.exclude))
 const groups = useGroupedAccounts(options)
 const value = computed({
   get: () => (model.value === null ? (props.allowAll ? 'all' : undefined) : String(model.value)),
