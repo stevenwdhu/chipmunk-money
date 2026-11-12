@@ -11,6 +11,18 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 - One-ledger backup files from v0.2.3 or earlier can't be restored by this version. Restore one with v0.2.3 first, then update. The same goes for the `deleted-…` and `pre-restore-…` files in `backups/`, and any other copy there made before updating: each holds one ledger, so it can't be put in place of `chipmunk.db`. The `pre-migrate-…`, `pre-delete-…`, `pre-erase-…` and `pre-seed-demo-…` copies made by this version or later are whole databases.
 - **Undo of a CSV import is removed,** in the app and the API (`DELETE /import/batches/{id}`). To take an import back, select its transactions and delete them. Recent imports stays as a list of what was imported and when, without the count of rows still there (`remaining`).
 
+### Added
+
+- **Shared accounts.** A credit card used by two sets of books can be in both ledgers: **Share with…** in the account's menu. Each transaction on it is in one ledger, each ledger's balance on the card is what it holds, and together they're what the bank says you owe. One ledger is the card's home, where new transactions from sync and CSV land and its settings are changed, and the home can be changed. Credit cards only for now. [docs/features.md](docs/features.md#shared-accounts) has all of it.
+- **Move to…** sends a shared account's transactions to another ledger that has it, from a transaction, the bulk bar or the account's list. That ledger treats them as new: it keeps the category when it has one of the same name, and matches refunds, transfers and recurring payments of its own. The app says first what doesn't go along (a link, a transfer's other side, a recurring item).
+- **This ledger / All ledgers** on a shared account's page: this ledger's transactions, or every ledger's with the whole account's balance after each, like the bank's statement. Accounts shows this ledger's balance with the account's total under it.
+- **Split between ledgers…** on a card payment gives each ledger its part of it, so each one's balance on the card goes down by what it paid. Each ledger counts its share as a card payment, not spending or income.
+- **Stop sharing** asks what happens to that ledger's transactions: they move to the home, or stay in that ledger on a new manual account. Each choice shows the balances it gives before you save.
+- Deleting, erasing or archiving a ledger that has a shared account asks first which ledger becomes the card's home and whether its transactions are deleted or moved, and lists what else will change.
+- Bank sync, Fetch all history, switching the bank account and CSV import know a shared account's transactions in every ledger. One held by another ledger is updated where it is, never added twice, and the import marks it **Already in another ledger**. The review before switching names the ledger of each transaction.
+- **Update balance** on a shared account shows what the new balance gives each ledger before it's saved.
+- In the API: `GET` and `PUT /accounts/{id}/sharing`, `POST /transactions/move`, `PUT /transactions/{id}/split`, `GET /accounts/{id}/transactions`, `GET /ledgers/{ledger}/questions`, and `answers` when deleting, erasing or archiving a ledger. In MCP: `share_account`, `move_transactions`, `split_transaction`, `list_account_transactions`, and `answers` for `archive_ledger`. A key limited to some ledgers needs every ledger a call touches ([docs/security.md](docs/security.md)).
+
 ### Changed
 
 - **Spending Tracker is now Chipmunk**, and the project is Chipmunk Money: the repo is `stevenwdhu/chipmunk-money` and the image `ghcr.io/stevenwdhu/chipmunk-money`. Set the new image in your compose file to get this release.
@@ -23,6 +35,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 ### Fixed
 
 - A bank connection whose saved sign-in was made with another `secret.key` now says so, and what to do, in place of "bad decrypt".
+- Counts of one read right: "1 transaction", "1 row found", "1 payment".
 
 ## v0.2.3 (2026-11-10)
 
