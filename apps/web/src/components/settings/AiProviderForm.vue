@@ -174,16 +174,26 @@ const offText = computed(() =>
 const confirmOff = ref(false)
 const clearsFallback = computed(() => props.which === 'primary' && !!props.fallback && props.fallback.source !== 'env')
 
-async function save() {
+/** Saves what's in the form. False when it wasn't saved (something is missing, or the server refused). */
+async function save(): Promise<boolean> {
   if (off.value) {
     if (clearsFallback.value) confirmOff.value = true
     else if (props.config) await clear()
-    return
+    return false
   }
-  if (!model.value.trim()) return void toast.error('Enter a model name')
-  if (kind.value === 'openai-compatible' && !baseUrl.value.trim()) return void toast.error('Enter the server’s URL')
-  if (info.value.apiKey === 'required' && replacingKey.value && !apiKey.value.trim()) return void toast.error(`Enter your ${info.value.label} API key`)
-  if (isChatgpt.value && !signedIn.value) return void toast.error('Sign in with ChatGPT first')
+  const missing = !model.value.trim()
+    ? 'Enter a model name'
+    : kind.value === 'openai-compatible' && !baseUrl.value.trim()
+      ? 'Enter the server’s URL'
+      : info.value.apiKey === 'required' && replacingKey.value && !apiKey.value.trim()
+        ? `Enter your ${info.value.label} API key`
+        : isChatgpt.value && !signedIn.value
+          ? 'Sign in with ChatGPT first'
+          : null
+  if (missing) {
+    toast.error(missing)
+    return false
+  }
   try {
     await update.mutateAsync({
       ai: {
@@ -197,10 +207,23 @@ async function save() {
     })
     toast.success(`${title.value} saved`)
     testResult.value = null
+    return true
   } catch (err) {
     toast.error(errorMessage(err))
+    return false
   }
 }
+
+/**
+ * Whether the form differs from what's saved. The test asks the saved provider, so with changes in
+ * the form it saves them first, and the button says so.
+ */
+const changed = computed(() => {
+  const c = props.config
+  if (!c || off.value) return false
+  const url = hasUrl.value ? baseUrl.value.trim() || null : null
+  return kind.value !== c.kind || model.value.trim() !== c.model || url !== (c.baseUrl ?? null) || (replacingKey.value && !!apiKey.value.trim())
+})
 
 /** Removes the saved key; the provider and model stay as saved. */
 async function deleteKey() {
@@ -226,6 +249,7 @@ async function clear() {
 }
 
 async function test() {
+  if (changed.value && !(await save())) return
   testing.value = true
   testResult.value = null
   try {
@@ -361,8 +385,8 @@ async function test() {
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <Button type="submit" :disabled="update.isPending.value || (off && !config && !clearsFallback)">Save</Button>
-          <Button v-if="config && !off" type="button" variant="outline" :disabled="testing" @click="test">
-            <Loader2 v-if="testing" class="animate-spin" />Test connection
+          <Button v-if="config && !off" type="button" variant="outline" :disabled="testing || update.isPending.value" @click="test">
+            <Loader2 v-if="testing" class="animate-spin" />{{ changed ? 'Save and test' : 'Test connection' }}
           </Button>
         </div>
       </form>
