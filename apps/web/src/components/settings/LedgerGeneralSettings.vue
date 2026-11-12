@@ -72,7 +72,7 @@ async function categorizeNow() {
             {{ ledger.name }} <Badge v-if="ledger.isDefault" variant="secondary">Default</Badge>
           </div>
           <div class="text-sm text-muted-foreground">
-            {{ ledger.accounts }} account{{ ledger.accounts === 1 ? '' : 's' }} · {{ ledger.transactions }} transactions
+            {{ ledger.accounts }} account{{ ledger.accounts === 1 ? '' : 's' }} · {{ ledger.transactions }} transaction{{ ledger.transactions === 1 ? '' : 's' }}
           </div>
         </div>
         <Button variant="outline" @click="editOpen = true"><Pencil />Edit</Button>

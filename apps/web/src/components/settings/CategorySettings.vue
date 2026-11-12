@@ -345,7 +345,7 @@ function labelSaved(l: Label) {
           />
           <span v-else class="size-3.5 shrink-0 rounded-full" :style="{ background: UNGROUPED_COLOR }" />
           <span class="truncate">{{ s.group?.name ?? 'No group' }}</span>
-          <span class="shrink-0 font-normal text-muted-foreground tabular" :title="`${lists[s.key]?.length ?? 0} categories`">{{ lists[s.key]?.length ?? 0 }}</span>
+          <span class="shrink-0 font-normal text-muted-foreground tabular" :title="`${lists[s.key]?.length ?? 0} categor${lists[s.key]?.length === 1 ? 'y' : 'ies'}`">{{ lists[s.key]?.length ?? 0 }}</span>
         </CardTitle>
         <CardAction class="flex gap-1">
           <Button variant="ghost" size="icon-sm" :aria-label="`Add category to ${s.group?.name ?? 'no group'}`" @click="add(s.group?.id ?? null)"><Plus /></Button>

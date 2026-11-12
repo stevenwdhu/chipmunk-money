@@ -41,7 +41,7 @@ const isPlan = computed(() => props.item.totalPayments !== null)
 const full = computed(() => isPlan.value && props.item.remainingPayments === 0)
 const tip = computed(() =>
   full.value
-    ? `All ${props.item.totalPayments} payments are paid. You can still add one you counted as paid before your history. To add another, take one off or change how many it has.`
+    ? `${props.item.totalPayments === 1 ? 'Its one payment is' : `All ${props.item.totalPayments} payments are`} paid. You can still add one you counted as paid before your history. To add another, take one off or change how many it has.`
     : 'For a payment the app didn’t link because its amount is its own, like a down payment or a last payment that’s the remainder. It counts as one of its payments, and the usual amount stays.',
 )
 
@@ -61,7 +61,7 @@ async function choose(c: RecurringPaymentCandidate) {
     toast.success(`Added to ${recurringLabel(updated)}`, {
       description:
         updated.totalPayments !== null && updated.remainingPayments === 0
-          ? `All ${updated.totalPayments} payments are paid. It’s moved to Ended.`
+          ? `${updated.totalPayments === 1 ? 'Its one payment is' : `All ${updated.totalPayments} payments are`} paid. It’s moved to Ended.`
           : `Its usual amount stays ${usual}.`,
     })
     open.value = false

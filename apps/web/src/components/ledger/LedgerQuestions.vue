@@ -5,13 +5,15 @@ import type { Ledger, LedgerAction, LedgerAnswers, LedgerQuestion } from '@chipm
 import { Skeleton } from '@/components/ui/skeleton'
 import { previewLedgerAction, useLedgerQuestions } from '@/composables/queries'
 import { ApiError, errorMessage } from '@/lib/api'
+import { besidesAction } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
  * What a ledger asks before it's deleted, erased or archived, inside that action's dialog: each
  * question with its choices and what they do, what happens without a choice, and why it can't be
- * done at all. Once everything is answered it lists what the action will do, from the server's dry
- * run with those answers. Nothing shows for a ledger with nothing to ask or say.
+ * done at all. Once everything is answered it lists what else the action will have done, from the
+ * server's dry run with those answers: not the action's own line, which the dialog already says, and
+ * no list when that's all. Nothing shows for a ledger with nothing to ask or say.
  *
  * The dialog sends `answers` with the action, once `ready`. When the server then says the questions
  * changed (`refused`), they're asked again.
@@ -76,8 +78,12 @@ const preview = useQuery({
   gcTime: 0,
   retry: false,
 })
-// The list for these answers stays while it's worked out again in the background.
-const changes = computed(() => (something.value && !blocked.value && answered.value ? preview.data.value?.changes : undefined))
+// The list for these answers stays while it's worked out again in the background. The server's
+// lines say what was done, as its activity log keeps them, so the list is headed for once it's done.
+const changes = computed(() => {
+  const all = something.value && !blocked.value && answered.value ? preview.data.value?.changes : undefined
+  return all && besidesAction(all)
+})
 
 /** The server's answer when the questions aren't the ones that were answered: what the ledgers hold changed meanwhile. */
 const isStale = (err: unknown) => err instanceof ApiError && err.status === 409 && err.message.startsWith('Answer the questions first')
@@ -146,7 +152,7 @@ const pick = (q: LedgerQuestion, value: string) => (answers.value = { ...answers
             {{ errorMessage(preview.error.value) }}
           </p>
           <div v-else-if="changes?.length" class="grid gap-1.5">
-            <p class="text-sm font-medium">What this does</p>
+            <p class="text-sm font-medium">Once it’s done</p>
             <ul class="grid list-disc gap-1 pl-5 text-sm text-muted-foreground">
               <li v-for="(change, i) in changes" :key="i">{{ change }}</li>
             </ul>

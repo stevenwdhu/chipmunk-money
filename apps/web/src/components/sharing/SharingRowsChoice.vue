@@ -42,15 +42,21 @@ const options = computed(
 /** As the bank's statement shows it: for a credit card, what's owed, and said so after the last amount of a line. */
 const shown = (minor: number) => money(statementBalance(minor, props.account.type))
 const owed = (minor: number) => balanceText(minor, props.account)
+const inCredit = (minor: number) => props.account.isLiability && statementBalance(minor, props.account.type) < 0
+/**
+ * The balance before, next to the one after: the short way ("$300.00 → $500.00 owed") when both are
+ * owed, and worded like the one after when either is in credit ("$300.00 owed → $5.00 in credit").
+ */
+const before = (minor: number, after: number) => (inCredit(minor) || inCredit(after) ? owed(minor) : shown(minor))
 
 /** Each ledger's balance on the account before and after, then the new account's when the transactions stay. */
 function balances(r: SharingChange) {
   const lines = [r.sharing.home, ...r.sharing.members]
     .filter((l) => r.parts.after[l.slug] !== undefined)
     .map((l) => {
-      const before = r.parts.before[l.slug]
+      const was = r.parts.before[l.slug]
       const after = r.parts.after[l.slug]!
-      return { name: l.name, before: before === undefined || before === after ? null : shown(before), after: owed(after) }
+      return { name: l.name, before: was === undefined || was === after ? null : before(was, after), after: owed(after) }
     })
   const kept = r.removed.find((l) => l.ledger.slug === props.leaving.slug)?.account
   if (kept) lines.push({ name: `${props.leaving.name}’s new account`, before: null, after: owed(kept.balanceMinor) })

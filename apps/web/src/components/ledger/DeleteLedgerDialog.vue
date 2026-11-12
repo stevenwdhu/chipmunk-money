@@ -24,6 +24,7 @@ watch(open, (v) => v && (typed.value = ''))
 const questions = ref<InstanceType<typeof LedgerQuestions> | null>(null)
 const answers = ref<LedgerAnswers>({})
 const ready = ref(false)
+const counted = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`
 const can = computed(() => ready.value && typed.value === props.ledger?.name && !m.remove.isPending.value)
 
 async function remove() {
@@ -50,7 +51,7 @@ async function remove() {
       <DialogHeader>
         <DialogTitle>Delete {{ ledger?.name }}?</DialogTitle>
         <DialogDescription>
-          This removes the ledger with its {{ ledger?.accounts ?? 0 }} accounts and {{ ledger?.transactions ?? 0 }} transactions. A copy of
+          This removes the ledger with its {{ counted(ledger?.accounts ?? 0, 'account') }} and {{ counted(ledger?.transactions ?? 0, 'transaction') }}. A copy of
           the whole database is saved in <code class="text-xs">data/backups</code> first. To keep it out of the way without deleting, archive it instead.
         </DialogDescription>
       </DialogHeader>

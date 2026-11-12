@@ -48,10 +48,13 @@ export function balanceText(minor: number, account: Pick<Account, 'type' | 'isLi
 }
 
 /**
- * What a ledger's delete, erase or archive did besides the action itself, for the toast under its
- * title: the server's list ends with the action's own line, which the title already says.
+ * What a ledger's delete, erase or archive does besides the action itself: the server's list ends
+ * with the action's own line, which the dialog's title and the toast's already say.
  */
-export const alsoDone = (changes: string[]) => changes.slice(0, -1).join(' ') || undefined
+export const besidesAction = (changes: string[]) => changes.slice(0, -1)
+
+/** The same, for the toast under its title once it's done. */
+export const alsoDone = (changes: string[]) => besidesAction(changes).join(' ') || undefined
 
 /** Whether a move lets go of anything: said before it's confirmed. */
 export const dropsAnything = (r: MoveResult) => r.dropped.links.length + r.dropped.partlyLinked.length + r.dropped.pairs.length + r.dropped.recurring.length > 0

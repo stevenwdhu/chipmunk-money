@@ -96,7 +96,7 @@ function move(l: Ledger, dir: -1 | 1) {
               <Badge v-if="l.archived" variant="outline">Archived</Badge>
             </div>
             <div class="truncate text-xs text-muted-foreground">
-              {{ l.accounts }} account{{ l.accounts === 1 ? '' : 's' }} · {{ l.transactions }} transactions · /l/{{ l.slug }}
+              {{ l.accounts }} account{{ l.accounts === 1 ? '' : 's' }} · {{ l.transactions }} transaction{{ l.transactions === 1 ? '' : 's' }} · /l/{{ l.slug }}
             </div>
           </div>
           <div class="hidden gap-0.5 sm:flex">

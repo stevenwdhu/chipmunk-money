@@ -305,7 +305,7 @@ function onPick(e: Event) {
         <CardHeader>
           <CardTitle>Match the columns</CardTitle>
           <CardDescription>
-            {{ dataRows.length }} rows found.
+            {{ dataRows.length }} row{{ dataRows.length === 1 ? '' : 's' }} found.
             <template v-if="account?.importMapping">Using the settings from your last {{ account.name }} import.</template>
             <template v-else>We guessed the columns; check them against the preview below.</template>
           </CardDescription>
@@ -424,7 +424,7 @@ function onPick(e: Event) {
         <CardHeader class="px-4 py-3 md:px-6">
           <CardTitle class="text-sm">Preview</CardTitle>
           <CardDescription v-if="parsed">
-            {{ parsed.rows.length }} rows read
+            {{ parsed.rows.length }} row{{ parsed.rows.length === 1 ? '' : 's' }} read
             <span v-if="parsed.errors.length" class="text-destructive">· {{ parsed.errors.length }} couldn't be read</span>
           </CardDescription>
         </CardHeader>
@@ -452,7 +452,7 @@ function onPick(e: Event) {
       <div class="flex justify-between gap-2">
         <Button variant="ghost" @click="reset"><ArrowLeft />Choose another file</Button>
         <Button :disabled="!parsed?.rows.length || m.preview.isPending.value" @click="toReview">
-          <Loader2 v-if="m.preview.isPending.value" class="animate-spin" />Check {{ parsed?.rows.length ?? 0 }} rows
+          <Loader2 v-if="m.preview.isPending.value" class="animate-spin" />Check {{ parsed?.rows.length ?? 0 }} row{{ parsed?.rows.length === 1 ? '' : 's' }}
         </Button>
       </div>
     </template>

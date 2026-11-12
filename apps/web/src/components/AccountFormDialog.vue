@@ -236,10 +236,10 @@ async function submit() {
     open.value = false
     emit('saved', saved)
     if (linkedNow && syncFromChanged) {
-      toast.success(`Saved. ${saved.name} has ${saved.transactionCount} transactions from ${chosen.value?.institution ?? 'your bank'}.`)
+      toast.success(`Saved. ${saved.name} has ${saved.transactionCount} transaction${saved.transactionCount === 1 ? '' : 's'} from ${chosen.value?.institution ?? 'your bank'}.`)
     } else if (linkedNow && chosen.value && saved.bank?.lastSyncedAt) {
       // It took what's kept from the bank account's syncs.
-      toast.success(`${saved.name} now syncs from ${chosen.value.institution ?? 'your bank'}, with ${saved.transactionCount} transactions.`)
+      toast.success(`${saved.name} now syncs from ${chosen.value.institution ?? 'your bank'}, with ${saved.transactionCount} transaction${saved.transactionCount === 1 ? '' : 's'}.`)
     } else if (linkedNow && chosen.value) {
       // Nothing was fetched for that bank account yet: its first sync, now.
       toast.success(`${saved.name} now syncs from ${chosen.value.institution ?? 'your bank'}. Bringing in transactions…`)

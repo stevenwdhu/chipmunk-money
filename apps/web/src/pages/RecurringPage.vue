@@ -75,7 +75,8 @@ const monthlyIncome = computed(() => active.value.filter((i) => i.expectedAmount
 const plans = computed(() => active.value.filter(isPlan))
 const owed = computed(() => plans.value.reduce((n, i) => n + (i.remainingAmountMinor ?? 0), 0))
 const lastPlanEnd = computed(() => plans.value.map((i) => i.endDate ?? '').sort().at(-1) || null)
-const upcomingTotal = computed(() => (upcoming.data.value ?? []).filter((u) => u.amountMinor < 0).reduce((n, u) => n + u.amountMinor, 0))
+const upcomingOut = computed(() => (upcoming.data.value ?? []).filter((u) => u.amountMinor < 0))
+const upcomingTotal = computed(() => upcomingOut.value.reduce((n, u) => n + u.amountMinor, 0))
 
 const cadenceLabel = (c: string) => CADENCES.find((x) => x.value === c)?.label ?? c
 const paidOff = (i: RecurringItem) => i.remainingPayments === 0
@@ -159,7 +160,7 @@ async function detect() {
         <CardHeader class="px-4"><CardDescription>Due in the next 30 days</CardDescription>
           <CardTitle class="text-lg tabular md:text-2xl">{{ money(-upcomingTotal || 0) }}</CardTitle>
         </CardHeader>
-        <CardContent class="px-4 text-xs text-muted-foreground">{{ upcoming.data.value?.filter((u) => u.amountMinor < 0).length ?? 0 }} payments</CardContent>
+        <CardContent class="px-4 text-xs text-muted-foreground">{{ upcomingOut.length }} payment{{ upcomingOut.length === 1 ? '' : 's' }}</CardContent>
       </Card>
     </div>
 

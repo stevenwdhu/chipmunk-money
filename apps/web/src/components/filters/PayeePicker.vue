@@ -88,7 +88,7 @@ const itemClass =
             </ListboxGroupLabel>
             <ListboxItem v-for="r in others" :key="r.payeeKey" :value="r.payeeKey" :class="itemClass" @select="toggle(r.payeeKey)">
               <span class="min-w-0 truncate">{{ r.payee }}</span>
-              <span class="ml-auto shrink-0 text-xs text-muted-foreground tabular" :title="`${r.count} transactions`">{{ r.count }}</span>
+              <span class="ml-auto shrink-0 text-xs text-muted-foreground tabular" :title="`${r.count} transaction${r.count === 1 ? '' : 's'}`">{{ r.count }}</span>
             </ListboxItem>
           </ListboxGroup>
           <p v-if="!results.data.value?.length && !results.isFetching.value" class="px-2 py-6 text-center text-sm text-muted-foreground">

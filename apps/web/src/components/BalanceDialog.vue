@@ -11,6 +11,7 @@ import { previewBalance, useAccountMutations, useAccountSharing } from '@/compos
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { money } from '@/lib/format'
+import { balanceText } from '@/lib/sharing'
 
 const props = defineProps<{ account: Account }>()
 const open = defineModel<boolean>('open', { default: false })
@@ -46,6 +47,12 @@ watch([open, amount, date], ([isOpen]) => {
 })
 /** As the bank's statement shows it: what's owed on a debt. */
 const shown = (minor: number) => money(statementBalance(minor, props.account.type))
+const inCredit = (minor: number) => props.account.isLiability && statementBalance(minor, props.account.type) < 0
+/**
+ * A line's balance, now or then: as the bank's statement shows it while the line's are both owed (the
+ * label says so), and in words on both sides when either is in credit ("$300.00 owed → $5.00 in credit").
+ */
+const said = (minor: number, line: { before: number; after: number }) => (inCredit(line.before) || inCredit(line.after) ? balanceText(minor, props.account) : shown(minor))
 /**
  * Each ledger's balance on the account now and with this balance recorded, then the total. The dry
  * run gives this ledger's and the total. What the other ledgers hold stays theirs, except the one
@@ -86,7 +93,7 @@ async function submit() {
   const balanceMinor = statementBalance(v, props.account.type)
   try {
     await m.setBalance.mutateAsync({ id: props.account.id, date: date.value, balanceMinor })
-    toast.success(`${props.account.name} is now ${formatMoney(v)}${props.account.isLiability ? ' owed' : ''}`)
+    toast.success(`${props.account.name} is now ${props.account.isLiability ? balanceText(balanceMinor, props.account) : formatMoney(v)}`)
     open.value = false
   } catch (err) {
     error.value = errorMessage(err)
@@ -123,13 +130,13 @@ async function submit() {
             <div v-for="l in parts.lines" :key="l.name" class="flex justify-between gap-3">
               <span class="min-w-0 truncate">{{ l.name }}</span>
               <span class="tabular whitespace-nowrap">
-                <template v-if="l.before !== l.after"><span class="text-muted-foreground">{{ shown(l.before) }} →</span> {{ shown(l.after) }}</template>
-                <span v-else class="text-muted-foreground">{{ shown(l.after) }}</span>
+                <template v-if="l.before !== l.after"><span class="text-muted-foreground">{{ said(l.before, l) }} →</span> {{ said(l.after, l) }}</template>
+                <span v-else class="text-muted-foreground">{{ said(l.after, l) }}</span>
               </span>
             </div>
             <div class="flex justify-between gap-3 border-t pt-1 font-medium">
               <span>Whole account</span>
-              <span class="tabular whitespace-nowrap"><span class="font-normal text-muted-foreground">{{ shown(parts.total.before) }} →</span> {{ shown(parts.total.after) }}</span>
+              <span class="tabular whitespace-nowrap"><span class="font-normal text-muted-foreground">{{ said(parts.total.before, parts.total) }} →</span> {{ said(parts.total.after, parts.total) }}</span>
             </div>
           </div>
           <Skeleton v-else-if="waiting" class="h-20" />

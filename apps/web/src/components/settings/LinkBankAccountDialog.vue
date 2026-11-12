@@ -111,7 +111,7 @@ async function submit() {
   open.value = false
   emit('linked')
   // It took what's kept from the bank account's syncs. Nothing was fetched for it yet: its first sync, now.
-  if (linked.bank?.lastSyncedAt) return void toast.success(`${a.name} now syncs from ${service.value}, with ${linked.transactionCount} transactions.`)
+  if (linked.bank?.lastSyncedAt) return void toast.success(`${a.name} now syncs from ${service.value}, with ${linked.transactionCount} transaction${linked.transactionCount === 1 ? '' : 's'}.`)
   toast.success(`${a.name} now syncs from ${service.value}. Bringing in transactions…`)
   try {
     const r = await bankM.sync.mutateAsync(c.id)
