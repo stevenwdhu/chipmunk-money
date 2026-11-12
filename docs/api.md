@@ -182,7 +182,7 @@ Institutions, and the accounts at them: bank accounts, cards, investments, loans
 | GET | `/ledgers/{ledger}/accounts/{id}` | Get an account. | read |
 | PATCH | `/ledgers/{ledger}/accounts/{id}` | Update an account. | write |
 | DELETE | `/ledgers/{ledger}/accounts/{id}` | Delete an account. | write |
-| POST | `/ledgers/{ledger}/accounts/{id}/balance` | Record a balance. | write |
+| POST | `/ledgers/{ledger}/accounts/{id}/balance` | Record a balance. Accepts `?dryRun=true`. | write |
 | GET | `/ledgers/{ledger}/accounts/{id}/history` | Get an account’s balance history. | read |
 | GET | `/ledgers/{ledger}/accounts/{id}/snapshots` | List recorded balances. | read |
 | DELETE | `/ledgers/{ledger}/accounts/{id}/snapshots/{snapshotId}` | Delete a recorded balance. | write |

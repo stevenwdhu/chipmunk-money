@@ -266,6 +266,25 @@ describe('a ledger the account is shared with', () => {
   })
 })
 
+describe('POST /accounts/:id/balance on a shared account', () => {
+  it('says with a dry run what recording a balance gives the home and the whole account, and records nothing', async () => {
+    const w = await shared()
+    const before = w.parts()
+    expect(before).toEqual({ personal: OPENING - 28_000, family: -42_000 })
+    // −$1,900.00 on 31 Aug: the rows after it come on top (Personal −$80.00, Family −$120.00), and Personal takes the rest.
+    const body = { date: '2026-08-31', balanceMinor: -190_000 }
+    const dry = await w.unchanged(() => w.call('POST', `${w.base(w.personal)}/accounts/${w.visa}/balance?dryRun=true`, body))
+    expect(dry.status).toBe(200)
+    expect(dry.body).toMatchObject({ balanceMinor: -168_000, sharing: { totalBalanceMinor: -210_000 } })
+    expect(w.parts()).toEqual(before)
+    expect((await w.call('GET', `${w.base(w.personal)}/accounts/${w.visa}/snapshots`)).body).toEqual([])
+
+    const real = await w.call('POST', `${w.base(w.personal)}/accounts/${w.visa}/balance`, body)
+    expect(real.body).toMatchObject({ balanceMinor: dry.body.balanceMinor, sharing: { totalBalanceMinor: dry.body.sharing.totalBalanceMinor } })
+    expect(w.parts()).toEqual({ personal: -168_000, family: -42_000 })
+  })
+})
+
 describe('POST /transactions/move', () => {
   it('moves with a dry run first, as the app and with a key for every ledger, and the id is then not found where it was', async () => {
     const w = await shared()

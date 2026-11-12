@@ -827,9 +827,11 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...acc,
       scope: 'write',
       summary: 'Record a balance',
-      description: 'The account’s balance at the end of `date`. One per day; recording again replaces it. Mostly for investments, loans and property. Not for a synced account, whose balance is the bank’s.',
+      description:
+        'The account’s balance at the end of `date`. One per day; recording again replaces it. Mostly for investments, loans and property. Not for a synced account, whose balance is the bank’s. On a shared account it’s the account’s total, recorded in its home: with `dryRun=true` it answers the account as it would be (this ledger’s balance on it and the total) and records nothing.',
       body: balanceUpdateSchema,
       response: accountSchema,
+      dryRun: true,
     },
     (c, { params, body }) => {
       accounts.requireManualBalance(c.var.ctx, params.id)
