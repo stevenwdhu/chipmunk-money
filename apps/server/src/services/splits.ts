@@ -102,6 +102,11 @@ export interface SplitResult {
 
 const describe = (p: Pick<Payment, 'amount' | 'currency' | 'date' | 'accountName'>) =>
   `the ${formatMoney(p.amount, p.currency)} payment onto ${p.accountName} on ${p.date}`
+/**
+ * The payment as a ledger with a share of it is told of it, after "its", "the" or the holder's
+ * name: its account and its date, never its amount, which is a row of the ledger that holds it.
+ */
+const heldElsewhere = (p: Pick<Payment, 'date' | 'accountName'>) => `payment onto ${p.accountName} on ${p.date}`
 const sum = (amounts: Iterable<number>) => [...amounts].reduce((s, n) => s + n, 0)
 const ref = (l: Pick<AccountLedger, 'slug' | 'name'>) => ({ slug: l.slug, name: l.name })
 
@@ -135,8 +140,9 @@ export function splitPartOf(ctx: AppContext, id: number): SplitPart | null {
 
 /**
  * What a row of this ledger that's part of a split waits for, in words: "Undo the split of the
- * $100.00 payment onto Visa on 2026-09-20 first", naming the payment, and the ledger that holds it
- * when that's another. For what can't take a split payment or a split row (a move, a switch's
+ * $100.00 payment onto Visa on 2026-09-20 first", naming the payment. A share of another ledger's
+ * payment names that ledger, and not the payment's amount ("Undo the split of the payment onto Visa
+ * on 2026-09-20 in Personal first"). For what can't take a split payment or a split row (a move, a switch's
  * delete). Null for a row that isn't part of a split.
  */
 export function undoSplitFirst(ctx: AppContext, id: number): string | null {
@@ -149,8 +155,7 @@ export function undoSplitFirst(ctx: AppContext, id: number): string | null {
      WHERE t.ledger_id = @ledger AND t.id = ?`,
     id,
   )!
-  const amount = ctx.accountWide.splitShares([part.paymentId])[0]!.paymentMinor
-  return `Undo the split of ${describe({ ...share, amount })} in ${part.holder.name} first.`
+  return `Undo the split of the ${heldElsewhere(share)} in ${part.holder.name} first.`
 }
 
 /** Refuses (409) a change to a split row, saying where its split is changed. */
@@ -456,7 +461,8 @@ function wantedShares(ctx: AppContext, payment: Payment, ledgers: AccountLedger[
  * gets a new row needs such a category, the holder included: 400 "Family has no category for card
  * payments" otherwise, since an uncategorized split row would count as spending or income. Nothing
  * learns from them, and no recurring item takes them. The payment is marked reviewed. Activity in
- * each ledger whose rows changed, and the split rows must sum to zero, or it all rolls back. A dry
+ * each ledger whose rows changed (a ledger with a share is told of its share, never of the payment's
+ * amount), and the split rows must sum to zero, or it all rolls back. A dry
  * run works it all out and changes nothing.
  */
 export function setSplit(
@@ -519,13 +525,15 @@ export function setSplit(
           before: { shares: Object.fromEntries([...had].map(([l, r]) => [ledgers.find((x) => x.ledgerId === l)!.slug, r.amountMinor])) },
           after: { shares: Object.fromEntries([...wanted].map(([l, amount]) => [ledgers.find((x) => x.ledgerId === l)!.slug, amount])) },
         })
+        // A ledger with a share is told of its share, not of the payment's amount.
+        const its = `its ${heldElsewhere(payment)}`
         for (const c of changed) {
           const summary =
             c.after === null
-              ? `${ctx.ledger.name} took back this ledger’s share of ${money(c.before!)} of ${describe(payment)}`
+              ? `${ctx.ledger.name} took back this ledger’s share of ${money(c.before!)} of ${its}`
               : c.before === null
-                ? `${ctx.ledger.name} gave this ledger a share of ${money(c.after)} of ${describe(payment)}`
-                : `${ctx.ledger.name} changed this ledger’s share of ${describe(payment)} from ${money(c.before)} to ${money(c.after)}`
+                ? `${ctx.ledger.name} gave this ledger a share of ${money(c.after)} of ${its}`
+                : `${ctx.ledger.name} changed this ledger’s share of ${its} from ${money(c.before)} to ${money(c.after)}`
           recordActivity(ctxOf(c.ledgerId), opts.actor, { action: 'split', entity: 'transaction', summary, after: { from: ctx.ledger.slug, amountMinor: c.after } })
         }
       }
@@ -555,7 +563,7 @@ function removeSplit(ctx: AppContext, ctxOf: CtxOf, payment: Payment, rows: Spli
     recordActivity(ctxOf(r.ledgerId), actor, {
       action: 'split',
       entity: 'transaction',
-      summary: `${ctx.ledger.name} undid the split of ${describe(payment)}, and this ledger’s share of ${money(r.amountMinor)} with it`,
+      summary: `${ctx.ledger.name} undid the split of its ${heldElsewhere(payment)}, and this ledger’s share of ${money(r.amountMinor)} with it`,
       after: { from: ctx.ledger.slug, amountMinor: null },
     })
   }
@@ -611,7 +619,7 @@ export function dropShare(ctx: AppContext, ctxOf: CtxOf, paymentId: number, ledg
     recordActivity(at, actor, {
       action: 'split',
       entity: 'transaction',
-      summary: `${ctx.ledger.name} took back this ledger’s share of ${money} of ${describe(payment)}`,
+      summary: `${ctx.ledger.name} took back this ledger’s share of ${money} of its ${heldElsewhere(payment)}`,
       after: { from: ctx.ledger.slug, amountMinor: null },
     })
     assertSumsToZero(ctx, payment)
@@ -666,7 +674,7 @@ export function detachShare(
       action: 'split',
       entity: 'transaction',
       entityId: share.id,
-      summary: `This ledger’s share of ${money} of ${describe(payment)} in ${ctx.ledger.name} is its own transaction now`,
+      summary: `This ledger’s share of ${money} of ${ctx.ledger.name}’s ${heldElsewhere(payment)} is its own transaction now`,
       after: { from: ctx.ledger.slug },
     })
     assertSumsToZero(ctx, payment)
@@ -704,7 +712,7 @@ export function detachSplit(ctx: AppContext, ctxOf: CtxOf, paymentId: number, ac
         action: 'split',
         entity: 'transaction',
         entityId: r.id,
-        summary: `This ledger’s share of ${formatMoney(r.amountMinor, payment.currency)} of ${describe(payment)} in ${ctx.ledger.name} is its own transaction now`,
+        summary: `This ledger’s share of ${formatMoney(r.amountMinor, payment.currency)} of ${ctx.ledger.name}’s ${heldElsewhere(payment)} is its own transaction now`,
         after: { from: ctx.ledger.slug },
       })
     }

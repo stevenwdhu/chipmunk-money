@@ -471,7 +471,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Split a card payment between ledgers',
       description:
-        'For a payment onto a shared credit card that this ledger holds: gives each other ledger that has the card its share, so each ledger’s balance on the card goes down by what it paid. The payment itself stays as the bank sent it. Each share is a transaction in its ledger (`split.part` is `share`), and one beside the payment takes them off this ledger (`given`). They sum to zero, sit in each ledger’s category for card payments, and change with the split only (409 otherwise). `shares` replaces the split, and an empty list undoes it. Only a card payment can be split (400): money onto the card that’s a transfer or in a category left out of totals, not deleted and not linked. Every ledger in it needs a category for card payments (400). While it’s split, the payment can’t be deleted, moved or given another date by hand. Try it with `dryRun=true` first.' +
+        'For a payment onto a shared account that this ledger holds: gives each other ledger that has the account its share, so each ledger’s balance on the account goes down by what it paid. The payment itself stays as the bank sent it. Each share is a transaction in its ledger (`split.part` is `share`), and one beside the payment takes them off this ledger (`given`). They sum to zero, sit in each ledger’s category for card payments, and change with the split only (409 otherwise). `shares` replaces the split, and an empty list undoes it. Only a card payment can be split (400): money onto the account that’s a transfer or in a category left out of totals, not deleted and not linked. Every ledger in it needs a category for card payments (400). While it’s split, the payment can’t be deleted, moved or given another date by hand. Try it with `dryRun=true` first.' +
         ACROSS,
       body: transactionSplitSetSchema,
       response: splitResultSchema,
@@ -800,13 +800,24 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Delete an account',
       description:
-        'Deletes the account and all of its transactions, and its institution if no other account is there. To keep the history, archive it instead. A shared account can’t be deleted (409): stop sharing it first, with PUT /accounts/{id}/sharing.',
+        'Deletes the account and all of its transactions, and its institution if no other account is there. To keep the history, archive it instead. A shared account can’t be deleted (409): stop sharing it first, with PUT /accounts/{id}/sharing. An account this ledger kept its transactions on when it stopped sharing one leaves their bank ids with that account, in its home, so a sync doesn’t add them again: a key limited to some ledgers must be allowed in that home too (403 otherwise).',
       status: 204,
     },
     (c, { params }) => {
       const before = accounts.getAccount(c.var.ctx, params.id)
-      accounts.deleteAccount(c.var.ctx, storage.ctxOf, params.id)
+      const { kept } = accounts.deleteAccount(c.var.ctx, storage.ctxOf, params.id, usableLedgers(c))
       log(c, { action: 'delete', entity: 'account', entityId: before.id, summary: `Deleted the account ${before.name}`, before })
+      // The account it was split off from keeps its bank ids, in another ledger: that one's log says so.
+      if (kept) {
+        const n = `${kept.bankIds} transaction${kept.bankIds === 1 ? '' : 's'}`
+        recordActivity(storage.ctxOf(kept.homeLedgerId), acting(c), {
+          action: 'update',
+          entity: 'account',
+          entityId: kept.account.id,
+          summary: `${c.var.ctx.ledger.name}’s ${before.name}, split off from ${kept.account.name}, was deleted: ${kept.account.name} keeps the bank ids of its ${n}`,
+          after: { bankIds: kept.bankIds },
+        })
+      }
       removeIfEmpty(c, before.institutionId)
     },
   )
@@ -861,10 +872,10 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'Get how an account is shared',
       description:
-        'The account’s home (this ledger), the ledger whose balance carries its opening balance, and each other ledger it’s shared with, each with how many transactions it holds on the account and its balance on it. For any account: one that isn’t shared has no `members`. In a ledger the account is shared with, a 409 naming its home.',
+        'The account’s home (this ledger), the ledger whose balance carries its opening balance, and each other ledger it’s shared with, each with how many transactions it holds on the account and its balance on it. For any account: one that isn’t shared has no `members`. In a ledger the account is shared with, a 409 naming its home. A key limited to some ledgers gets the name of a ledger it can’t use, with `transactionCount` and `balanceMinor` null. The total stays.',
       response: accountSharingSchema,
     },
-    (c, { params }) => getSharing(c.var.ctx, params.id),
+    (c, { params }) => getSharing(c.var.ctx, params.id, usableLedgers(c)),
   )
   r.put(
     '/accounts/:id/sharing',
@@ -874,7 +885,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       summary: 'Share an account with other ledgers',
       description:
         'Sets every ledger that has the account (`ledgers`, its home included) and which one is its home, in the account’s home. Only credit cards can be shared (400). A ledger added gets the account under an institution of the same name. Nothing already recorded moves and no balance changes: each ledger’s balance on it is what it holds, and new transactions from sync and CSV go to the home. With `home`, another ledger in the list becomes the home: the bank link, recorded balances and the account’s settings go with it, and no balance changes. A ledger taken out that holds transactions on it needs `rows` (400 otherwise): `home` moves them to the home, `keep` keeps them in that ledger on a new manual account, and the account’s total is the bank’s whole balance again. Adds come first, then the home change, then the ledgers taken out. Refused in a ledger the account is shared with (409 naming its home), and with the home or a ledger added archived (400). Try it with `dryRun=true` first: it answers the counts, each ledger’s balance before and after, and `notices` to read.' +
-        ' A key limited to some ledgers must be allowed in every ledger added or made the home, and to take a ledger out in every ledger that has the account (403 otherwise).',
+        ' A key limited to some ledgers must be allowed in every ledger added or made the home, and to take a ledger out in every ledger that has the account (403 otherwise). It gets no count or balance of a ledger it can’t use.',
       body: accountSharingSetSchema,
       response: sharingChangeSchema,
       dryRun: true,

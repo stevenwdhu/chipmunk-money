@@ -89,19 +89,24 @@ export function refuseWhileSharing(ctx: AppContext, then: string): void {
 /**
  * How an account of this ledger is shared: its home (this ledger), its opening ledger, and each
  * other ledger it's shared with, each with how many transactions it holds on it and its part of
- * the balance. An account that isn't shared, of any type, has no members.
+ * the balance. An account that isn't shared, of any type, has no members. A caller limited to some
+ * ledgers (`usable`, by id, or null for every ledger) gets a ledger it can't use by name only: its
+ * count and its part are null. The total stays.
  */
-export function getSharing(ctx: AppContext, accountId: number): AccountSharing {
+export function getSharing(ctx: AppContext, accountId: number, usable: UsableLedgers = null): AccountSharing {
   const { ledgers, home } = inHome(ctx, accountId)
   const { totalMinor, parts } = currentParts(ctx, accountId)
   const counts = new Map(ctx.accountWide.held(accountId).map((h) => [h.ledgerId, h.count]))
-  const part = (l: AccountLedger) => ({
-    slug: l.slug,
-    name: l.name,
-    archived: l.archived,
-    transactionCount: counts.get(l.ledgerId) ?? 0,
-    balanceMinor: parts.get(l.ledgerId) ?? 0,
-  })
+  const part = (l: AccountLedger) => {
+    const shown = !usable || usable.includes(l.ledgerId)
+    return {
+      slug: l.slug,
+      name: l.name,
+      archived: l.archived,
+      transactionCount: shown ? (counts.get(l.ledgerId) ?? 0) : null,
+      balanceMinor: shown ? (parts.get(l.ledgerId) ?? 0) : null,
+    }
+  }
   const opening = ledgers.find((l) => l.isOpening) ?? home
   return {
     accountId,
@@ -112,10 +117,11 @@ export function getSharing(ctx: AppContext, accountId: number): AccountSharing {
   }
 }
 
-/** Each ledger's part of the account today, by slug. */
-function partsToday(ctx: AppContext, accountId: number): Record<string, number> {
+/** Each ledger's part of the account today, by slug: of the ledgers the caller can use (`usable`, null for every one). */
+function partsToday(ctx: AppContext, accountId: number, usable: UsableLedgers): Record<string, number> {
   const { parts } = currentParts(ctx, accountId)
-  return Object.fromEntries(ctx.accountWide.ledgers(accountId).map((l) => [l.slug, parts.get(l.ledgerId) ?? 0]))
+  const shown = ctx.accountWide.ledgers(accountId).filter((l) => !usable || usable.includes(l.ledgerId))
+  return Object.fromEntries(shown.map((l) => [l.slug, parts.get(l.ledgerId) ?? 0]))
 }
 
 /**
@@ -539,9 +545,11 @@ function leave(
 
   const ownAccount = kept ? { ...kept.account, balanceMinor: getAccount(member, kept.account.id).balanceMinor } : null
   const left: Left = { ledger: named(leaving), rows, moved, sentAsDeleted, kept: kept?.kept ?? 0, account: ownAccount, recurringItems, importBatches, splits }
-  const after = {
+  // Each ledger's log has the amount of a payment it holds itself, never of one another ledger holds.
+  const splitsFor = (ledger: { slug: string }) => splits.map(({ paymentMinor, ...s }) => (s.holder.slug === ledger.slug ? { ...s, paymentMinor } : s))
+  const after = (ledger: { slug: string }) => ({
     rows,
-    ...(splits.length ? { splits } : {}),
+    ...(splits.length ? { splits: splitsFor(ledger) } : {}),
     moved,
     sentAsDeleted,
     recurringItems,
@@ -550,7 +558,7 @@ function leave(
     ...(kept && ownAccount
       ? { kept: kept.kept, account: ownAccount, reports: kept.reports, recordedBalances: rebalanced, balanceToday: { date: today(home), balanceMinor: kept.totalToday } }
       : {}),
-  }
+  })
   const keeps = ownAccount ? `, which keeps its ${count(kept!.kept, 'transaction')} on an account of its own` : ''
   recordActivity(home, actor, {
     action: 'stop_sharing',
@@ -558,7 +566,7 @@ function leave(
     entityId: accountId,
     summary: `Stopped sharing ${account.name} with ${member.ledger.name}${keeps}`,
     before: { ledger: member.ledger.slug },
-    after,
+    after: after(home.ledger),
   })
   recordActivity(member, actor, {
     action: 'stop_sharing',
@@ -566,7 +574,7 @@ function leave(
     entityId: accountId,
     summary: `${home.ledger.name} stopped sharing ${account.name} with this ledger${ownAccount ? `. Its transactions here are on ${ownAccount.name}, an account of this ledger’s own` : ''}`,
     before: { home: home.ledger.slug },
-    after,
+    after: after(member.ledger),
   })
   const removed = kept ? null : removeIfEmpty(member, institutionId)
   if (removed) {
@@ -581,17 +589,20 @@ function leave(
   return { left, openingBase, deferred }
 }
 
-/** What happened to a split payment a ledger that left took part in, in words. */
+/**
+ * What happened to a split payment a ledger that left took part in, in words. The amount of a
+ * payment another ledger holds is left out: the words are kept in the leaving ledger's activity
+ * (an erase's `changes`), where only its own rows' amounts belong.
+ */
 export function splitNotice(leaving: LedgerName, s: LeftSplit): string {
   const money = (minor: number) => formatMoney(minor, s.currency)
-  const payment = `the ${money(s.paymentMinor)} payment on ${s.date}`
   switch (s.done) {
     case 'detachedSplit':
       return `The split of ${leaving.name}’s ${money(s.paymentMinor)} payment on ${s.date} ends. Each share of it is an ordinary transaction where it is, and no balance changes.`
     case 'droppedShare':
-      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${payment} goes back to ${s.holder.name}, which holds the payment.`
+      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${s.holder.name}’s payment on ${s.date} goes back to ${s.holder.name}.`
     case 'detachedShare':
-      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${s.holder.name}’s ${money(s.paymentMinor)} payment on ${s.date} is an ordinary transaction now, and so is what ${s.holder.name} gave for it. No balance changes.`
+      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${s.holder.name}’s payment on ${s.date} is an ordinary transaction now, and so is what ${s.holder.name} gave for it. No balance changes.`
   }
 }
 
@@ -636,7 +647,7 @@ export interface SharingChange {
    * ledger's rows come home: not the whole change in its part, which `parts` has.
    */
   opening: { from: LedgerName; to: LedgerName; baseMinor: number } | null
-  /** Each ledger's part today, by slug, before and after (a ledger that left has none after). */
+  /** Each ledger's part today, by slug, before and after (a ledger that left has none after, and one the caller can't use has neither). */
   parts: { before: Record<string, number>; after: Record<string, number> }
   /** What to tell the owner about it, in words. */
   notices: string[]
@@ -659,7 +670,8 @@ export interface SharingChange {
  * current home left out without naming a new one, a home not in the list (400), and what each step
  * refuses. A caller limited to some ledgers (`usable`, null for every ledger) must be allowed in the
  * home and in every ledger added or made the home, and, when a ledger is taken out, in every ledger
- * that has the account, since letting a split go can write in any of them: 403 otherwise. A dry run works it all out and reports it (the counts, each ledger's part before and
+ * that has the account, since letting a split go can write in any of them: 403 otherwise. What it
+ * answers of a ledger the caller can't use is its name only (getSharing, and no part). A dry run works it all out and reports it (the counts, each ledger's part before and
  * after, what the opening balance going to the home brings it, what happens to each split payment a
  * leaving ledger took part in, and with "keep" what's kept, what goes home and the new account's
  * balance), then changes nothing. After the commit, and not in a dry run, AI categorizes in the
@@ -695,7 +707,7 @@ export function setSharing(
   }
   const removes = leaving.map((m) => ({ ledger: m, rows: rowsChoiceFor(homeCtx, account, m, input.rows?.[m.slug]) }))
 
-  const before = partsToday(homeCtx, accountId)
+  const before = partsToday(homeCtx, accountId, usable)
   const homeAfter = newHome.id === home.ledgerId ? homeCtx : ctxOf(newHome.id)
   let report: SharingChange
   const deferred: number[] = []
@@ -711,7 +723,7 @@ export function setSharing(
       if (out.openingBase !== null) opening = { from: named(r.ledger), to: named(newHome), baseMinor: out.openingBase }
     }
 
-    const sharing = getSharing(homeAfter, accountId)
+    const sharing = getSharing(homeAfter, accountId, usable)
     const notices: string[] = []
     if (changed) {
       const kept = sharing.opening.slug === newHome.slug ? '' : ` ${sharing.opening.name} keeps ${account.name}’s opening balance, and differences with the bank still land in ${sharing.opening.name}.`
@@ -740,7 +752,7 @@ export function setSharing(
       home: changed,
       removed,
       opening,
-      parts: { before, after: partsToday(homeAfter, accountId) },
+      parts: { before, after: partsToday(homeAfter, accountId, usable) },
       notices,
     }
     if (opts.dryRun) throw ROLL_BACK

@@ -195,6 +195,44 @@ describe('sharing an account over HTTP', () => {
   })
 })
 
+describe('GET /accounts/:id/sharing with a key limited to some ledgers', () => {
+  it('names a ledger the key can’t use without its count or its balance, and keeps the total', async () => {
+    const w = await shared(setup(), ['personal', 'family', 'trip'])
+    const url = `${w.base(w.personal)}/accounts/${w.visa}/sharing`
+    const part = (slug: string, name: string, transactionCount: number | null, balanceMinor: number | null) => ({ slug, name, archived: false, transactionCount, balanceMinor })
+    const whole = {
+      accountId: w.visa,
+      home: part('personal', 'Personal', 2, OPENING - 28_000),
+      opening: { slug: 'personal', name: 'Personal' },
+      members: [part('family', 'Family', 2, -42_000), part('trip', 'Trip', 0, 0)],
+      totalBalanceMinor: OPENING - 70_000,
+    }
+    // The app and a key for every ledger see it all.
+    expect((await w.call('GET', url)).body).toEqual(whole)
+    expect((await w.call('GET', url, undefined, await w.key('read'))).body).toEqual(whole)
+    expect((await w.call('GET', url, undefined, await w.key('read', [w.personal, w.family, w.trip]))).body).toEqual(whole)
+    // A key for the home alone, and one for two of the three.
+    const mine = await w.call('GET', url, undefined, await w.key('read', [w.personal]))
+    expect(mine.status).toBe(200)
+    expect(mine.body).toEqual({ ...whole, members: [part('family', 'Family', null, null), part('trip', 'Trip', null, null)] })
+    const two = await w.call('GET', url, undefined, await w.key('read', [w.personal, w.family]))
+    expect(two.body).toEqual({ ...whole, members: [whole.members[0], part('trip', 'Trip', null, null)] })
+
+    // A change that takes no ledger out answers the same way: no part of a ledger the key can't use.
+    const admin = await w.key('admin', [w.personal])
+    const dry = await w.unchanged(() => w.sharing({ ledgers: ['personal', 'family', 'trip'] }, { dryRun: true, headers: admin }))
+    expect(dry.status).toBe(200)
+    expect(dry.body.sharing).toEqual(mine.body)
+    expect(dry.body.parts).toEqual({ before: { personal: OPENING - 28_000 }, after: { personal: OPENING - 28_000 } })
+    // After a home change by a key for the old home and the new one, Trip stays a name.
+    const moved = await w.sharing({ ledgers: ['personal', 'family', 'trip'], home: 'family' }, { headers: await w.key('admin', [w.personal, w.family]) })
+    expect(moved.status).toBe(200)
+    expect(moved.body.sharing.home).toEqual(part('family', 'Family', 2, -42_000))
+    expect(moved.body.sharing.members).toEqual([part('personal', 'Personal', 2, OPENING - 28_000), part('trip', 'Trip', null, null)])
+    expect(moved.body.parts.after).toEqual({ personal: OPENING - 28_000, family: -42_000 })
+  })
+})
+
 describe('a ledger the account is shared with', () => {
   it('enters transactions by hand on it, which are its own', async () => {
     const w = setup()
@@ -370,6 +408,61 @@ describe('PUT /transactions/:id/split', () => {
     expect((await w.split(w.personal, pay, [{ ledger: 'family', amountMinor: 5_000 }, { ledger: 'trip', amountMinor: 1_000 }])).status).toBe(200)
     expect(await w.unchanged(() => w.split(w.personal, pay, [{ ledger: 'family', amountMinor: 6_000 }], { headers: two }))).toMatchObject(cant('Trip'))
     expect(w.parts()).toEqual({ personal: OPENING - 18_000 - 6_000, family: -42_000 + 5_000, trip: 1_000 })
+  })
+})
+
+describe('what a ledger with a share is told of the payment', () => {
+  it('never has the payment’s amount in its activity, whatever happens to its share', async () => {
+    const w = await shared(setup(), ['personal', 'family', 'trip'])
+    const pay = await w.payment(w.personal, '2026-10-01', 54_321)
+    const theirs = await w.key('read', [w.family])
+    const activity = async (ctx: AppContext, headers: Headers) => {
+      const res = await w.call('GET', `${w.base(ctx)}/activity?limit=200`, undefined, headers)
+      expect(res.status).toBe(200)
+      // Nothing of the payment another ledger holds: not in a summary, not in what's kept beside it.
+      expect(JSON.stringify(res.body)).not.toMatch(/543\.21|54321/)
+      return (res.body.items as Json[]).filter((e) => e.action === 'split').map((e) => e.summary as string)
+    }
+    const family = (amountMinor: number) => [{ ledger: 'family', amountMinor }, { ledger: 'trip', amountMinor: 1_111 }]
+
+    expect((await w.split(w.personal, pay, family(8_000))).status).toBe(200)
+    expect((await activity(w.family, theirs))[0]).toBe('Personal gave this ledger a share of $80.00 of its payment onto Visa on 2026-10-01')
+    // The holder's own log has it in full.
+    expect((await w.call('GET', `${w.base(w.personal)}/activity?entity=transaction&limit=1`)).body.items[0].summary).toBe(
+      'Split the $543.21 payment onto Visa on 2026-10-01: Family $80.00, Trip $11.11, and Personal keeps $452.10',
+    )
+    expect((await w.split(w.personal, pay, family(9_000))).status).toBe(200)
+    expect((await activity(w.family, theirs))[0]).toBe('Personal changed this ledger’s share of its payment onto Visa on 2026-10-01 from $80.00 to $90.00')
+    expect((await w.split(w.personal, pay, [{ ledger: 'trip', amountMinor: 1_111 }])).status).toBe(200)
+    expect((await activity(w.family, theirs))[0]).toBe('Personal took back this ledger’s share of $90.00 of its payment onto Visa on 2026-10-01')
+    expect((await w.split(w.personal, pay, family(8_000))).status).toBe(200)
+    expect((await w.split(w.personal, pay, [])).status).toBe(200)
+    expect((await activity(w.family, theirs))[0]).toBe('Personal undid the split of its payment onto Visa on 2026-10-01, and this ledger’s share of $80.00 with it')
+
+    // A share can't move: the refusal names the payment by its account, date and holder.
+    expect((await w.split(w.personal, pay, family(8_000))).status).toBe(200)
+    const share = ((await w.call('GET', `${w.base(w.family)}/transactions?accountId=${w.visa}&from=2026-10-01`, undefined, theirs)).body.items as Json[])[0].id as number
+    expect(await w.move(w.family, [share], 'trip', { headers: await w.key('write', [w.family, w.trip]) })).toMatchObject({
+      status: 400,
+      message: 'Undo the split of the payment onto Visa on 2026-10-01 in Personal first.',
+    })
+
+    // Trip stops sharing and keeps its rows: its share is an ordinary transaction of its own.
+    const stop = await w.sharing({ ledgers: ['personal', 'family'], rows: { trip: 'keep' } })
+    expect(stop.status, stop.message).toBe(200)
+    expect(stop.body.notices[0]).toBe('Trip’s share of $11.11 of Personal’s payment on 2026-10-01 is an ordinary transaction now, and so is what Personal gave for it. No balance changes.')
+    expect((await activity(w.trip, await w.key('read', [w.trip])))[0]).toBe('This ledger’s share of $11.11 of Personal’s payment onto Visa on 2026-10-01 is its own transaction now')
+    // What the home keeps of it names the payment, which is its own.
+    const kept = (await w.call('GET', `${w.base(w.personal)}/activity?entity=account&limit=1`)).body.items[0]
+    expect(kept.after.splits).toEqual([{ done: 'detachedShare', holder: { slug: 'personal', name: 'Personal' }, date: '2026-10-01', paymentMinor: 54_321, amountMinor: 1_111, currency: 'CAD' }])
+
+    // Family is erased and its rows deleted: its share goes back, and what was done is kept in its log.
+    const erased = await w.call('POST', `${w.base(w.family)}/erase`, { confirm: 'erase', answers: { [`rows:${w.visa}`]: 'delete' } })
+    expect(erased.status, erased.message).toBe(200)
+    expect(erased.body.changes[0]).toBe('Family’s share of $80.00 of Personal’s payment on 2026-10-01 goes back to Personal.')
+    expect((await activity(w.family, theirs))[0]).toBe('Personal took back this ledger’s share of $80.00 of its payment onto Visa on 2026-10-01')
+    const log = (await w.call('GET', `${w.base(w.family)}/activity?entity=ledger&limit=1`, undefined, theirs)).body.items[0]
+    expect(log.after.changes).toEqual(erased.body.changes)
   })
 })
 
@@ -598,6 +691,52 @@ describe('the bank and a shared account over HTTP', () => {
     const remove = await w.unchanged(() => w.call('POST', `${url}/switch`, { bankAccountId: 'bank-card', from: preview.body.from, version: preview.body.version, pairs: [], skip: [], remove: [pay] }))
     expect(remove.status).toBe(409)
     expect(remove.message).toBe('Undo the split of the $100.00 payment onto Visa on 2026-10-01 first.')
+  })
+
+  it('deletes a split-off account only with a key allowed in the home of the account it was split off from, which keeps its bank ids', async () => {
+    const card: FakeCard = { balance: '-150.00', transactions: [fakeTx('b1', '2026-09-28', '-100.00', 'Grocer'), fakeTx('b2', '2026-09-30', '-50.00', 'Cafe')] }
+    const w = setup({ fetch: fakeBridge(card) })
+    const conn = await w.call('POST', '/bank/connections', { setupToken: TOKEN })
+    const bankAccountId = (conn.body.accounts as Json[]).find((a) => a.remoteId === 'visa').id as string
+    expect((await w.call('PUT', `${w.base(w.personal)}/accounts/${w.visa}/bank`, { bankAccountId })).status).toBe(200)
+    expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
+    const sync = () => w.call('POST', `/bank/connections/${conn.body.id}/sync`)
+    expect((await sync()).body).toMatchObject({ ok: true })
+    expect((await w.move(w.personal, await w.held(w.personal), 'family')).status).toBe(200)
+    // Family stops sharing and keeps its two synced rows on an account of its own.
+    const stop = await w.sharing({ ledgers: ['personal'], rows: { family: 'keep' } })
+    expect(stop.status, stop.message).toBe(200)
+    const own = stop.body.removed[0].account.id as number
+    const url = `${w.base(w.family)}/accounts/${own}`
+    const bankIds = () => w.personal.q.column<string>('SELECT external_id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND bank_id_only = 1 ORDER BY external_id', w.visa)
+    const latest = async () => (await w.call('GET', `${w.base(w.personal)}/activity?limit=1`)).body.items[0] as Json
+
+    // Deleting it leaves its bank ids on Visa, in Personal: a key for Family alone can't.
+    const theirs = await w.key('write', [w.family])
+    const before = await latest()
+    expect(await w.unchanged(() => w.call('DELETE', url, undefined, theirs))).toMatchObject(
+      refused('Family’s Visa was split off from Personal’s Visa, which keeps its bank ids. This key can’t use Personal, so it can’t delete Visa. Do it in the app.'),
+    )
+    expect(bankIds()).toEqual([])
+    expect(await latest()).toEqual(before)
+    // It still reads and changes the account, which is its own.
+    expect((await w.call('PATCH', url, { name: 'Old Visa' }, theirs)).status).toBe(200)
+
+    // A key for both ledgers can, and Personal's log says what Visa keeps.
+    expect((await w.call('DELETE', url, undefined, await w.key('write', [w.personal, w.family]))).status).toBe(204)
+    expect(bankIds()).toEqual(['b1', 'b2'])
+    expect(await latest()).toMatchObject({
+      actor: 'write personal+family',
+      action: 'update',
+      entity: 'account',
+      entityId: String(w.visa),
+      summary: 'Family’s Old Visa, split off from Visa, was deleted: Visa keeps the bank ids of its 2 transactions',
+      after: { bankIds: 2 },
+    })
+    // So a sync adds nothing again.
+    expect((await sync()).body).toMatchObject({ ok: true })
+    expect([await w.held(w.personal), await w.held(w.family)]).toEqual([[], []])
+    expect((await w.call('GET', `${w.base(w.family)}/accounts`)).body).toEqual([])
   })
 
   it('syncs with a key for the home alone, wherever the rows are held', async () => {

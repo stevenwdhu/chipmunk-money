@@ -29,7 +29,8 @@ import {
  * - Keys: a key limited to the other gets 403 on the subject.
  * - Shared accounts: the routes and tools that may reach another ledger say so (`across`). With the
  *   subject's card shared with the other ledger, a key limited to the subject is refused by each of
- *   them, and every other read still shows nothing of the other's.
+ *   them, and every other read still shows nothing of the other's. So is deleting an account the
+ *   subject kept its rows on when the other's card stopped being shared with it (`splitOff`).
  * All of it in both directions, with both ledgers on the shared category list and on their own.
  * The cases come from the API's own specs and the MCP server's tools/list: a new route or tool
  * without a case fails the test.
@@ -69,6 +70,13 @@ interface Case {
    * changes in either ledger.
    */
   across?: (c: C) => { params?: Record<string, number>; query?: Record<string, unknown>; body?: unknown; status?: number }
+  /**
+   * It may write in another ledger for an account split off from one of that ledger's: the account
+   * the subject kept its transactions on when the other ledger's card stopped being shared with it.
+   * These are its path parameters for that account: a key limited to the subject gets a 403, and
+   * nothing changes in either ledger.
+   */
+  splitOff?: (c: C) => Record<string, number>
 }
 
 const MISSING = 999_999_999
@@ -317,7 +325,11 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'PATCH /ledgers/:ledger/accounts/:id', params: (c) => ({ id: ids(c).card }), body: () => ({ name: 'Amex', notes: 'mine' }) },
     { route: 'POST /ledgers/:ledger/accounts/:id/balance', params: (c) => ({ id: ids(c).investment }), body: () => ({ date: '2026-10-01', balanceMinor: 2_600_000 }), kinds: { id: 'investment' } },
     { route: 'DELETE /ledgers/:ledger/accounts/:id/snapshots/:snapshotId', params: (c) => ({ id: ids(c).investment, snapshotId: ids(c).snapshot }), kinds: { id: 'investment' } },
-    { route: 'DELETE /ledgers/:ledger/accounts/:id', params: (c) => ({ id: find(c, "SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND name = 'Twin Savings'") }) },
+    {
+      route: 'DELETE /ledgers/:ledger/accounts/:id',
+      params: (c) => ({ id: find(c, "SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND name = 'Twin Savings'") }),
+      splitOff: (c) => ({ id: find(c, 'SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND split_from_id IS NOT NULL') }),
+    },
     {
       route: 'DELETE /ledgers/:ledger/institutions/:id',
       params: (c) => ({ id: find(c, "SELECT institution_id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?", ids(c).cash) }),
@@ -371,13 +383,28 @@ const importRows = [
 /** What a key limited to the subject gets for archiving or deleting it: the ledger the app opens isn't its to change (403) before anything is asked. */
 const goes = (c: C) => (c.t.storage.registry.defaultLedger().id === ledgerOf(c) ? 403 : 409)
 
+/**
+ * Answers that do for the subject once its card is shared with the other ledger: the other becomes
+ * the card's home, and (when the subject goes) its transactions on the card are deleted.
+ */
+const cardAnswers = (c: C, going = true) => ({ [`home:${ids(c).card}`]: c.other.slug, ...(going ? { [`rows:${ids(c).card}`]: 'delete' } : {}) })
+
 /** After the MCP tools: the ledger as a whole. */
 const ENDINGS: Case[] = [
-  // A ledger that has a shared account is asked what happens to it first, and a key that can't use every ledger that has it can't answer (409).
-  { route: 'PATCH /ledgers/:ledger', body: (c) => ({ color: '#16a34a', name: `${c.me.ctx.ledger.name} renamed` }), across: (c) => ({ body: { archived: true }, status: goes(c) }) },
-  { route: 'POST /ledgers/:ledger/erase', body: () => ({ confirm: 'erase' }), across: () => ({ status: 409 }) },
+  // A ledger that has a shared account is asked what happens to it first, and a key that can't use every
+  // ledger that has it can't answer (409). The answers sent are right, so only the key stops it.
+  {
+    route: 'PATCH /ledgers/:ledger',
+    body: (c) => ({ color: '#16a34a', name: `${c.me.ctx.ledger.name} renamed` }),
+    across: (c) => ({ body: { archived: true, answers: cardAnswers(c, false) }, status: goes(c) }),
+  },
+  { route: 'POST /ledgers/:ledger/erase', body: () => ({ confirm: 'erase' }), across: (c) => ({ body: { confirm: 'erase', answers: cardAnswers(c) }, status: 409 }) },
   { route: 'POST /ledgers/:ledger/setup/demo' },
-  { route: 'DELETE /ledgers/:ledger', body: (c) => ({ confirm: c.t.storage.registry.get(ledgerOf(c)).name }), across: (c) => ({ status: goes(c) }) },
+  {
+    route: 'DELETE /ledgers/:ledger',
+    body: (c) => ({ confirm: c.t.storage.registry.get(ledgerOf(c)).name }),
+    across: (c) => ({ body: { confirm: c.t.storage.registry.get(ledgerOf(c)).name, answers: cardAnswers(c) }, status: goes(c) }),
+  },
 ]
 
 // MCP ------------------------------------------------------------------------------------------
@@ -810,6 +837,17 @@ for (const world of WORLDS) {
           const req = await request(c, { ...k, params: a.params ? () => a.params! : k.params, query: a.query ? () => a.query! : undefined, body: 'body' in a ? () => a.body : k.body })
           const res = await send(t.app, req, limited)
           if (res.status !== (a.status ?? 403) || holds(res.body, c.other.canary)) answers.push([label(k, req), res.status, res.message])
+          // A 409 is the key's alone: the app, with the same request, would be let through (a dry run).
+          if (a.status === 409) {
+            const asApp = await send(t.app, { ...req, query: { ...req.query, dryRun: true } })
+            if (asApp.status !== 200 || asApp.body.dryRun !== true) answers.push([`${label(k, req)} as the app`, asApp.status, asApp.message])
+          }
+        }
+        // And the key is told why, whichever way the ledger would go.
+        for (const action of ['delete', 'erase', 'archive']) {
+          const asked = await send(t.app, { method: 'GET', path: `${base}/questions`, query: { action } }, limited)
+          const blockers: string[] = asked.status === 200 ? asked.body.blockers : []
+          if (blockers.length !== 1 || !/^This key can’t use every ledger that has /.test(blockers[0]!)) answers.push([`questions for ${action}`, asked.status, asked.body])
         }
         expect(answers).toEqual([])
 
@@ -834,6 +872,23 @@ for (const world of WORLDS) {
         await client.close()
         await settle()
         expect([ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]).toEqual(before)
+
+        // The other ledger's card, shared with the subject, which kept its row on an account of its
+        // own when that stopped: what would leave that account's bank ids with the other's card is refused.
+        const their = `/ledgers/${c.other.slug}/accounts/${c.other.ids.card}/sharing`
+        await ok({ method: 'PUT', path: their, body: { ledgers: [c.other.slug, c.me.slug] } })
+        await ok({ method: 'POST', path: `${base}/transactions`, body: { accountId: c.other.ids.card, date: '2026-10-01', amountMinor: -1_234, payee: 'OURS ON THEIRS' } })
+        await ok({ method: 'PUT', path: their, body: { ledgers: [c.other.slug], rows: { [c.me.slug]: 'keep' } } })
+        await settle()
+        const kept = [ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]
+        const splitOff = writeCases(world.own).filter((k) => k.splitOff)
+        expect(splitOff.map((k) => k.route)).toEqual(['DELETE /ledgers/:ledger/accounts/:id'])
+        for (const k of splitOff) {
+          const req = await request(c, { ...k, params: k.splitOff })
+          const res = await send(t.app, req, limited)
+          expect([res.status, res.message], label(k, req)).toEqual([403, expect.stringMatching(/ was split off from .* This key can’t use .*, so it can’t delete /)])
+        }
+        expect([ledgerHash(t.storage, c.me.ctx.ledger.id), ledgerHash(t.storage, c.other.ctx.ledger.id)]).toEqual(kept)
       })
     }
   })

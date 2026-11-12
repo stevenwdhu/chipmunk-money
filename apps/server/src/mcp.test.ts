@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ApiKeyCreated } from '@chipmunk/shared'
 import { createApp } from './app'
 import { startDemo } from './services/setup'
-import { testStorage } from './test/helpers'
+import { categoryId, testStorage } from './test/helpers'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -303,7 +303,7 @@ describe('MCP server', () => {
   })
 
   it('archives a shared account’s home only once its question is answered, and refuses what a key for one ledger can’t reach', async () => {
-    const { key, connect, call, api } = await setup()
+    const { storage, key, connect, call, api } = await setup()
     await api('POST', '/ledgers', { name: 'Family' })
     const admin = await connect(await key('Admin', ['admin']))
     const visa = ((await call(admin, 'list_accounts')).data.accounts as Json[]).find((a) => a.type === 'credit')
@@ -338,21 +338,23 @@ describe('MCP server', () => {
     expect(blocked.data.blockers).toHaveLength(1)
     expect(blocked.data.ledger).toBeUndefined()
     expect(blocked.text).toContain('Personal can’t be archived:')
-    // Nor move, split, stop sharing or list the whole account, and it sees its part beside the total.
-    const purchase = ((await call(limited, 'search_transactions', { account: visa.id, limit: 1 })).data.transactions as Json[])[0]
-    for (const [tool, args] of [
-      ['move_transactions', { ids: [purchase.id], to: 'family' }],
-      ['split_transaction', { id: purchase.id, shares: [{ ledger: 'family', amount: 1 }] }],
-      ['share_account', { account: visa.id, ledgers: ['personal'] }],
-      ['list_account_transactions', { account: visa.id }],
-    ] as const) {
-      expect([tool, (await call(limited, tool, args)).isError]).toEqual([tool, true])
-    }
+    // Nor stop sharing or list the whole account, and it sees its part beside the total.
+    // A move or a split with Family never reaches the server: the tool can't name a ledger the key
+    // can't use (the server's own 403s are tested over HTTP).
+    const cardPayment = categoryId(storage.registry.context('personal'), 'Credit card payment')
+    const payment = await api('POST', '/ledgers/personal/transactions', { accountId: visa.id, date: '2026-10-01', amountMinor: 10_000, payee: 'PAYMENT THANK YOU', categoryId: cardPayment })
+    const unknown = 'There\'s no ledger called “family”. Ledgers: Personal (personal).'
+    expect((await call(limited, 'move_transactions', { ids: [payment.id], to: 'family' })).text).toBe(unknown)
+    expect((await call(limited, 'split_transaction', { id: payment.id, shares: [{ ledger: 'family', amount: 1 }] })).text).toBe(unknown)
+    // The admin's key splits the same payment, so only the ledger stopped the other.
+    expect((await call(admin, 'split_transaction', { ledger: 'personal', id: payment.id, shares: [{ ledger: 'family', amount: 1 }], dryRun: true })).isError).toBe(false)
+    // Nor can it name Family to share_account, so that tool never shows it a ledger it can't use.
+    expect((await call(limited, 'share_account', { account: visa.id, ledgers: ['personal', 'family'], dryRun: true })).text).toBe(unknown)
     expect((await call(limited, 'share_account', { account: visa.id, ledgers: ['personal'] })).text).toBe(`Not allowed: This key can’t use every ledger that has ${visa.name}, so it can’t stop sharing it with Family. Do it in the app.`)
     expect((await call(limited, 'list_account_transactions', { account: visa.id })).text).toBe(`Not allowed: This key can’t see every ledger that has ${visa.name}`)
     expect(((await call(limited, 'list_accounts')).data.accounts as Json[]).find((a) => a.id === visa.id)).toMatchObject({
-      balanceMinor: visa.balanceMinor,
-      sharing: { home: 'personal', isHome: true, ledgers: ['personal', 'family'], totalBalanceMinor: visa.balanceMinor },
+      balanceMinor: visa.balanceMinor + 10_000,
+      sharing: { home: 'personal', isHome: true, ledgers: ['personal', 'family'], totalBalanceMinor: visa.balanceMinor + 10_000 },
     })
 
     const done = await call(admin, 'archive_ledger', { ledger: 'personal', answers: { [`home:${visa.id}`]: 'family' } })

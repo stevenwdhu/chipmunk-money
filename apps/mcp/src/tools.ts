@@ -801,7 +801,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'write',
     title: 'Move transactions to another ledger',
     description:
-      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link or transfer pair moves only when both its sides do, and is let go otherwise. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.',
+      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.',
     input: z.object({
       ledger,
       ids: z.array(z.number().int()).min(1).max(1000).describe('Transactions this ledger holds, on accounts shared with `to`.'),
@@ -2023,7 +2023,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'admin',
     title: 'Share an account with other ledgers',
     description:
-      'Sets which ledgers have a credit card, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the card, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the card needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after.',
+      'Sets which ledgers have an account, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. Only credit cards can be shared. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the account, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the account needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after. A ledger the key can’t use is given by name only, with no count or balance.',
     input: z.object({
       ledger,
       account: nameOrId,
@@ -2044,8 +2044,10 @@ export const TOOLS: ToolDef[] = [
       accountId: z.number(),
       home: z.string().describe('Its home afterwards, by slug.'),
       ledgers: z
-        .array(z.object({ ledger: z.string(), name: z.string(), transactionCount: z.number(), balanceMinor: z.number(), balance: z.string() }))
-        .describe('Every ledger that has it afterwards, the home first, each with what it holds of the account.'),
+        .array(
+          z.object({ ledger: z.string(), name: z.string(), transactionCount: z.number().nullable(), balanceMinor: z.number().nullable(), balance: z.string().nullable() }),
+        )
+        .describe('Every ledger that has it afterwards, the home first, each with what it holds of the account. The count and balance are null for a ledger the key can’t use.'),
       totalBalanceMinor: z.number(),
       totalBalance: z.string(),
       added: z.array(z.string()).describe('The ledgers it’s now shared with too.'),
@@ -2061,8 +2063,8 @@ export const TOOLS: ToolDef[] = [
           }),
         )
         .describe('The ledgers that no longer have it.'),
-      before: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account before, by slug.'),
-      after: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account afterwards, by slug.'),
+      before: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account before, by slug. None for a ledger the key can’t use.'),
+      after: z.record(z.string(), z.string()).describe('Each ledger’s balance on the account afterwards, by slug. None for a ledger the key can’t use.'),
       notices: z.array(z.string()).describe('What to tell the owner about it.'),
     }),
     annotations: { ...WRITE, destructiveHint: true, idempotentHint: true },
@@ -2080,7 +2082,13 @@ export const TOOLS: ToolDef[] = [
         { dryRun: args.dryRun },
       )
       const cur = account.currency
-      const part = (p: AccountSharing['home']) => ({ ledger: p.slug, name: p.name, transactionCount: p.transactionCount, balanceMinor: p.balanceMinor, balance: money(p.balanceMinor, cur) })
+      const part = (p: AccountSharing['home']) => ({
+        ledger: p.slug,
+        name: p.name,
+        transactionCount: p.transactionCount,
+        balanceMinor: p.balanceMinor,
+        balance: p.balanceMinor === null ? null : money(p.balanceMinor, cur),
+      })
       const has = [r.sharing.home, ...r.sharing.members].map(part)
       const removed = r.removed.map((x) => ({
         ledger: x.ledger.slug,
@@ -2093,7 +2101,7 @@ export const TOOLS: ToolDef[] = [
       const would = args.dryRun ? 'would be' : 'is'
       const text = [
         has.length > 1
-          ? `${account.name} ${would} shared by ${has.map((p) => `${p.name} (${p.balance})`).join(', ')}: ${money(r.sharing.totalBalanceMinor, cur)} in all. Its home ${would} ${r.sharing.home.name}.`
+          ? `${account.name} ${would} shared by ${has.map((p) => (p.balance === null ? p.name : `${p.name} (${p.balance})`)).join(', ')}: ${money(r.sharing.totalBalanceMinor, cur)} in all. Its home ${would} ${r.sharing.home.name}.`
           : `${account.name} ${would} in ${r.sharing.home.name} only (${money(r.sharing.totalBalanceMinor, cur)}).`,
         ...removed.map((x) =>
           x.account

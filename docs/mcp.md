@@ -358,7 +358,7 @@ No arguments.
 
 #### `move_transactions`
 
-**Move transactions to another ledger.** Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link or transfer pair moves only when both its sides do, and is let go otherwise. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.
+**Move transactions to another ledger.** Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
@@ -588,7 +588,7 @@ No arguments.
 
 #### `share_account`
 
-**Share an account with other ledgers.** Sets which ledgers have a credit card, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the card, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the card needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after.
+**Share an account with other ledgers.** Sets which ledgers have an account, and which is its home: the ledger new transactions from sync and CSV go to, and where its settings are changed. Only credit cards can be shared. `ledgers` is every ledger that will have it, the home included. Adding a ledger moves nothing and changes no balance: it can then enter transactions on the account, and take ones moved to it (move_transactions). Taking a ledger out that holds transactions on the account needs `rows` for it. Only the home in `ledgers` stops the sharing. Call it in the account’s home, with a key that can use the home and every ledger added (every ledger that has the account, when one is taken out). Use `dryRun: true` first: it gives each ledger’s balance before and after. A ledger the key can’t use is given by name only, with no count or balance.
 
 | Argument | Type | | What it is |
 |---|---|---|---|

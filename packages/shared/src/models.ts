@@ -95,8 +95,14 @@ export type Account = z.output<typeof accountSchema>
 
 const ledgerPart = ledgerRef.extend({
   archived: z.boolean().describe('Whether the ledger is archived.'),
-  transactionCount: z.number().int().describe('The transactions it holds on the account, deleted ones left out.'),
-  balanceMinor: minor.describe('Its balance on the account: what it holds, and for the opening ledger also the opening balance and recorded balances.'),
+  transactionCount: z
+    .number()
+    .int()
+    .nullable()
+    .describe('The transactions it holds on the account, deleted ones left out. Null for a ledger the API key can’t use.'),
+  balanceMinor: minor
+    .nullable()
+    .describe('Its balance on the account: what it holds, and for the opening ledger also the opening balance and recorded balances. Null for a ledger the API key can’t use.'),
 })
 
 export const accountSharingSchema = z
@@ -155,7 +161,7 @@ export const sharingChangeSchema = z
       .describe('The opening balance and recorded balances going to the home, because the ledger that carried them left. Null otherwise.'),
     parts: z
       .object({ before: z.record(z.string(), minor), after: z.record(z.string(), minor) })
-      .describe('Each ledger’s balance on the account today, by slug, before and after. A ledger that left has none after.'),
+      .describe('Each ledger’s balance on the account today, by slug, before and after. A ledger that left has none after, and a ledger the API key can’t use has neither.'),
     notices: z.array(z.string()).describe('What to tell the owner about it, in words.'),
   })
   .meta({ id: 'SharingChange' })

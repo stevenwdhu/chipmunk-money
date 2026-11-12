@@ -223,12 +223,12 @@ describe('moving part of a split', () => {
     refused(
       () => w.move(family, [of('family', w.a)], personal),
       400,
-      'Undo the split of the $100.00 payment onto Visa on 2026-08-20 in Personal first.',
+      'Undo the split of the payment onto Visa on 2026-08-20 in Personal first.',
     )
     refused(
       () => w.move(personal, [of('personal', w.b)], family),
       400,
-      'Undo the split of the $60.00 payment onto Visa on 2026-09-05 in Trip first.',
+      'Undo the split of the payment onto Visa on 2026-09-05 in Trip first.',
     )
     refused(
       () => w.move(trip, [w.b], personal),
@@ -254,7 +254,7 @@ describe('moving part of a split', () => {
           TESTER,
         ),
       400,
-      'Undo the split of the $100.00 payment onto Visa on 2026-08-20 in Personal first.',
+      'Undo the split of the payment onto Visa on 2026-08-20 in Personal first.',
     )
     expect(w.everything()).toEqual(before)
 
@@ -350,8 +350,8 @@ describe('stopping sharing with a ledger that takes part in splits', () => {
       },
     ])
     expect(change.notices).toEqual([
-      'Family’s share of $50.00 of the $100.00 payment on 2026-08-20 goes back to Personal, which holds the payment.',
-      'Family’s share of $25.00 of Trip’s $60.00 payment on 2026-09-05 is an ordinary transaction now, and so is what Trip gave for it. No balance changes.',
+      'Family’s share of $50.00 of Personal’s payment on 2026-08-20 goes back to Personal.',
+      'Family’s share of $25.00 of Trip’s payment on 2026-09-05 is an ordinary transaction now, and so is what Trip gave for it. No balance changes.',
       'The split of Family’s $40.00 payment on 2026-09-25 ends. Each share of it is an ordinary transaction where it is, and no balance changes.',
     ])
     // Personal takes Family's part, −115, less the $50 it gave Family back: −145 + 50 − 165.
@@ -449,8 +449,8 @@ describe('stopping sharing with a ledger that takes part in splits', () => {
       },
     ])
     expect(change.notices.slice(0, 3)).toEqual([
-      'Family’s share of $50.00 of Personal’s $100.00 payment on 2026-08-20 is an ordinary transaction now, and so is what Personal gave for it. No balance changes.',
-      'Family’s share of $25.00 of Trip’s $60.00 payment on 2026-09-05 is an ordinary transaction now, and so is what Trip gave for it. No balance changes.',
+      'Family’s share of $50.00 of Personal’s payment on 2026-08-20 is an ordinary transaction now, and so is what Personal gave for it. No balance changes.',
+      'Family’s share of $25.00 of Trip’s payment on 2026-09-05 is an ordinary transaction now, and so is what Trip gave for it. No balance changes.',
       'The split of Family’s $40.00 payment on 2026-09-25 ends. Each share of it is an ordinary transaction where it is, and no balance changes.',
     ])
     // C, pending with a bank id, went home once ordinary. Its given row, which has no bank id, stayed.
@@ -639,7 +639,10 @@ describe('when the bank changes a split payment', () => {
         "SELECT actor, summary FROM activity WHERE ledger_id = @ledger AND action = 'split' ORDER BY id DESC LIMIT 1",
       )!
       expect(last.actor).toBe('Plaid sync')
-      expect(last.summary).toMatch(/undid the split of the \$70\.00 payment onto Visa on 2026-08-22/i)
+      // The holder's log names the payment's amount, and the others' only their share.
+      expect(last.summary).toBe(
+        c === personal ? 'Undid the split of the $70.00 payment onto Visa on 2026-08-22' : `Personal undid the split of its payment onto Visa on 2026-08-22, and this ledger’s share of ${c === family ? '$50.00' : '$30.00'} with it`,
+      )
     }
   })
 

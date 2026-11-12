@@ -186,7 +186,7 @@ describe('splitting a card payment', () => {
     for (const c of [personal, family]) expect(c.q.pluck('SELECT count(*) FROM payee_category_stats WHERE ledger_id = @ledger AND payee_key IN (?, ?)', 'payment thank you', 'split between ledgers')).toBe(0)
 
     expect(w.activity(personal)).toEqual(['Split the $100.00 payment onto Visa on 2026-09-20: Family $80.00, and Personal keeps $20.00'])
-    expect(w.activity(family)).toEqual(['Personal gave this ledger a share of $80.00 of the $100.00 payment onto Visa on 2026-09-20'])
+    expect(w.activity(family)).toEqual(['Personal gave this ledger a share of $80.00 of its payment onto Visa on 2026-09-20'])
   })
 
   it('changes nothing in a dry run, and answers as the split would be', () => {
@@ -263,8 +263,8 @@ describe('splitting a card payment', () => {
     expect(w.split(personal, paid, {})).toMatchObject({ keptMinor: 10_000, shares: [], transaction: { split: null } })
     expect(w.splitRows()).toEqual([])
     expect(w.check()).toEqual({ personal: -10_000, family: -20_000, trip: -10_000 })
-    expect(w.activity(trip).at(-1)).toBe('Personal undid the split of the $100.00 payment onto Visa on 2026-09-20, and this ledger’s share of $30.00 with it')
-    expect(w.activity(family)).toContain('Personal changed this ledger’s share of the $100.00 payment onto Visa on 2026-09-20 from $25.00 to $70.00')
+    expect(w.activity(trip).at(-1)).toBe('Personal undid the split of its payment onto Visa on 2026-09-20, and this ledger’s share of $30.00 with it')
+    expect(w.activity(family)).toContain('Personal changed this ledger’s share of its payment onto Visa on 2026-09-20 from $25.00 to $70.00')
   })
 
   it('splits a payment paired with its withdrawal, and a pending one, and keeps the given row in the payment’s own category', () => {

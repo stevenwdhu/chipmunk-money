@@ -445,8 +445,8 @@ describe('deleting a ledger that takes part in split payments', () => {
       note: 'Delete them: Personal’s balance on Visa changes by +$40.00, and Trip’s balance on Visa changes by +$20.00. Move to Personal: Personal’s balance on Visa changes by -$310.00. Move to Trip: Trip’s balance on Visa changes by -$310.00.',
     })
     expect(w.act(w.family, 'delete', { rows: 'delete' })).toEqual([
-      'Family’s share of $40.00 of the $100.00 payment on 2026-09-22 goes back to Personal, which holds the payment.',
-      'Family’s share of $20.00 of the $60.00 payment on 2026-09-24 goes back to Trip, which holds the payment.',
+      'Family’s share of $40.00 of Personal’s payment on 2026-09-22 goes back to Personal.',
+      'Family’s share of $20.00 of Trip’s payment on 2026-09-24 goes back to Trip.',
       'The split of Family’s $80.00 payment on 2026-09-26 ends. Each share of it is an ordinary transaction where it is, and no balance changes.',
       'Family’s 4 transactions on Visa were deleted.',
       'Family and all its data were deleted.',
@@ -469,8 +469,8 @@ describe('deleting a ledger that takes part in split payments', () => {
     const w = split()
     const before = w.history()
     expect(w.act(w.family, 'erase', { rows: 'move:trip' })).toEqual([
-      'Family’s share of $40.00 of Personal’s $100.00 payment on 2026-09-22 is an ordinary transaction now, and so is what Personal gave for it. No balance changes.',
-      'Family’s share of $20.00 of the $60.00 payment on 2026-09-24 goes back to Trip, which holds the payment.',
+      'Family’s share of $40.00 of Personal’s payment on 2026-09-22 is an ordinary transaction now, and so is what Personal gave for it. No balance changes.',
+      'Family’s share of $20.00 of Trip’s payment on 2026-09-24 goes back to Trip.',
       'The split of Family’s $80.00 payment on 2026-09-26 ends. Each share of it is an ordinary transaction where it is, and no balance changes.',
       'Family’s 5 transactions on Visa moved to Trip.',
       'Family’s data was erased.',

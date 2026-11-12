@@ -298,15 +298,36 @@ export function updateAccount(ctx: AppContext, id: number, input: AccountUpdate)
  * Deletes one of this ledger's accounts. Its transactions, balances and imports go with it, and its
  * bank link is unlinked (foreign keys). A shared account is refused in every ledger that has it:
  * the other ledgers hold rows on it. An account a ledger kept its rows on when it stopped sharing
- * one leaves that one the bank ids it must keep knowing first (leaveSplitOffBankIds).
+ * one leaves that one the bank ids it must keep knowing first (leaveSplitOffBankIds), in that one's
+ * home. So when that home is another ledger, a caller limited to some ledgers (`usable`, by id, or
+ * null for all) must be allowed in it too: a 403 otherwise, before anything changes. Returns what
+ * was left there (`kept`), for the activity log of that home, or null when nothing was.
  */
-export function deleteAccount(ctx: AppContext, ctxOf: CtxOf, id: number) {
+export function deleteAccount(ctx: AppContext, ctxOf: CtxOf, id: number, usable: readonly string[] | null = null): { kept: SplitOffKept | null } {
   const a = getAccount(ctx, id)
   if (ctx.accountWide.isShared(id)) throw new HTTPException(409, { message: `Stop sharing ${a.name} first.` })
-  ctx.q.transaction(() => {
-    leaveSplitOffBankIds(ctx, ctxOf, id)
+  const parent = ctx.accountWide.splitOffParent(id)
+  const elsewhere = parent && parent.homeLedgerId !== ctx.ledger.id ? ctxOf(parent.homeLedgerId).ledger : null
+  if (parent && elsewhere && usable && !usable.includes(elsewhere.id)) {
+    throw new HTTPException(403, {
+      message: `${ctx.ledger.name}’s ${a.name} was split off from ${elsewhere.name}’s ${parent.name}, which keeps its bank ids. This key can’t use ${elsewhere.name}, so it can’t delete ${a.name}. Do it in the app.`,
+    })
+  }
+  return ctx.q.transaction(() => {
+    const bankIds = leaveSplitOffBankIds(ctx, ctxOf, id)
     ctx.q.run('DELETE FROM accounts WHERE id = ? AND ledger_id = @ledger', id)
+    return { kept: parent && elsewhere && bankIds ? { account: { id: parent.id, name: parent.name }, homeLedgerId: elsewhere.id, bankIds } : null }
   })
+}
+
+/** What a split-off account that was deleted left the account it was split off from, in another ledger. */
+export interface SplitOffKept {
+  /** The account it was split off from. */
+  account: { id: number; name: string }
+  /** That account's home, by id. */
+  homeLedgerId: string
+  /** How many rows kept only for their bank ids were left on it. */
+  bankIds: number
 }
 
 /**
