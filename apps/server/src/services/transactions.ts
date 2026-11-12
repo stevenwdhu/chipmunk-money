@@ -16,12 +16,14 @@ import {
   type Transaction,
   type TransactionPage,
   type TransactionSpan,
+  type AccountTransaction,
   type AccountTransactionPage,
 } from '@chipmunk/shared'
 import type { z } from 'zod'
 import type { bulkUpdateSchema, transactionCreateSchema, transactionQuerySchema, transactionUpdateSchema } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest, notFound } from '../lib/http'
+import type { AccountTransactionRow, SplitShare } from './account-rows'
 import { currentParts, getAccount } from './accounts'
 import { diff } from './activity'
 import { listScope, positional, textLike } from './filters'
@@ -504,7 +506,9 @@ const CURSOR = /^\d{4}-\d{2}-\d{2}\|[012]\|[\d:T-]*\|\d{12}$/
  * A shared account's transactions in every ledger that has it, one page at a time, newest first as
  * the register lists them, from `from` to `to`: each with the ledger that holds it (`here` when it's
  * this one), its category by name, and the account's total balance after it, so the list reads like
- * the bank's statement and its newest row ends at the account's total. Nothing else of another
+ * the bank's statement and its newest row ends at the account's total. A payment split between the
+ * ledgers is listed as the bank has it, with each other ledger's share (`split`), and the rows its
+ * split adds aren't listed: they sum to zero, so the running balance is the same. Nothing else of another
  * ledger's: no ids of its categories, tags, links or recurring items. Only for a shared account
  * (409 otherwise), and only for a caller allowed in every ledger that has it (`allowed`, null for
  * every ledger): 403 otherwise. Besides a bank switch's review, the one place another ledger's rows
@@ -530,6 +534,16 @@ export function listAccountTransactions(
   // The account's total less everything listed above the first row (newer, or later the same day), in every ledger.
   let after = first ? currentParts(ctx, accountId).totalMinor - ctx.accountWide.sumAfter(accountId, first.sortKey) : 0
   const named = payeeNamerFor(ctx)
+  // The split payments' shares, by payment: the holder's given row is all of them.
+  const splits = new Map<number, SplitShare[]>()
+  for (const s of page.length ? ctx.accountWide.splitShares(page.map((r) => r.id)) : []) splits.set(s.paymentId, [...(splits.get(s.paymentId) ?? []), s])
+  const splitOf = (r: AccountTransactionRow): AccountTransaction['split'] => {
+    const list = splits.get(r.id)
+    if (!list) return null
+    const given = list.find((s) => s.ledgerId === s.holder.ledgerId)?.amountMinor ?? 0
+    const shares = list.filter((s) => s.ledgerId !== s.holder.ledgerId).map((s) => ({ ledger: { slug: s.slug, name: s.name }, amountMinor: s.amountMinor }))
+    return { keptMinor: r.amountMinor + given, shares }
+  }
   const items = page.map((r) => {
     const balanceAfterMinor = after
     after -= r.amountMinor
@@ -548,6 +562,7 @@ export function listAccountTransactions(
       notes: r.notes,
       status: r.status,
       origin: r.origin,
+      split: splitOf(r),
       balanceAfterMinor,
     }
   })

@@ -13,6 +13,7 @@ import { categorizeUncategorized } from './import'
 import { getInstitution, removeIfEmpty, resolveInstitution } from './institutions'
 import { MOVE_LIMIT, moveTransactions, sendAsDeleted } from './moves'
 import { today } from './settings'
+import { leaveSplits, type LeftSplit } from './splits'
 
 /**
  * Sharing an account with other ledgers. The account stays in its home (accounts.ledger_id), and
@@ -62,7 +63,9 @@ function inHome(ctx: AppContext, accountId: number): { account: Account; ledgers
  * one's opening balance: the account would be left without its home or that balance. A 409 naming
  * the account and another ledger that has it, then what to do first (`then`). Run it before the
  * safety copy and the transaction. A ledger an account is only shared with can go, and its member
- * row goes with it.
+ * row goes with it, unless it takes part in a split payment on it: its rows going would leave the
+ * other half of the split behind, so it's refused too (409) until the questions asked before a
+ * ledger goes let go of its splits first (leaveLedgerSplits).
  */
 export function refuseWhileSharing(ctx: AppContext, then = 'Stop sharing it first.'): void {
   for (const accountId of ctx.accountWide.sharedAccounts(ctx.ledger.id)) {
@@ -71,6 +74,10 @@ export function refuseWhileSharing(ctx: AppContext, then = 'Stop sharing it firs
     if (!here?.isHome && !here?.isOpening) continue
     const other = ledgers.find((l) => l.ledgerId !== ctx.ledger.id)!
     throw new HTTPException(409, { message: `${ctx.accountWide.account(accountId)!.name} is shared with ${other.name}. ${then}` })
+  }
+  const split = ctx.q.pluck<number>('SELECT account_id FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL ORDER BY id LIMIT 1')
+  if (split !== undefined) {
+    throw new HTTPException(409, { message: `A payment onto ${ctx.accountWide.account(split)!.name} is split between ${ctx.ledger.name} and other ledgers. ${then}` })
   }
 }
 
@@ -250,6 +257,12 @@ export interface Left {
   recurringItems: number
   /** Its imports into the account (it had some only if it was the home once), deleted. */
   importBatches: number
+  /**
+   * The split payments it took part in, let go of before its rows went: a payment it held has its
+   * split detached (each split row an ordinary row where it is), and its share of another ledger's
+   * payment is detached too, or with "home" dropped when the home holds the payment.
+   */
+  splits: LeftSplit[]
 }
 
 /**
@@ -293,16 +306,18 @@ function moveChunks(member: AppContext, accountId: number): number[][] {
 }
 
 /**
- * Split payments, before a ledger's rows leave the account: a payment it holds that's split has its
- * split detached, and so do its shares of other ledgers' payments (with "home", a share of a payment
- * the home holds is dropped instead). Nothing can be split yet, so there's nothing to do. This is
- * where that goes.
+ * Split payments, before a ledger's rows leave the account (leaveSplits): a payment it holds that's
+ * split has its split detached, and so do its shares of other ledgers' payments, so no other
+ * ledger's part changes at any date. With "home", a share of a payment the home holds is dropped
+ * instead: its rows go to the home, so the balances come out the same, with fewer rows. Then it
+ * holds no split row on the account, or it all rolls back: neither a move nor sending rows away as
+ * deleted takes one.
  */
-function detachSplits(home: AppContext, member: AppContext, accountId: number, rows: RowsChoice | null): void {
-  void home
-  void member
-  void accountId
-  void rows
+function letSplitsGo(home: AppContext, member: AppContext, ctxOf: CtxOf, accountId: number, rows: RowsChoice | null, actor: ActivityActor): LeftSplit[] {
+  const { splits } = leaveSplits(member, ctxOf, accountId, { shares: (holder) => (rows === 'home' && holder === home.ledger.id ? 'drop' : 'detach'), actor })
+  const left = member.q.pluck<number>('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND split_of IS NOT NULL', accountId)!
+  if (left) throw new Error(`${member.ledger.name} still holds ${left} split rows on account ${accountId} after letting its splits go`)
+  return splits
 }
 
 /** What keeping a leaving ledger's rows on an account of its own did, for `leave` to finish and report. */
@@ -442,7 +457,10 @@ function rebalance(home: AppContext, accountId: number, kept: Kept): number {
  * 1. If it's the opening ledger, the home becomes the opening ledger. What that alone adds to the
  *    home's part today is returned (`openingBase`): measured before the rows move home, it's the
  *    opening balance and recorded balances' share, not the whole change in the home's part.
- * 2. Its rows. With "home": its live rows on the account move home (moveTransactions, in chunks, the
+ * 2. Its rows. First its split payments (letSplitsGo): a payment it holds has its split detached,
+ *    and its shares of other ledgers' payments are detached, or with "home" dropped when the home
+ *    holds the payment, so every row it then has on the account is an ordinary one. With "home":
+ *    its live rows on the account move home (moveTransactions, in chunks, the
  *    categorizing deferred to the caller), its deleted ones go home still deleted (sendAsDeleted),
  *    and its recurring items on the account are on no account from then on. With "keep": they stay
  *    in it, on an account of its own (keepOnOwnAccount), but for its pending ones with a bank id,
@@ -475,7 +493,7 @@ function leave(
   }
 
   // 2. Its rows: its splits first, then home, live then deleted, or kept on its own account.
-  detachSplits(home, member, accountId, rows)
+  const splits = letSplitsGo(home, member, ctxOf, accountId, rows, actor)
   let moved = 0
   let sentAsDeleted = 0
   let recurringItems = 0
@@ -509,9 +527,10 @@ function leave(
   const rebalanced = kept ? rebalance(home, accountId, kept) : 0
 
   const ownAccount = kept ? { ...kept.account, balanceMinor: getAccount(member, kept.account.id).balanceMinor } : null
-  const left: Left = { ledger: named(leaving), rows, moved, sentAsDeleted, kept: kept?.kept ?? 0, account: ownAccount, recurringItems, importBatches }
+  const left: Left = { ledger: named(leaving), rows, moved, sentAsDeleted, kept: kept?.kept ?? 0, account: ownAccount, recurringItems, importBatches, splits }
   const after = {
     rows,
+    ...(splits.length ? { splits } : {}),
     moved,
     sentAsDeleted,
     recurringItems,
@@ -549,6 +568,20 @@ function leave(
     })
   }
   return { left, openingBase, deferred }
+}
+
+/** What happened to a split payment a ledger that left took part in, in words. */
+function splitNotice(leaving: LedgerName, s: LeftSplit): string {
+  const money = (minor: number) => formatMoney(minor, s.currency)
+  const payment = `the ${money(s.paymentMinor)} payment on ${s.date}`
+  switch (s.done) {
+    case 'detachedSplit':
+      return `The split of ${leaving.name}’s ${money(s.paymentMinor)} payment on ${s.date} ends. Each share of it is an ordinary transaction where it is, and no balance changes.`
+    case 'droppedShare':
+      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${payment} goes back to ${s.holder.name}, which holds the payment.`
+    case 'detachedShare':
+      return `${leaving.name}’s share of ${money(s.amountMinor)} of ${s.holder.name}’s ${money(s.paymentMinor)} payment on ${s.date} is an ordinary transaction now, and so is what ${s.holder.name} gave for it. No balance changes.`
+  }
 }
 
 /**
@@ -606,15 +639,17 @@ export interface SharingChange {
  * 3. Ledgers taken out (leave), through the home's context, the new one after a change. A ledger that
  *    holds transactions on it must be told where they go in `rows` (a 400 otherwise): "home" sends
  *    them to the home, and "keep" keeps them in that ledger, on a new manual account of its own, its
- *    pending ones with a bank id aside (they go home). The account's total is then the whole bank
- *    balance again, recorded as its balance today, so what that ledger kept is in both ledgers until
- *    someone records how it was settled. The notices say so.
+ *    pending ones with a bank id aside (they go home). Either way its split payments are let go of
+ *    first (letSplitsGo), which changes the part of no ledger but the home's and its own. The
+ *    account's total is then the whole bank balance again, recorded as its balance today, so what
+ *    that ledger kept is in both ledgers until someone records how it was settled. The notices say so.
  * Refused: under a member (409), while the home ledger is archived, a ledger that doesn't exist, the
  * current home left out without naming a new one, a home not in the list (400), and what each step
  * refuses. A dry run works it all out and reports it (the counts, each ledger's part before and
- * after, what the opening balance going to the home brings it, and with "keep" what's kept, what goes
- * home and the new account's balance), then changes nothing. After the commit, and not in a dry run,
- * AI categorizes in the home what came to it uncategorized (when AI is on).
+ * after, what the opening balance going to the home brings it, what happens to each split payment a
+ * leaving ledger took part in, and with "keep" what's kept, what goes home and the new account's
+ * balance), then changes nothing. After the commit, and not in a dry run, AI categorizes in the
+ * home what came to it uncategorized (when AI is on).
  */
 export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number, input: SharingInput, opts: { dryRun?: boolean; actor: ActivityActor }): SharingChange {
   const { account, ledgers, home } = inHome(homeCtx, accountId)
@@ -657,6 +692,7 @@ export function setSharing(homeCtx: AppContext, ctxOf: CtxOf, accountId: number,
       )
     }
     for (const l of removed) {
+      for (const sp of l.splits) notices.push(splitNotice(l.ledger, sp))
       if (!l.account) continue
       if (l.moved) {
         const go = l.moved === 1 ? 'goes' : 'go'

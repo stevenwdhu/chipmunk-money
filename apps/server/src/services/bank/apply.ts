@@ -2,11 +2,19 @@ import { addDays, daysBetween, payeeSimilarity, type BankPayload, type BankProvi
 import { historySuggestion } from '../categorize'
 import type { BankRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
+import type { ActivityActor } from '../activity'
 import { paidOff, recalculateRecurring } from '../recurring'
 import { followBankPayee } from '../payee-names'
 import { payeeKeyOf } from '../payee-namer'
+import { followPayment, undoSplit } from '../splits'
 import { insertTransaction } from '../transactions'
 import type { RemoteTransaction } from './types'
+
+/** Who the activity log says a sync's changes were made by. */
+export const syncActor = (provider: BankProviderKind): ActivityActor => ({
+  name: { simplefin: 'SimpleFIN sync', plaid: 'Plaid sync', wealthsimple: 'Wealthsimple sync' }[provider],
+  apiKeyId: null,
+})
 
 /** What a sync changed, in all or in one ledger that holds the account's rows. */
 export interface LedgerChanges {
@@ -88,6 +96,14 @@ export type ApplyScope =
  * (`frozen`), is only known: nothing is added for its bank id, and it's never updated, adopted,
  * restored or removed.
  *
+ * A payment split between the ledgers (splits.ts) is the bank's row like any other, and its split
+ * follows it: a new date, time or status (and payee) is copied to its split rows, each through its
+ * holder's context (followPayment). A new amount stays with the ledger that holds the payment, since
+ * the shares are what was typed (its DTO's keptMinor goes below zero when they're more than the
+ * payment now). Posted under a new id, it's still the same row, and keeps its split. When the bank
+ * removes it, its split is undone first (undoSplit, with activity in each ledger), then it's
+ * deleted. Split rows themselves have no bank id, and a sync never sees them.
+ *
  * Transactions before `floor` (the account's "sync from" date), or well before a window's `from`, are ignored,
  * and so are trades (a buy or sell inside an investment account isn't money in or out).
  * What the provider sent for each one is logged (`logPayloads`).
@@ -154,11 +170,14 @@ export function applyRemoteTransactions(
        bank_category_confident = CASE WHEN @bankCategory IS NULL THEN bank_category_confident ELSE @bankConfident END,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id AND ledger_id = @ledger`
   const bank = (r: RemoteTransaction) => ({ bankCategory: r.category?.name ?? null, bankConfident: r.category?.confident ? 1 : 0 })
+  /** Split payments the bank's facts were written to: their splits follow, once every row is written. */
+  const following = new Map<number, LocalRow>()
   const write = (row: LocalRow, r: RemoteTransaction) => {
     const at = holder(row)
     const values = { id: row.id, date: r.date, datetime: r.datetime ?? null, amount: r.amountMinor, status: r.pending ? 'pending' : 'cleared', externalId: r.remoteId, ...bank(r) }
     one(at.q.run(updateFromBank, values), 'update', row.id)
     followBankPayee(at, row, r.payee)
+    if (row.splitPayment) following.set(row.id, row)
   }
   /** A row the bank removed, back where it is: no longer deleted, and its recurring item works it out again. */
   const restore = (row: LocalRow) => {
@@ -275,6 +294,9 @@ export function applyRemoteTransactions(
       result.newIds.push(id)
     }
 
+    // The splits of the payments written follow them, in every ledger with a split row.
+    for (const row of following.values()) followPayment(holder(row), ctxOf, row.id)
+
     // 5. Vanished pending ones inside the window we fetched. (Posted ones are kept: banks drop old
     // transactions from their listings, and a posted transaction doesn't un-happen.) Plaid says
     // outright what was removed, posted or not. Each is deleted where it's held.
@@ -287,6 +309,8 @@ export function applyRemoteTransactions(
       const items = losing.get(p.ledgerId) ?? new Map<number, boolean>()
       if (itemId && !items.has(itemId)) items.set(itemId, paidOff(at, itemId))
       losing.set(p.ledgerId, items)
+      // A split payment's split goes first: each share back with the holder, which then loses the payment.
+      if (p.splitPayment) undoSplit(at, ctxOf, p.id, syncActor(provider))
       one(at.q.run('UPDATE transactions SET deleted_at = @now, removed_at = @now WHERE id = @id AND ledger_id = @ledger AND deleted_at IS NULL', { now, id: p.id }), 'removal', p.id)
       counted(p.ledgerId, 'removed')
     }

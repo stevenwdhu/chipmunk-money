@@ -1,4 +1,4 @@
-import { formatMoney, type Transaction, type TransactionSplit, type TransactionSplitShare } from '@chipmunk/shared'
+import { formatMoney, type ISODate, type Transaction, type TransactionSplit, type TransactionSplitShare } from '@chipmunk/shared'
 import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import type { AccountLedger, SplitRowHeld, SplitShare } from './account-rows'
@@ -129,6 +129,26 @@ export function splitPartOf(ctx: AppContext, id: number): SplitPart | null {
   if (r.holds) return { part: 'given', paymentId: r.splitOf }
   const holder = ctx.accountWide.splitShares([r.splitOf])[0]!.holder
   return { part: 'share', paymentId: r.splitOf, holder: ref(holder) }
+}
+
+/**
+ * What a row of this ledger that's part of a split waits for, in words: "Undo the split of the
+ * $100.00 payment onto Visa on 2026-09-20 first", naming the payment, and the ledger that holds it
+ * when that's another. For what can't take a split payment or a split row (a move, a switch's
+ * delete). Null for a row that isn't part of a split.
+ */
+export function undoSplitFirst(ctx: AppContext, id: number): string | null {
+  const part = splitPartOf(ctx, id)
+  if (!part) return null
+  if (part.part !== 'share') return `Undo the split of ${describe(heldPayment(ctx, part.paymentId))} first.`
+  // The share has the payment's date and account: the payment is another ledger's.
+  const share = ctx.q.get<Pick<Payment, 'date' | 'currency' | 'accountName'>>(
+    `SELECT t.date, t.currency, a.name AS accountName FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
+     WHERE t.ledger_id = @ledger AND t.id = ?`,
+    id,
+  )!
+  const amount = ctx.accountWide.splitShares([part.paymentId])[0]!.paymentMinor
+  return `Undo the split of ${describe({ ...share, amount })} in ${part.holder.name} first.`
 }
 
 /** Refuses (409) a change to a split row, saying where its split is changed. */
@@ -657,42 +677,102 @@ export function followPayment(ctx: AppContext, ctxOf: CtxOf, paymentId: number):
   })
 }
 
+/** What a ledger leaving an account did to one split it took part in (leaveSplits). */
+export interface LeftSplit {
+  /**
+   * `detachedSplit`: a payment it holds, whose split rows are ordinary rows now, each where it is.
+   * `droppedShare`: its share of another ledger's payment went back to that ledger. `detachedShare`:
+   * its share is an ordinary row of its own now, and so is what the payment's holder gave for it.
+   */
+  done: 'detachedSplit' | 'droppedShare' | 'detachedShare'
+  /** The ledger that holds the payment. */
+  holder: { slug: string; name: string }
+  date: ISODate
+  /** The payment's amount. */
+  paymentMinor: number
+  /** The leaving ledger's share, or what it gave the others of a payment it holds, as a positive number. */
+  amountMinor: number
+  currency: string
+}
+
 /**
  * The splits a ledger takes part in on an account, let go of before it leaves the account: stopping
  * sharing it, and (for the questions asked before a ledger goes) deleting or erasing the ledger. A
  * split payment it holds has its split detached (detachSplit). Its share of another ledger's payment
  * is dropped or detached in the ledger that holds the payment, as `shares` says for that ledger (by
  * id): dropped when this ledger's rows are deleted or go to the payment's holder, detached when they
- * stay or go elsewhere. Run it in the caller's transaction, before the rows go. Returns what it did.
+ * stay or go elsewhere. Run it in the caller's transaction, before the rows go. Returns what it did,
+ * split by split, in the order of this ledger's split rows.
  */
 export function leaveSplits(
   ctx: AppContext,
   ctxOf: CtxOf,
   accountId: number,
   opts: { shares: (holderLedgerId: string) => 'drop' | 'detach'; actor: ActivityActor },
-): { detachedSplits: number; droppedShares: number; detachedShares: number } {
+): { detachedSplits: number; droppedShares: number; detachedShares: number; splits: LeftSplit[] } {
   return ctx.q.transaction(() => {
-    const mine = ctx.q.all<{ paymentId: number; given: number }>(
-      `SELECT t.split_of AS paymentId, EXISTS (SELECT 1 FROM transactions p WHERE p.ledger_id = t.ledger_id AND p.id = t.split_of) AS given
+    const mine = ctx.q.all<{ paymentId: number; amountMinor: number; given: number }>(
+      `SELECT t.split_of AS paymentId, t.amount_minor AS amountMinor,
+         EXISTS (SELECT 1 FROM transactions p WHERE p.ledger_id = t.ledger_id AND p.id = t.split_of) AS given
        FROM transactions t WHERE t.ledger_id = @ledger AND t.account_id = ? AND t.split_of IS NOT NULL ORDER BY t.id`,
       accountId,
     )
-    const done = { detachedSplits: 0, droppedShares: 0, detachedShares: 0 }
+    const done = { detachedSplits: 0, droppedShares: 0, detachedShares: 0, splits: [] as LeftSplit[] }
+    const left = (at: AppContext, payment: Payment, what: LeftSplit['done'], amountMinor: number): LeftSplit => ({
+      done: what,
+      holder: ref(at.ledger),
+      date: payment.date,
+      paymentMinor: payment.amount,
+      amountMinor,
+      currency: payment.currency,
+    })
     for (const m of mine) {
       if (m.given) {
+        const payment = heldPayment(ctx, m.paymentId)
         detachSplit(ctx, ctxOf, m.paymentId, opts.actor)
         done.detachedSplits++
+        done.splits.push(left(ctx, payment, 'detachedSplit', -m.amountMinor))
         continue
       }
-      const holder = ctx.accountWide.splitShares([m.paymentId])[0]!.holder.ledgerId
-      if (opts.shares(holder) === 'drop') {
-        dropShare(ctxOf(holder), ctxOf, m.paymentId, ctx.ledger.id, opts.actor)
+      const holder = ctxOf(ctx.accountWide.splitShares([m.paymentId])[0]!.holder.ledgerId)
+      const payment = heldPayment(holder, m.paymentId)
+      if (opts.shares(holder.ledger.id) === 'drop') {
+        dropShare(holder, ctxOf, m.paymentId, ctx.ledger.id, opts.actor)
         done.droppedShares++
+        done.splits.push(left(holder, payment, 'droppedShare', m.amountMinor))
       } else {
-        detachShare(ctxOf(holder), ctxOf, m.paymentId, ctx.ledger.id, opts.actor)
+        detachShare(holder, ctxOf, m.paymentId, ctx.ledger.id, opts.actor)
         done.detachedShares++
+        done.splits.push(left(holder, payment, 'detachedShare', m.amountMinor))
       }
     }
     return done
+  })
+}
+
+/**
+ * The splits a ledger takes part in, on every account, let go of before the ledger itself goes
+ * (deleted or erased): leaveSplits for each account it has split rows on. Its shares of other
+ * ledgers' payments are dropped, since its rows are going (or detached, where `shares` says so for
+ * an account and the payment's holder), and a payment it holds has its split detached, so the other
+ * ledgers keep their shares as ordinary rows and no balance of theirs changes. For the questions
+ * asked before a ledger goes, which call it in their transaction before the ledger's rows go. Until
+ * those are asked, a ledger that takes part in a split can't be deleted or erased
+ * (refuseWhileSharing). Archiving keeps a ledger's rows, so its splits can stay: an archived
+ * ledger's share stays at its amount. Returns what it did, by account id.
+ */
+export function leaveLedgerSplits(
+  ctx: AppContext,
+  ctxOf: CtxOf,
+  opts: { actor: ActivityActor; shares?: (accountId: number, holderLedgerId: string) => 'drop' | 'detach' },
+): Map<number, LeftSplit[]> {
+  return ctx.q.transaction(() => {
+    const out = new Map<number, LeftSplit[]>()
+    const accountIds = ctx.q.column<number>('SELECT DISTINCT account_id FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL ORDER BY account_id')
+    for (const accountId of accountIds) {
+      const shares = (holder: string) => opts.shares?.(accountId, holder) ?? 'drop'
+      out.set(accountId, leaveSplits(ctx, ctxOf, accountId, { shares, actor: opts.actor }).splits)
+    }
+    return out
   })
 }

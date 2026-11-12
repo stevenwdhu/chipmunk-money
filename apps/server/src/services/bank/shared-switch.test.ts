@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { accountBankSwitchSchema, transactionCreateSchema, transactionUpdateSchema, type ApiKeyCreated, type LinkPreview } from '@chipmunk/shared'
 import { createApp } from '../../app'
-import { makeAccount } from '../../test/helpers'
+import { categoryId, makeAccount } from '../../test/helpers'
 import { expectNoCrossLedgerReferences, expectPartsSumToAccount, sharedWorld, TESTER } from '../../test/shared-accounts'
 import type { AppContext } from '../context'
 import { matchTransactions } from '../matching'
 import { moveTransactions } from '../moves'
-import { createTransaction, deleteTransaction, updateTransaction } from '../transactions'
+import { setSplit } from '../splits'
+import { createTransaction, deleteTransaction, getTransaction, updateTransaction } from '../transactions'
 import { BankService } from './service'
 
 // The real matching, its calls recorded: which ledgers a switch settles.
@@ -213,6 +214,65 @@ describe('switching a shared account’s bank service', () => {
       ['family', 'o3', 1],
     ])
     w.check()
+  })
+
+  it('pairs a split payment, its split rows following it, never offers them, and refuses to remove the payment', async () => {
+    const w = await world([
+      tx('n1', '2026-09-28', '-50.00', 'Corner Cafe'),
+      tx('n2', '2026-09-29', '-30.00', 'Book Shop'),
+      tx('n3', '2026-09-30', '-70.00', 'Gas Bar'),
+      tx('n4', '2026-10-01', '100.00', 'PAYMENT THANK YOU'),
+    ])
+    // A card payment Personal entered by hand, a day after the bank's date, split $40 to Family.
+    const paid = await createTransaction(
+      w.personal,
+      transactionCreateSchema.parse({ accountId: w.visa, date: '2026-10-02', amountMinor: 10_000, payee: 'PAYMENT THANK YOU', categoryId: categoryId(w.personal, 'Credit card payment') }),
+      { useAi: false },
+    )
+    setSplit(w.personal, w.ctxOf, paid.id, { shares: [{ ledger: 'family', amountMinor: 4_000 }] }, { actor: TESTER, usable: null })
+    const splitRows = () =>
+      [w.personal, w.family].flatMap((c) =>
+        c.q.all<{ id: number; amount: number; date: string }>('SELECT id, amount_minor AS amount, date FROM transactions WHERE ledger_id = @ledger AND split_of = ? ORDER BY id', paid.id),
+      )
+    const split = splitRows()
+    expect(split.map((r) => [r.amount, r.date])).toEqual([
+      [-4_000, '2026-10-02'],
+      [4_000, '2026-10-02'],
+    ])
+    w.check()
+
+    const target = w.bankAccount('new')
+    const preview = w.bank.previewSwitch(w.personal, w.visa, { bankAccountId: target }, null)
+    expect(preview.rows.find((r) => r.local?.id === paid.id)).toMatchObject({ kind: 'matched', remote: { remoteId: 'n4' } })
+    for (const r of split) expect(preview.rows.some((row) => row.local?.id === r.id)).toBe(false)
+    const decided = (remove: number[]) =>
+      accountBankSwitchSchema.parse({
+        bankAccountId: target,
+        from: preview.from,
+        version: preview.version,
+        pairs: preview.rows.filter((r) => r.kind === 'matched').map((r) => ({ transactionId: r.local!.id, remoteId: r.remote!.remoteId })),
+        remove,
+      })
+
+    // Removing it is refused before anything changes, the link included.
+    const before = w.rows()
+    let error: unknown
+    try {
+      w.bank.switchAccount(w.personal, w.visa, decided([paid.id]), null)
+    } catch (err) {
+      error = err
+    }
+    expect(error).toMatchObject({ status: 409, message: 'Undo the split of the $100.00 payment onto Visa on 2026-10-02 first.' })
+    expect(w.rows()).toEqual(before)
+    expect(w.bank.linkedTo(w.personal.ledger.id, w.visa)?.remoteId).toBe('old')
+
+    // Paired, it takes the bank's id and date, and its split rows the date.
+    expect(w.bank.switchAccount(w.personal, w.visa, decided([]), null)).toMatchObject({ matched: 4, removed: 0 })
+    expect(w.row('n4')).toMatchObject({ id: paid.id, amount: 10_000, date: '2026-10-01' })
+    expect(splitRows()).toEqual(split.map((r) => ({ ...r, date: '2026-10-01' })))
+    expect(getTransaction(w.personal, paid.id).split).toMatchObject({ part: 'payment', keptMinor: 6_000 })
+    w.check()
+    expect(splitRows().reduce((s, r) => s + r.amount, 0)).toBe(0)
   })
 
   it('re-points a linked shared account without a review, matching its rows in every ledger', async () => {

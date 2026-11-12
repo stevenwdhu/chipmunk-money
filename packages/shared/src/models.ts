@@ -313,7 +313,9 @@ export const transactionSplitSchema = z
   .discriminatedUnion('part', [
     z.object({
       part: z.literal('payment'),
-      keptMinor: minor.describe('What this ledger keeps of the payment: its amount less the shares.'),
+      keptMinor: minor.describe(
+        'What this ledger keeps of the payment: its amount less the shares. Below zero when the bank changed the payment’s amount and the shares are more than the payment now.',
+      ),
       shares: z.array(transactionSplitShareSchema).describe('What each other ledger gets of it.'),
     }),
     z.object({
@@ -409,6 +411,17 @@ export const transactionPageSchema = z
   .meta({ id: 'TransactionPage' })
 export type TransactionPage = z.output<typeof transactionPageSchema>
 
+export const accountTransactionSplitSchema = z
+  .object({
+    keptMinor: minor.describe(
+      'What the ledger that holds the payment keeps of it: its amount less the shares. Below zero when the shares are more than the payment now.',
+    ),
+    shares: z.array(transactionSplitShareSchema).describe('What each other ledger gets of it.'),
+  })
+  .meta({ id: 'AccountTransactionSplit' })
+  .describe('A card payment split between the ledgers that have the account: each ledger’s share, as a payment onto the account.')
+export type AccountTransactionSplit = z.output<typeof accountTransactionSplitSchema>
+
 export const accountTransactionSchema = z
   .object({
     id,
@@ -425,6 +438,9 @@ export const accountTransactionSchema = z
     notes: z.string().nullable(),
     status: z.enum(['cleared', 'pending']),
     origin: z.enum(['manual', 'import', 'sync']),
+    split: accountTransactionSplitSchema
+      .nullable()
+      .describe('How the payment is split between the ledgers, or null when it isn’t. The rows a split adds aren’t listed, since they sum to zero.'),
     balanceAfterMinor: minor.describe('The account’s total balance after this transaction, every ledger’s rows counted, like a bank statement’s running balance.'),
   })
   .meta({ id: 'AccountTransaction' })

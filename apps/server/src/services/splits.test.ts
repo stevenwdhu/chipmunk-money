@@ -614,11 +614,15 @@ describe('the four ways a split ends or shrinks', () => {
     expect(parts).toEqual({ personal: -17_500, family: -14_000, trip: -6_500 })
     // Trip leaves: its share of Personal's payment is dropped, of Family's detached.
     const done = leaveSplits(trip, w.ctxOf, w.visa, { shares: (holder) => (holder === personal.ledger.id ? 'drop' : 'detach'), actor: TESTER })
-    expect(done).toEqual({ detachedSplits: 0, droppedShares: 1, detachedShares: 1 })
+    expect(done).toMatchObject({ detachedSplits: 0, droppedShares: 1, detachedShares: 1 })
+    expect(done.splits).toEqual([
+      { done: 'droppedShare', holder: { slug: 'personal', name: 'Personal' }, date: '2026-09-20', paymentMinor: 10_000, amountMinor: 3_000, currency: 'CAD' },
+      { done: 'detachedShare', holder: { slug: 'family', name: 'Family' }, date: '2026-09-25', paymentMinor: 2_000, amountMinor: 500, currency: 'CAD' },
+    ])
     expect(w.check()).toEqual({ personal: -14_500, family: -14_000, trip: -9_500 })
     expect(trip.q.pluck('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL')).toBe(0)
     // Family leaves: the payment it holds has its split detached, its share of Personal's is detached.
-    expect(leaveSplits(family, w.ctxOf, w.visa, { shares: () => 'detach', actor: TESTER })).toEqual({ detachedSplits: 1, droppedShares: 0, detachedShares: 1 })
+    expect(leaveSplits(family, w.ctxOf, w.visa, { shares: () => 'detach', actor: TESTER })).toMatchObject({ detachedSplits: 1, droppedShares: 0, detachedShares: 1 })
     expect(w.splitRows()).toEqual([])
     w.check()
   })

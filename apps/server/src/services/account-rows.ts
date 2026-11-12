@@ -110,6 +110,8 @@ export interface BankRow {
   transferPairId: number | null
   /** A split-off account's row, kept by a ledger that stopped sharing the account: known by its bank id, never changed. */
   frozen: boolean
+  /** It's a payment split between the ledgers (its split rows name it): its split follows what the bank changes. */
+  splitPayment: boolean
 }
 
 /** Which row of the account has a bank id, wherever it's held. For the bank code and findByExternalId only. */
@@ -159,6 +161,8 @@ export interface SwitchRow {
    * the new bank id. Null for the account's own.
    */
   splitOff: string | null
+  /** It's a payment split between the ledgers: a switch can pair it, and not delete it. */
+  splitPayment: boolean
 }
 
 /** An account split off from this one, when a ledger stopped sharing it and kept its rows: in that ledger. */
@@ -197,6 +201,8 @@ export interface SplitRowHeld {
 /** A split row of a payment as anyone may see it: the ledger that holds it and its amount, and the ledger that holds the payment. */
 export interface SplitShare {
   paymentId: number
+  /** The payment's amount. */
+  paymentMinor: number
   holder: { ledgerId: string; slug: string; name: string }
   ledgerId: string
   slug: string
@@ -251,6 +257,9 @@ const MATCHED = `(t.account_id = @accountId
 
 /** `t` isn't a split row (the piece of a split payment a ledger has): what a bank or a CSV matches against. */
 const NOT_SPLIT = 't.split_of IS NULL'
+
+/** Whether `t` is a payment split between the ledgers (1): its split rows name it. */
+const SPLIT_PAYMENT = '(EXISTS (SELECT 1 FROM transactions g WHERE g.split_of = t.id AND g.account_id = t.account_id))'
 
 /** Of MATCHED, whether `t` is a frozen row (1) or the account's own (0). */
 const FROZEN = '(t.account_id <> @accountId)'
@@ -370,17 +379,17 @@ const READS = {
    */
   bankRows(db: UnscopedQuery, accountId: number, since: ISODate): BankRow[] {
     return db
-      .all<Omit<BankRow, 'frozen'> & { frozen: number }>(
+      .all<Omit<BankRow, 'frozen' | 'splitPayment'> & { frozen: number; splitPayment: number }>(
         `${SPLIT_OFFS}
          SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
            t.external_id AS externalId, t.corrected_at AS correctedAt, t.deleted_at AS deletedAt, t.removed_at AS removedAt,
-           t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen
+           t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen, ${SPLIT_PAYMENT} AS splitPayment
          FROM transactions t
          WHERE ${MATCHED} AND ${NOT_SPLIT} AND (t.external_id IS NOT NULL OR (t.account_id = @accountId AND t.date >= @since))
          ORDER BY t.id`,
         { accountId, since },
       )
-      .map((r) => ({ ...r, frozen: !!r.frozen }))
+      .map((r) => ({ ...r, frozen: !!r.frozen, splitPayment: !!r.splitPayment }))
   },
 
   /** The bank ids the account's rows carry, in every ledger, deleted ones and frozen ones (MATCHED) included. For the bank code only. */
@@ -452,16 +461,18 @@ const READS = {
    * (MATCHED) too, and no split row (NOT_SPLIT): what a bank switch pairs. For the switch only.
    */
   switchRows(db: UnscopedQuery, accountId: number, from: ISODate): SwitchRow[] {
-    return db.all<SwitchRow>(
-      `${SPLIT_OFFS}
-       SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amountMinor, t.name, t.payee, t.payee_key AS payeeKey, t.origin,
-         t.external_id AS externalId, t.deleted_at AS deletedAt,
-         CASE WHEN ${FROZEN} THEN (SELECT s.name FROM accounts s WHERE s.id = t.account_id) END AS splitOff
-       FROM transactions t
-       WHERE ${MATCHED} AND ${NOT_SPLIT} AND t.date >= @from
-       ORDER BY t.id`,
-      { accountId, from },
-    )
+    return db
+      .all<Omit<SwitchRow, 'splitPayment'> & { splitPayment: number }>(
+        `${SPLIT_OFFS}
+         SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amountMinor, t.name, t.payee, t.payee_key AS payeeKey, t.origin,
+           t.external_id AS externalId, t.deleted_at AS deletedAt,
+           CASE WHEN ${FROZEN} THEN (SELECT s.name FROM accounts s WHERE s.id = t.account_id) END AS splitOff, ${SPLIT_PAYMENT} AS splitPayment
+         FROM transactions t
+         WHERE ${MATCHED} AND ${NOT_SPLIT} AND t.date >= @from
+         ORDER BY t.id`,
+        { accountId, from },
+      )
+      .map((r) => ({ ...r, splitPayment: !!r.splitPayment }))
   },
 
   /**
@@ -534,13 +545,23 @@ const READS = {
 
   /**
    * The split rows of these payments, in every ledger, as anyone may see them: the ledger that holds
-   * each and its amount, and the ledger that holds the payment. Names and amounts only. In the
-   * ledgers' order, the payment's holder first.
+   * each and its amount, and the ledger that holds the payment and the payment's amount. Names and
+   * amounts only. In the ledgers' order, the payment's holder first.
    */
   splitShares(db: UnscopedQuery, paymentIds: readonly number[]): SplitShare[] {
     return db
-      .all<{ paymentId: number; holderId: string; holderSlug: string; holderName: string; ledgerId: string; slug: string; name: string; amountMinor: number }>(
-        `SELECT t.split_of AS paymentId, h.id AS holderId, h.slug AS holderSlug, h.name AS holderName,
+      .all<{
+        paymentId: number
+        paymentMinor: number
+        holderId: string
+        holderSlug: string
+        holderName: string
+        ledgerId: string
+        slug: string
+        name: string
+        amountMinor: number
+      }>(
+        `SELECT t.split_of AS paymentId, p.amount_minor AS paymentMinor, h.id AS holderId, h.slug AS holderSlug, h.name AS holderName,
            l.id AS ledgerId, l.slug, l.name, t.amount_minor AS amountMinor
          FROM transactions t JOIN transactions p ON p.id = t.split_of AND p.account_id = t.account_id
            JOIN ledgers l ON l.id = t.ledger_id JOIN ledgers h ON h.id = p.ledger_id
@@ -555,32 +576,35 @@ const READS = {
    * One page of a shared account's rows in every ledger, live ones only (not the frozen ones), newest
    * first as a register lists them (SORT_KEY), from `from` to `to` and after `cursor` (a row's sort
    * key): `limit` of them. Each with the ledger that holds it, its category by name and nothing else
-   * of that ledger's. For listAccountTransactions only.
+   * of that ledger's. No split row (NOT_SPLIT): a split payment is listed as the bank has it, with its
+   * shares beside it (splitShares). For listAccountTransactions only.
    */
   accountTransactions(
     db: UnscopedQuery,
     accountId: number,
     opts: { from?: ISODate; to?: ISODate; cursor?: string; limit: number },
   ): AccountTransactionRow[] {
-    // Split rows (a payment's shares and what its holder gave) are to be left out here, and the
-    // payment to carry its shares instead.
     return db.all<AccountTransactionRow>(
       `SELECT t.id, t.ledger_id AS ledgerId, l.slug AS ledgerSlug, l.name AS ledgerName, t.date, t.datetime, t.amount_minor AS amountMinor,
          t.currency, t.payee, coalesce((SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id), t.name) AS name,
          (SELECT c.name FROM categories c WHERE c.id = t.category_id) AS category, t.notes, t.status, t.origin, ${SORT_KEY} AS sortKey
        FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN ledgers l ON l.id = t.ledger_id
-       WHERE t.account_id = @accountId AND t.deleted_at IS NULL
+       WHERE t.account_id = @accountId AND t.deleted_at IS NULL AND ${NOT_SPLIT}
          AND (@from IS NULL OR t.date >= @from) AND (@to IS NULL OR t.date <= @to) AND (@cursor IS NULL OR ${SORT_KEY} < @cursor)
        ORDER BY ${SORT_KEY} DESC LIMIT @limit`,
       { accountId, from: opts.from ?? null, to: opts.to ?? null, cursor: opts.cursor ?? null, limit: opts.limit },
     )
   },
 
-  /** The sum of a shared account's live rows in every ledger listed above `sortKey` in its all-ledgers list (SORT_KEY): newer, or later the same day. */
+  /**
+   * The sum of a shared account's live rows in every ledger listed above `sortKey` in its all-ledgers
+   * list (SORT_KEY): newer, or later the same day. Split rows aren't listed, and they sum to zero, so
+   * they're left out here too (NOT_SPLIT).
+   */
   sumAfter(db: UnscopedQuery, accountId: number, sortKey: string): number {
     return db.pluck<number>(
       `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t JOIN accounts a ON a.id = t.account_id
-       WHERE t.account_id = @accountId AND t.deleted_at IS NULL AND ${SORT_KEY} > @sortKey`,
+       WHERE t.account_id = @accountId AND t.deleted_at IS NULL AND ${NOT_SPLIT} AND ${SORT_KEY} > @sortKey`,
       { accountId, sortKey },
     )!
   },

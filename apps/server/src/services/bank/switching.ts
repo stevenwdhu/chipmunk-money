@@ -1,5 +1,6 @@
 import { addDays, daysBetween, payeeKey, payeeSimilarity, type BankProviderKind, type ISODate, type SwitchResult } from '@chipmunk/shared'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
+import { HTTPException } from 'hono/http-exception'
 import type { z } from 'zod'
 import { badRequest } from '../../lib/http'
 import { historySuggestion } from '../categorize'
@@ -7,6 +8,7 @@ import type { SwitchRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
 import { deleteTransaction, insertTransaction } from '../transactions'
 import { followBankPayee } from '../payee-names'
+import { followPayment, undoSplitFirst } from '../splits'
 import { logPayloads } from './apply'
 import type { RemoteTransaction } from './types'
 
@@ -131,6 +133,18 @@ export function refuseSplitOffRemoval(ctx: AppContext, accountId: number, input:
   if (row) badRequest(`${row.name ?? row.payee} on ${row.date} is on ${row.splitOff} in another ledger now, so the switch can’t delete it. Pair it or keep it.`)
 }
 
+/**
+ * A switch can pair a payment split between the ledgers, and not delete it: a 409 naming it ("Undo
+ * the split of <payment> first"), before anything changes, the link included. Its split rows are
+ * never offered (switchRows leaves them out).
+ */
+export function refuseSplitRemoval(ctx: AppContext, ctxOf: CtxOf, accountId: number, input: Pick<SwitchInput, 'from' | 'remove'>): void {
+  if (!input.remove.length) return
+  const remove = new Set(input.remove)
+  const row = ctx.accountWide.switchRows(accountId, addDays(input.from, -1)).find((r) => r.splitPayment && remove.has(r.id))
+  if (row) throw new HTTPException(409, { message: undoSplitFirst(row.ledgerId === ctx.ledger.id ? ctx : ctxOf(row.ledgerId), row.id)! })
+}
+
 /** What a switch changed, and the ledgers whose rows it changed (its home, where new ones land, always). */
 export type AppliedSwitch = SwitchResult & { newIds: number[]; ledgers: Set<string> }
 
@@ -149,7 +163,9 @@ function one(result: { changes: number }, what: string, id: number) {
  *   One whose bank id a row already has, in any ledger, isn't added again;
  * - only yours: deleted (`remove`), or kept as they are, where syncs leave them alone.
  * A frozen row, which a ledger that stopped sharing the account kept on an account of its own, is
- * paired too, and only ever given the new bank id: never changed or removed.
+ * paired too, and only ever given the new bank id: never changed or removed. A payment split between
+ * the ledgers is paired like any other, its split rows following its new date and status
+ * (followPayment), and never removed (refuseSplitRemoval).
  */
 export function applySwitch(
   ctx: AppContext,
@@ -231,6 +247,8 @@ export function applySwitch(
       one(changed, 'update', l.id)
       // Its payee is the new service's now.
       followBankPayee(at, l, r.payee)
+      // A split payment's split rows follow it.
+      if (l.splitPayment) followPayment(at, ctxOf, l.id)
       paired.add(l.id)
       pairedRemote.add(r.remoteId)
       result.matched++
@@ -274,7 +292,8 @@ export function applySwitch(
         continue
       }
       if (remove.has(l.id)) {
-        // Deleted where it's held. A split payment is to be refused here, until its split is undone.
+        if (l.splitPayment) throw new Error(`The switch can't delete transaction ${l.id}, a split payment (refuseSplitRemoval)`)
+        // Deleted where it's held.
         deleteTransaction(holderOf(l), l.id)
         result.removed++
       } else {

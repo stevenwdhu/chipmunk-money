@@ -40,9 +40,9 @@ import { keepRuleNames, rebuildPayeeKeys, worldOf } from '../payee-names'
 import { applyPayeeChoices } from '../payees'
 import { tidyNewPayees } from '../payee-tidy'
 import { payeeKeyOf, payeeNameOf } from '../payee-namer'
-import { applyRemoteTransactions, type ApplyScope } from './apply'
+import { applyRemoteTransactions, syncActor, type ApplyScope } from './apply'
 import { keepTransactions, oldestStored, storedStamp, storedTransactions, type Received } from './store'
-import { applySwitch, localStamp, planSwitch, refuseSplitOffRemoval } from './switching'
+import { applySwitch, localStamp, planSwitch, refuseSplitOffRemoval, refuseSplitRemoval } from './switching'
 import { createPlaid } from './plaid'
 import { createSimpleFin } from './simplefin'
 import {
@@ -92,7 +92,7 @@ const HISTORY_DAYS: Record<BankProviderKind, number> = { simplefin: MAX_HISTORY_
 /** The date of an account's oldest transaction (not deleted ones), if any: in any ledger, for a shared one. */
 const firstDate = (ctx: AppContext, accountId: number) => ctx.accountWide.firstDate(accountId)
 /** Who the activity log says made a change. */
-const actor = (provider: BankProviderKind) => ({ name: { simplefin: 'SimpleFIN sync', plaid: 'Plaid sync', wealthsimple: 'Wealthsimple sync' }[provider], apiKeyId: null })
+const actor = syncActor
 /** Plaid's error code for a bank that wants you to sign in again. */
 /** The saved access was sealed with another secret.key (see WrongSecretKeyError). */
 const WRONG_KEY =
@@ -693,6 +693,7 @@ export class BankService {
       throw new HTTPException(409, { message: 'Transactions changed since this review was made (a sync, or an edit). It has been made again: check it, then switch.' })
     }
     refuseSplitOffRemoval(ctx, target.id, input)
+    refuseSplitRemoval(ctx, this.storage.ctxOf, target.id, input)
     const provider = this.row(acct.connectionId).provider
     const remote = storedTransactions(this.app, acct.id, input.from)
     // Reviewed from the oldest one kept (as it starts): no limit. From later, only from there on.

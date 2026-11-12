@@ -146,6 +146,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
         account: { id: own, name: 'Visa', balanceMinor: -10_750 },
         recurringItems: 1,
         importBatches: 1,
+        splits: [],
       },
     ])
     expect(change.removed[0]!.account!.balanceMinor + -6_000).toBe(before.parts.family)

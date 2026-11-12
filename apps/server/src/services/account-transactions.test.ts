@@ -23,7 +23,7 @@ const status = (fn: () => unknown) => {
 }
 
 /** What an item has, and no more: nothing of another ledger's but names. */
-const KEYS = ['amountMinor', 'balanceAfterMinor', 'category', 'currency', 'date', 'datetime', 'here', 'id', 'ledger', 'name', 'notes', 'origin', 'payee', 'payeeName', 'status']
+const KEYS = ['amountMinor', 'balanceAfterMinor', 'category', 'currency', 'date', 'datetime', 'here', 'id', 'ledger', 'name', 'notes', 'origin', 'payee', 'payeeName', 'split', 'status']
 
 function world(shareWith: Array<'family' | 'trip'>) {
   const w = sharedWorld({ shareWith, opening: -1_000 })

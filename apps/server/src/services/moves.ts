@@ -10,6 +10,7 @@ import { categorizeUncategorized } from './import'
 import { releaseTransactionLinks, settleLinkedCategory } from './links'
 import { matchTransactions } from './matching'
 import { detachPayments, matchRecurring, recalculateRecurring } from './recurring'
+import { undoSplitFirst } from './splits'
 import { transferCategoryId, unpairTransfer } from './transactions'
 
 /**
@@ -85,6 +86,8 @@ interface MovingRow {
   recurringItemId: number | null
   itemName: string | null
   categoryName: string | null
+  /** It's a split row (split_of), or a payment that's split. */
+  split: number
 }
 
 interface CategoryNow {
@@ -106,19 +109,21 @@ const describe = (r: Pick<MovingRow, 'name' | 'payee' | 'amount' | 'currency' | 
 const json = (values: readonly unknown[]) => JSON.stringify(values)
 /** The given rows of the ledger, by a JSON array of ids as the first parameter. */
 const THESE = 'id IN (SELECT value FROM json_each(?))'
+/** `t` is a split row, or a payment that's split (the given row beside it, in its ledger, names it). */
+const SPLIT = '(t.split_of IS NOT NULL OR EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id))'
 
 /**
- * Split payments and their split rows don't move: the split is undone first ("Undo the split of
- * <payment> first"). Nothing can be split yet, so nothing is refused here. This is where that check
- * goes.
+ * Split payments and their split rows don't move: the split is undone first. A 400 naming the
+ * payment ("Undo the split of <payment> first"), before anything changes.
  */
-function refuseSplitRows(rows: MovingRow[]): void {
-  void rows
+function refuseSplitRows(from: AppContext, rows: MovingRow[]): void {
+  const split = rows.find((r) => r.split)
+  if (split) badRequest(undoSplitFirst(from, split.id)!)
 }
 
 /**
  * The rows, read and checked before anything changes: each held by `from` and not deleted, on an
- * account `to` has, and `to` not archived. An id another ledger holds and one that doesn't exist get
+ * account `to` has, `to` not archived, and none of them part of a split. An id another ledger holds and one that doesn't exist get
  * the same 400, so the answer doesn't say which it is.
  */
 function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[] {
@@ -126,7 +131,7 @@ function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[
     `SELECT t.id, t.account_id AS accountId, a.name AS accountName, a.type AS accountType, t.date, t.amount_minor AS amount, t.currency, t.payee,
        t.name, t.deleted_at AS deletedAt, t.transfer_pair_id AS transferPairId, t.recurring_item_id AS recurringItemId,
        (SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id) AS itemName,
-       (SELECT c.name FROM ledger_categories c WHERE c.id = t.category_id AND c.ledger_id = t.ledger_id) AS categoryName
+       (SELECT c.name FROM ledger_categories c WHERE c.id = t.category_id AND c.ledger_id = t.ledger_id) AS categoryName, ${SPLIT} AS split
      FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.${THESE}
      ORDER BY t.date, t.id`,
@@ -144,7 +149,7 @@ function movingRows(from: AppContext, to: AppContext, ids: number[]): MovingRow[
     if (!there) badRequest(`${r.accountName} isn’t shared with ${to.ledger.name}, so ${describe(r)} can’t move there.`)
     if (there.archived) badRequest(`${to.ledger.name} is archived. Restore it to move transactions to it.`)
   }
-  refuseSplitRows(rows)
+  refuseSplitRows(from, rows)
   return rows
 }
 
@@ -369,7 +374,8 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
  * tags go, recurring items let go of them (dues and not-payments too) and work out their payments
  * again, and their bank payloads point at no row. Then one UPDATE (moveRows) puts them in `to` with
  * no category, recurring item, transfer pair or import batch. Up to MOVE_LIMIT at a time, all of
- * them held by `from`. Run it inside the caller's transaction. Returns how many went.
+ * them held by `from`, and none part of a split (the caller lets those go first, with leaveSplits).
+ * Run it inside the caller's transaction. Returns how many went.
  */
 export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: number[]; to: string }): number {
   const ids = [...new Set(input.ids)]
@@ -380,6 +386,9 @@ export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: n
   return fromCtx.q.transaction(() => {
     const held = fromCtx.q.column<number>(`SELECT id FROM transactions WHERE ledger_id = @ledger AND ${THESE}`, these)
     if (held.length !== ids.length) throw new Error(`${fromCtx.ledger.name} holds ${held.length} of the ${ids.length} transactions to send as deleted`)
+    // Its splits were let go of first (leaveSplits): a split row or a split payment can't be deleted or leave its ledger.
+    const split = fromCtx.q.column<number>(`SELECT t.id FROM transactions t WHERE t.ledger_id = @ledger AND t.${THESE} AND ${SPLIT}`, these)
+    if (split.length) throw new Error(`Transactions ${split.join(', ')} are part of a split, which must be let go of before they're sent away (leaveSplits)`)
     const stamp = fromCtx.now().toISOString()
     fromCtx.q.run(`UPDATE transactions SET deleted_at = ? WHERE ledger_id = @ledger AND deleted_at IS NULL AND ${THESE}`, stamp, these)
     // Deleted for good by the ledger leaving, not by the bank: a sync never brings one back.
