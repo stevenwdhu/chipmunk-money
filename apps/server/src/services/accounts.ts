@@ -12,7 +12,7 @@ import {
   monthOf,
   monthRange,
 } from '@chipmunk/shared'
-import type { AppContext } from './context'
+import type { AppContext, CtxOf } from './context'
 import { resolveInstitution } from './institutions'
 import { today } from './settings'
 import { monthToDate } from './totals'
@@ -284,12 +284,47 @@ export function updateAccount(ctx: AppContext, id: number, input: AccountUpdate)
 /**
  * Deletes one of this ledger's accounts. Its transactions, balances and imports go with it, and its
  * bank link is unlinked (foreign keys). A shared account is refused in every ledger that has it:
- * the other ledgers hold rows on it.
+ * the other ledgers hold rows on it. An account a ledger kept its rows on when it stopped sharing
+ * one leaves that one the bank ids it must keep knowing first (leaveSplitOffBankIds).
  */
-export function deleteAccount(ctx: AppContext, id: number) {
+export function deleteAccount(ctx: AppContext, ctxOf: CtxOf, id: number) {
   const a = getAccount(ctx, id)
   if (ctx.accountWide.isShared(id)) throw new HTTPException(409, { message: `Stop sharing ${a.name} first.` })
-  ctx.q.run('DELETE FROM accounts WHERE id = ? AND ledger_id = @ledger', id)
+  ctx.q.transaction(() => {
+    leaveSplitOffBankIds(ctx, ctxOf, id)
+    ctx.q.run('DELETE FROM accounts WHERE id = ? AND ledger_id = @ledger', id)
+  })
+}
+
+/**
+ * Before a split-off account goes (one a ledger kept its rows on when it stopped sharing an
+ * account), the account it was split off from must keep knowing the bank ids on those rows: they're
+ * all that stops its sync, a switch or a CSV import from adding them again. For each one it matches
+ * through this account (splitOffHistory), a deleted row is left on it, in its home, through the
+ * home's context: the bank id, the date, amount and payee, when it was created (so the accounts
+ * above it still match it) and deleted (now, when it was live), and nothing else of the row (no
+ * category, notes, tags, links or recurring item). Nothing for an account that isn't split off from
+ * one, or whose parent is gone. Run it in the caller's transaction, before the account's rows go.
+ * Returns how many were left.
+ *
+ * Deleting or erasing the ledger that holds a split-off account must call this for each of its
+ * split-off accounts first. That comes with the questions asked before a ledger goes, so nothing
+ * calls it there yet: until then those bank ids go with the ledger.
+ */
+export function leaveSplitOffBankIds(ctx: AppContext, ctxOf: CtxOf, accountId: number): number {
+  ctx.q.mustGet('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ? AND home_ledger_id = @ledger', 'Account not found', accountId)
+  const { parent, rows } = ctx.accountWide.splitOffHistory(accountId)
+  if (!parent || !rows.length) return 0
+  const home = parent.homeLedgerId === ctx.ledger.id ? ctx : ctxOf(parent.homeLedgerId)
+  const now = ctx.now().toISOString()
+  for (const r of rows) {
+    home.q.run(
+      `INSERT INTO transactions (ledger_id, account_id, date, datetime, amount_minor, currency, payee, payee_key, status, origin, external_id, deleted_at, created_at)
+       VALUES (@ledger, @accountId, @date, @datetime, @amountMinor, @currency, @payee, @payeeKey, @status, @origin, @externalId, @deletedAt, @createdAt)`,
+      { ...r, accountId: parent.id, deletedAt: r.deletedAt ?? now },
+    )
+  }
+  return rows.length
 }
 
 export function saveImportMapping(ctx: AppContext, id: number, mapping: ColumnMapping) {

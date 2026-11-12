@@ -6,6 +6,7 @@ import type { AppContext } from './context'
 import { commitImport, previewImport } from './import'
 import { cardPaymentCategory } from './matching'
 import { moveTransactions } from './moves'
+import { setSharing } from './sharing'
 import { deleteTransaction } from './transactions'
 
 /**
@@ -120,6 +121,25 @@ describe('matching on a shared account', () => {
       ['personal', 'BEST BUY #456'],
       ['family', 'BEST BUY #123'],
     ])
+    w.check()
+  })
+
+  it('files no card payment for money back whose purchase a ledger kept on an account of its own when it stopped sharing', () => {
+    const w0 = sharedWorld()
+    const w = { ...w0, ...world(w0) }
+    const chequing = makeAccount(w.personal, 'Chequing', 'chequing')
+    w.commit([{ line: 2, date: '2026-09-10', payee: 'BEST BUY #123', amountMinor: -12_000 }])
+    w.move(w.personal, ['BEST BUY #123'], w.family)
+    // Family stops sharing Visa and keeps the purchase: Visa is shared with no one now.
+    setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER })
+    expect(w.personal.accountWide.isShared(w.visa)).toBe(false)
+
+    w.commit([{ line: 2, date: '2026-09-20', payee: 'Unrelated Withdrawal', amountMinor: -12_000 }], chequing)
+    w.commit([{ line: 2, date: '2026-09-21', payee: 'BEST BUY #456', amountMinor: 12_000 }])
+    const refund = w.idOf('BEST BUY #456')
+    const withdrawal = w.personal.q.pluck<number>("SELECT id FROM transactions WHERE ledger_id = @ledger AND payee = 'Unrelated Withdrawal'")!
+    expect(filed(w.personal, refund)).toEqual({ categoryId: null, source: null, pair: null, links: 0 })
+    expect(filed(w.personal, withdrawal)).toMatchObject({ categoryId: null, pair: null })
     w.check()
   })
 

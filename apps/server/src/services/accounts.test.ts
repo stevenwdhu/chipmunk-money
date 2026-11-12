@@ -78,7 +78,7 @@ describe('accounts in one database', () => {
   })
 
   it('refuses another ledger’s account by id', () => {
-    const { personal, family } = twoLedgers()
+    const { storage, personal, family } = twoLedgers()
     const p = makeAccount(personal)
     const f = makeAccount(family)
     setBalance(family, f, { date: '2026-09-10', balanceMinor: 100 })
@@ -86,7 +86,7 @@ describe('accounts in one database', () => {
 
     expect(() => getAccount(personal, f)).toThrow(expect.objectContaining(notFound))
     expect(() => updateAccount(personal, f, { name: 'Mine now' })).toThrow(expect.objectContaining(notFound))
-    expect(() => deleteAccount(personal, f)).toThrow(expect.objectContaining(notFound))
+    expect(() => deleteAccount(personal, storage.ctxOf, f)).toThrow(expect.objectContaining(notFound))
     expect(() => setBalance(personal, f, { date: '2026-09-11', balanceMinor: 1 })).toThrow(expect.objectContaining(notFound))
     expect(() => listSnapshots(personal, f)).toThrow(expect.objectContaining(notFound))
     expect(() => deleteSnapshot(personal, f, snap.id)).toThrow(expect.objectContaining({ status: 404, message: 'Balance update not found' }))
@@ -121,7 +121,7 @@ describe('accounts in one database', () => {
     expect(getAccount(personal, p).bank).toMatchObject({ bankAccountId: 'bp', connectionId: 'c1', provider: 'simplefin' })
     expect(getAccount(family, f).bank).toMatchObject({ bankAccountId: 'bf' })
 
-    deleteAccount(personal, p)
+    deleteAccount(personal, storage.ctxOf, p)
     expect(listAccounts(personal)).toEqual([])
     const linkOf = (id: string) => storage.sqlite.prepare('SELECT account_id FROM bank_accounts WHERE id = ?').pluck().get(id)
     expect([linkOf('bp'), linkOf('bf')]).toEqual([null, f])

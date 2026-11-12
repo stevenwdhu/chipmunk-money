@@ -473,10 +473,10 @@ describe('the account’s rows read across ledgers', () => {
   /** Uses of the reads that hand out rows, by file, comments left out. */
   function rowReads(source: string): string[] {
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder|switchRows|importedRows|accountTransactions)\b/g)].map((m) => m[1]!)
+    return [...code.matchAll(/\baccountWide\s*\.\s*(bankRows|bankIds|holder|switchRows|importedRows|accountTransactions|splitOffHistory)\b/g)].map((m) => m[1]!)
   }
 
-  it('are read only by the bank code, the CSV import’s duplicate check, findByExternalId and the all-ledgers list', () => {
+  it('are read only by the bank code, the CSV import’s duplicate check, findByExternalId, the all-ledgers list and deleting a split-off account', () => {
     const root = path.join(repoRoot, 'apps/server')
     const found: string[] = []
     const walk = (dir: string) => {
@@ -488,6 +488,7 @@ describe('the account’s rows read across ledgers', () => {
     }
     walk(path.join(root, 'src'))
     expect([...new Set(found)].sort()).toEqual([
+      'src/services/accounts.ts: splitOffHistory',
       'src/services/bank/apply.ts: bankRows',
       'src/services/bank/apply.ts: holder',
       'src/services/bank/service.ts: bankIds',

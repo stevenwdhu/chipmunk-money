@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { accountBankSwitchSchema, importCommitSchema, importPreviewSchema, transactionCreateSchema, type ReportSpec } from '@chipmunk/shared'
 import { expectNoCrossLedgerReferences, expectPartsSumToAccount, sharedWorld, TESTER } from '../test/shared-accounts'
 import { ledgerRows } from '../test/world'
-import { balancesAt, deleteAccount, getAccount, listSnapshots, setBalance, updateAccount } from './accounts'
+import { balancesAt, deleteAccount, getAccount, leaveSplitOffBankIds, listSnapshots, setBalance, updateAccount } from './accounts'
 import { applyRemoteTransactions } from './bank/apply'
 import { BankService } from './bank/service'
 import type { RemoteTransaction } from './bank/types'
@@ -60,8 +60,8 @@ function world(opts: Parameters<typeof sharedWorld>[0] = {}) {
     )!
   /** Each ledger's part of Visa at these dates, by slug. */
   const partsAt = (dates: string[]) => Object.fromEntries(ledgers.map((c) => [c.ledger.slug, balancesAt(c, dates).get(w.visa) ?? null]))
-  /** The account a ledger kept its rows on: the one split off from Visa. */
-  const splitOff = (ctx: AppContext) => ctx.q.pluck<number>('SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND split_from_id = ?', w.visa)!
+  /** The account a ledger kept its rows on: the one split off from Visa (or from `from`). */
+  const splitOff = (ctx: AppContext, from = w.visa) => ctx.q.pluck<number>('SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND split_from_id = ?', from)!
   /** A ledger's rows on an account, deleted ones too. */
   const rowsOn = (ctx: AppContext, account: number) =>
     ctx.q.all<{ id: number; externalId: string | null; date: string; amount: number; payee: string; status: string; deleted: number; batch: number | null }>(
@@ -220,7 +220,7 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     w.check(own)
 
     // Visa, then Family, can be deleted. Family's own account isn't Visa's, so it stays until then.
-    deleteAccount(personal, w.visa)
+    deleteAccount(personal, w.ctxOf, w.visa)
     expect(getAccount(family, own).name).toBe('Family Visa')
     w.storage.registry.remove(family.ledger.id)
     expect(w.storage.sqlite.prepare('SELECT count(*) FROM accounts WHERE id = ?').pluck().get(own)).toBe(0)
@@ -266,8 +266,8 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     expect(pastAfter.family!.map((p, i) => p - pastBefore.family![i]!)).toEqual(MONTH_ENDS.map((d, i) => base[i]! + pendingFrom(d)))
     expect(w.storage.sqlite.prepare('SELECT opening_ledger_id FROM accounts WHERE id = ?').pluck().get(w.visa)).toBeNull()
 
-    deleteAccount(personal, own)
-    deleteAccount(family, w.visa)
+    deleteAccount(personal, w.ctxOf, own)
+    deleteAccount(family, w.ctxOf, w.visa)
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 
@@ -294,12 +294,15 @@ describe('stopping sharing with a ledger that keeps its transactions', () => {
     expect(pastAfter.family).toEqual(pastBefore.family)
     expect(getSharingMembers(personal, w.visa)).toEqual(['family'])
 
-    // Trip's own account, shared with Family in turn, which keeps its row: split off from Visa too, which is where the bank ids came from.
+    // Trip's own account, shared with Family in turn, which keeps its row: split off from Trip's
+    // account, the one it was split off from directly. Visa reaches it through that one.
     addMember(trip, w.ctxOf, own, family.ledger.id, TESTER)
     moveTransactions(trip, w.ctxOf, { ids: [rows[1]!], to: family.ledger.id }, TESTER)
     setSharing(trip, w.ctxOf, own, { ledgers: ['trip'], rows: { family: 'keep' } }, { actor: TESTER })
-    const again = w.splitOff(family)
-    expect(w.storage.sqlite.prepare('SELECT id FROM accounts WHERE split_from_id = ? ORDER BY id').pluck().all(w.visa)).toEqual([own, again])
+    const again = w.splitOff(family, own)
+    expect(w.storage.sqlite.prepare('SELECT id FROM accounts WHERE split_from_id = ? ORDER BY id').pluck().all(w.visa)).toEqual([own])
+    expect(personal.accountWide.splitOffs(w.visa).map((s) => s.id)).toEqual([own, again])
+    expect(personal.accountWide.splitOffs(own).map((s) => s.id)).toEqual([again])
     expect(family.q.column('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ?', again)).toEqual([rows[1]])
     w.check(own, again)
   })
@@ -527,11 +530,66 @@ describe('the rows a ledger kept on its own account, for the account’s bank', 
   })
 })
 
+/** Waits for the clock to tick past this millisecond: SQLite stamps created_at to the millisecond, and a row added after a split must be stamped after it. */
+const tick = () => {
+  const start = Date.now()
+  while (Date.now() < start + 2) {
+    // waiting
+  }
+}
+
 describe('a ledger that keeps its rows, for the account’s bank and CSV imports', () => {
   /** Applied to Visa in its home as Plaid's changes. */
   const plaid = (w: ReturnType<typeof world>, changed: RemoteTransaction[], removed: Array<{ remoteId: string }> = []) =>
     applyRemoteTransactions(w.personal, w.ctxOf, w.visa, changed, { removed, floor: null }, 'plaid')
   const bankRow = (ctx: AppContext, externalId: string) => ctx.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND external_id = ?', externalId)!
+  const shown = (ctx: AppContext, account: number, rows: Array<{ line: number; date: string; payee: string; amountMinor: number; externalId?: string }>) =>
+    previewImport(ctx, importPreviewSchema.parse({ accountId: account, rows })).map((r) => ({ payee: r.payee, duplicate: r.duplicateOf !== null || r.duplicateElsewhere }))
+
+  it('matches each row for the account it was on before it left, two splits down, importing into both', () => {
+    const w = world()
+    const { personal, family, trip } = w
+    // Visa's own row, which Family keeps, then moves to Trip, which keeps it too.
+    const old = w.addTx(personal, '2026-09-10', -1_500, { payee: 'Book Shop' })
+    w.move(personal, [old], family)
+    w.set(personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+    const own = w.splitOff(family)
+    tick()
+    // Family's account, shared with Trip: a file Family imports into it, and a row Trip enters itself. Neither was ever Visa's.
+    addMember(family, w.ctxOf, own, trip.ledger.id, TESTER)
+    commitImport(family, importCommitSchema.parse({ accountId: own, rows: [{ line: 2, date: '2026-09-15', payee: 'Pizza Place', amountMinor: -2_000 }] }), {
+      background: false,
+    })
+    const pizza = family.q.pluck<number>("SELECT id FROM transactions WHERE ledger_id = @ledger AND payee = 'Pizza Place'")!
+    const bakery = w.addTx(trip, '2026-09-15', -600, { account: own, payee: 'Bakery' })
+    w.move(family, [old, pizza], trip)
+    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER })
+    const again = w.splitOff(trip, own)
+    expect(w.storage.sqlite.prepare('SELECT split_from_id FROM accounts WHERE id = ?').pluck().get(again)).toBe(own)
+    expect(trip.q.column('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? ORDER BY id', again)).toEqual([old, pizza, bakery])
+
+    const statement = [
+      { line: 2, date: '2026-09-10', payee: 'Book Shop', amountMinor: -1_500 },
+      { line: 3, date: '2026-09-15', payee: 'Pizza Place', amountMinor: -2_000 },
+      { line: 4, date: '2026-09-15', payee: 'Bakery', amountMinor: -600 },
+    ]
+    // Into Family's account, all three were its rows before they left it.
+    expect(shown(family, own, statement)).toEqual(statement.map((r) => ({ payee: r.payee, duplicate: true })))
+    expect(commitImport(family, importCommitSchema.parse({ accountId: own, rows: statement }), { background: false })).toMatchObject({ imported: 0, skippedDuplicates: 3 })
+    // Into Visa, only the one that was Visa's: the others came after Family's account was made.
+    expect(shown(personal, w.visa, statement)).toEqual([
+      { payee: 'Book Shop', duplicate: true },
+      { payee: 'Pizza Place', duplicate: false },
+      { payee: 'Bakery', duplicate: false },
+    ])
+    expect(personal.accountWide.switchRows(w.visa, '2026-01-01').map((r) => r.id)).toEqual([old])
+    expect(personal.accountWide.switchRows(own, '2026-01-01').map((r) => r.id)).toEqual([old, pizza, bakery])
+    expect(commitImport(personal, importCommitSchema.parse({ accountId: w.visa, rows: statement }), { background: false })).toMatchObject({
+      imported: 2,
+      skippedDuplicates: 1,
+    })
+    w.check(own, again)
+  })
 
   it('sends home a pending row it deleted, so the posted one Plaid says replaces it stays deleted', () => {
     const w = world()
@@ -553,5 +611,72 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     expect(plaid(w, [remote('c2', '2026-10-01', -4_000, 'Cafe', { replaces: 'p2' })], [{ remoteId: 'p2' }])).toMatchObject({ added: 0, updated: 0 })
     expect(w.rowsOn(personal, w.visa)).toMatchObject([{ id: p2, externalId: 'c2', status: 'cleared', deleted: 1 }])
     w.check(own)
+  })
+
+  it('leaves the account the bank ids of a split-off account that goes, so its sync and imports add nothing for them', () => {
+    const w = world()
+    const { personal, family, trip } = w
+    plaid(w, [remote('k1', '2026-09-20', -9_000, 'Book Shop'), remote('k2', '2026-09-21', -1_200, 'Gas Bar')])
+    const [k1, k2] = [bankRow(personal, 'k1'), bankRow(personal, 'k2')]
+    w.move(personal, [k1, k2], family)
+    deleteTransaction(family, k2)
+    const deletedAt = family.q.pluck<string>('SELECT deleted_at FROM transactions WHERE ledger_id = @ledger AND id = ?', k2)
+    w.set(personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+    const own = w.splitOff(family)
+    tick()
+    const resend = () => plaid(w, [remote('k1', '2026-09-20', -9_000, 'Book Shop'), remote('k2', '2026-09-21', -1_200, 'Gas Bar')])
+    expect(resend()).toMatchObject({ added: 0, updated: 0 })
+
+    // Family's account, shared with Trip, which keeps Book Shop on an account of its own, and a row
+    // with a bank id Family imports later, which was never Visa's.
+    addMember(family, w.ctxOf, own, trip.ledger.id, TESTER)
+    commitImport(family, importCommitSchema.parse({ accountId: own, rows: [{ line: 2, date: '2026-09-25', payee: 'Pizza', amountMinor: -700, externalId: 'x1' }] }), {
+      background: false,
+    })
+    w.move(family, [k1], trip)
+    setSharing(family, w.ctxOf, own, { ledgers: ['family'], rows: { trip: 'keep' } }, { actor: TESTER })
+    const again = w.splitOff(trip, own)
+
+    // Family's account goes, the one in the middle: Visa keeps its bank ids, as deleted rows in its home, with nothing else of theirs.
+    deleteAccount(family, w.ctxOf, own)
+    expect(w.rowsOn(personal, w.visa).map(({ externalId, date, amount, payee, status, deleted, batch }) => ({ externalId, date, amount, payee, status, deleted, batch }))).toEqual([
+      { externalId: 'k1', date: '2026-09-20', amount: -9_000, payee: 'Book Shop', status: 'cleared', deleted: 1, batch: null },
+      { externalId: 'k2', date: '2026-09-21', amount: -1_200, payee: 'Gas Bar', status: 'cleared', deleted: 1, batch: null },
+    ])
+    const left = personal.q.all(
+      `SELECT external_id AS externalId, deleted_at AS deletedAt, removed_at AS removedAt, category_id AS categoryId, notes, recurring_item_id AS item, transfer_pair_id AS pair, origin
+       FROM transactions WHERE ledger_id = @ledger AND account_id = ? ORDER BY id`,
+      w.visa,
+    )
+    expect(left).toEqual([
+      { externalId: 'k1', deletedAt: '2026-10-03T18:00:00.000Z', removedAt: null, categoryId: null, notes: null, item: null, pair: null, origin: 'sync' },
+      { externalId: 'k2', deletedAt, removedAt: null, categoryId: null, notes: null, item: null, pair: null, origin: 'sync' },
+    ])
+    // Trip's account keeps its row, and nothing comes back to Visa: not by sync, nor by a file.
+    expect(trip.q.column('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ?', again)).toEqual([k1])
+    expect(resend()).toMatchObject({ added: 0, updated: 0 })
+    const file = [{ line: 2, date: '2026-09-20', payee: 'Book Shop', amountMinor: -9_000, externalId: 'k1' }]
+    expect(commitImport(personal, importCommitSchema.parse({ accountId: w.visa, rows: file }), { background: false })).toMatchObject({ imported: 0, skippedDuplicates: 1 })
+    expect(w.check(again).totalMinor).toBe(getAccount(personal, w.visa).balanceMinor)
+  })
+
+  it('leaves them when the ledger that holds the split-off account goes, once that calls for it, and deleting it doesn’t fail before then', () => {
+    const kept = () => {
+      const w = world()
+      plaid(w, [remote('k1', '2026-09-20', -9_000, 'Book Shop')])
+      w.move(w.personal, [bankRow(w.personal, 'k1')], w.family)
+      w.set(w.personal, { ledgers: ['personal'], rows: { family: 'keep' } })
+      return { ...w, kept: w.splitOff(w.family) }
+    }
+    const w = kept()
+    expect(leaveSplitOffBankIds(w.family, w.ctxOf, w.kept)).toBe(1)
+    w.storage.registry.remove(w.family.ledger.id)
+    expect(plaid(w, [remote('k1', '2026-09-20', -9_000, 'Book Shop')])).toMatchObject({ added: 0, updated: 0 })
+    expect(w.rowsOn(w.personal, w.visa)).toMatchObject([{ externalId: 'k1', deleted: 1 }])
+    expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
+
+    const before = kept()
+    expect(() => before.storage.registry.remove(before.family.ledger.id)).not.toThrow()
+    expect(before.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 })

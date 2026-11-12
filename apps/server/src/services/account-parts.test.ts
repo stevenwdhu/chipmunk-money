@@ -355,11 +355,11 @@ describe('changing a shared account in a ledger it’s shared with', () => {
   it('isn’t deleted while shared, in any ledger that has it', () => {
     const w = sharedWorld()
     const stop = { status: 409, message: 'Stop sharing Visa first.' }
-    expect(status(() => deleteAccount(w.family, w.visa))).toEqual(stop)
-    expect(status(() => deleteAccount(w.personal, w.visa))).toEqual(stop)
+    expect(status(() => deleteAccount(w.family, w.ctxOf, w.visa))).toEqual(stop)
+    expect(status(() => deleteAccount(w.personal, w.ctxOf, w.visa))).toEqual(stop)
     expect(getAccount(w.family, w.visa).sharing).not.toBeNull()
     removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER)
-    deleteAccount(w.personal, w.visa)
+    deleteAccount(w.personal, w.ctxOf, w.visa)
     expect(listAccounts(w.personal)).toEqual([])
   })
 })

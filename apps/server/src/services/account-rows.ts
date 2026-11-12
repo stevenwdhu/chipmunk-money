@@ -10,20 +10,21 @@ import type { AppContext } from './context'
  * account's rows are held by its home and by the ledgers it's shared with. Everything that reads an
  * account across ledgers is here, under one reason in db/unscoped-sites.ts, and goes through
  * `everyLedger`, the module's one unscoped call. What leaves is sums, counts and names, and the
- * account's rows, each with the ledger that holds it, for three users only. The bank code: sync
+ * account's rows, each with the ledger that holds it, for four users only. The bank code: sync
  * matches against them and writes each row through its holder's context (bankRows, bankIds,
  * holder), and a switch pairs them the same way (switchRows), its review showing them only to a
  * caller allowed in every ledger that has the account. A CSV import's duplicate check
  * (importedRows), whose preview names no other ledger's row. And the all-ledgers list
  * (accountTransactions), for a caller allowed in every ledger that has the account, which shows
  * names and amounts but no other ledger's category, tag or link ids. Other than that list and the
- * switch's review, those never reach a response.
+ * switch's review, those never reach a response. And deleting a split-off account (splitOffHistory,
+ * for accounts.ts), which leaves the account it was split off from the bank ids it must keep knowing.
  *
  * The reads a bank or a CSV matches against also cover the rows a ledger kept when it stopped
- * sharing the account: the rows of its split-off accounts (accounts.split_from_id) that were there
- * when each was made, marked `frozen` (FROZEN). They still carry the bank's ids, so the account's
- * sync and imports know them and never add them again, and never change them either. Sums never
- * count them.
+ * sharing the account: the rows of the accounts split off from it, at any depth (each names the one
+ * it was split off from in accounts.split_from_id), that were the account's before they left it,
+ * marked `frozen` (FROZEN). They still carry the bank's ids, so the account's sync and imports know
+ * them and never add them again, and never change them either. Sums never count them.
  *
  * A service reaches these through ctx.accountWide: the reads bound to the connection once
  * (accountReadsOn), shared by every context. To add a read, add a function to READS: it takes the
@@ -162,6 +163,24 @@ export interface SplitOff {
 }
 
 /**
+ * A row with a bank id that a split-off account (or one split off from it in turn) kept, as the
+ * account it was split off from must still know it once the split-off account goes. For accounts.ts only.
+ */
+export interface SplitOffHistoryRow {
+  date: ISODate
+  datetime: string | null
+  amountMinor: number
+  currency: string
+  payee: string
+  payeeKey: string
+  status: 'cleared' | 'pending'
+  origin: 'manual' | 'import' | 'sync'
+  externalId: string
+  deletedAt: string | null
+  createdAt: string
+}
+
+/**
  * A row of a shared account as the all-ledgers list shows it, in whichever ledger holds it: its
  * category by name only, and no ids of what it's linked to there. For listAccountTransactions only.
  */
@@ -186,13 +205,25 @@ export interface AccountTransactionRow {
 }
 
 /**
+ * The accounts split off from @accountId, at any depth, as `split_offs`: each split-off account
+ * names the one it was split off from (split_from_id), so this walks down from the account. Each
+ * comes with `bound`, when the account directly below @accountId on its way down was made: the
+ * moment its rows left @accountId. A query that reads MATCHED starts with it.
+ */
+const SPLIT_OFFS = `WITH RECURSIVE split_offs(id, bound) AS (
+    SELECT s.id, s.created_at FROM accounts s WHERE s.split_from_id = @accountId
+    UNION SELECT s.id, b.bound FROM accounts s JOIN split_offs b ON s.split_from_id = b.id)`
+
+/**
  * The rows a bank or a CSV matches against, as `t`: the account's own (named @accountId), and the
- * frozen ones, which a split-off account had when it was made. A split-off account is made with
- * split_from_id naming the account, and takes the leaving ledger's rows in the same transaction, so
- * those were created before it was. Rows added to it later aren't the account's history.
+ * frozen ones, which were the account's before they went to an account split off from it
+ * (SPLIT_OFFS). A split-off account takes the leaving ledger's rows in the transaction that makes
+ * it, so those were created before it was. Rows added to it later, or to one split off from it in
+ * turn, aren't the account's history: they're bounded by when the first split-off account below
+ * @accountId on their way was made.
  */
 const MATCHED = `(t.account_id = @accountId
-  OR t.account_id IN (SELECT s.id FROM accounts s WHERE s.split_from_id = @accountId AND t.created_at <= s.created_at))`
+  OR EXISTS (SELECT 1 FROM split_offs b WHERE b.id = t.account_id AND t.created_at <= b.bound))`
 
 /** Of MATCHED, whether `t` is a frozen row (1) or the account's own (0). */
 const FROZEN = '(t.account_id <> @accountId)'
@@ -312,7 +343,8 @@ const READS = {
   bankRows(db: UnscopedQuery, accountId: number, since: ISODate): BankRow[] {
     return db
       .all<Omit<BankRow, 'frozen'> & { frozen: number }>(
-        `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
+        `${SPLIT_OFFS}
+         SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
            t.external_id AS externalId, t.corrected_at AS correctedAt, t.deleted_at AS deletedAt, t.removed_at AS removedAt,
            t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen
          FROM transactions t
@@ -325,7 +357,7 @@ const READS = {
 
   /** The bank ids the account's rows carry, in every ledger, deleted ones and frozen ones (MATCHED) included. For the bank code only. */
   bankIds(db: UnscopedQuery, accountId: number): string[] {
-    return db.column<string>(`SELECT t.external_id FROM transactions t WHERE ${MATCHED} AND t.external_id IS NOT NULL ORDER BY t.id`, { accountId })
+    return db.column<string>(`${SPLIT_OFFS} SELECT t.external_id FROM transactions t WHERE ${MATCHED} AND t.external_id IS NOT NULL ORDER BY t.id`, { accountId })
   },
 
   /**
@@ -334,7 +366,8 @@ const READS = {
    */
   holder(db: UnscopedQuery, accountId: number, externalId: string): BankIdHolder | undefined {
     const row = db.get<{ id: number; ledgerId: string; deleted: number; frozen: number }>(
-      `SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted, ${FROZEN} AS frozen FROM transactions t
+      `${SPLIT_OFFS}
+       SELECT t.id, t.ledger_id AS ledgerId, t.deleted_at IS NOT NULL AS deleted, ${FROZEN} AS frozen FROM transactions t
        WHERE ${MATCHED} AND t.external_id = @externalId ORDER BY ${FROZEN}, t.id LIMIT 1`,
       { accountId, externalId },
     )
@@ -354,7 +387,8 @@ const READS = {
   importedRows(db: UnscopedQuery, accountId: number, opts: { externalIds: readonly string[]; from: ISODate; to: ISODate }): ImportedRow[] {
     return db
       .all<Omit<ImportedRow, 'deleted' | 'frozen'> & { deleted: number; frozen: number }>(
-        `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, t.external_id AS externalId,
+        `${SPLIT_OFFS}
+         SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, t.external_id AS externalId,
            t.deleted_at IS NOT NULL AS deleted, ${FROZEN} AS frozen
          FROM transactions t
          WHERE ${MATCHED}
@@ -366,16 +400,18 @@ const READS = {
   },
 
   /**
-   * The payees of the account's purchases dated from `from` to `to`, in every ledger: its debits
-   * that aren't deleted or a transfer. Matching asks only whether a merchant has any, so that money
-   * back from it isn't filed as a card payment.
+   * The payees of the account's purchases dated from `from` to `to`, in every ledger, frozen ones
+   * too (MATCHED): its debits that aren't deleted or a transfer. Matching asks only whether a
+   * merchant has any, so that money back from it isn't filed as a card payment, also when the
+   * purchase went to an account of its own with a ledger that stopped sharing the account.
    */
   purchasePayees(db: UnscopedQuery, accountId: number, from: ISODate, to: ISODate): Array<{ payee: string; payeeKey: string }> {
     // Split rows (the shares a payment gives other ledgers) are to be left out here: a share is a
     // debit, and counted as a purchase it would keep every later card payment from being filed as one.
     return db.all<{ payee: string; payeeKey: string }>(
-      `SELECT DISTINCT t.payee, t.payee_key AS payeeKey FROM transactions t
-       WHERE t.account_id = @accountId AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
+      `${SPLIT_OFFS}
+       SELECT DISTINCT t.payee, t.payee_key AS payeeKey FROM transactions t
+       WHERE ${MATCHED} AND t.amount_minor < 0 AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
          AND t.date BETWEEN @from AND @to
        ORDER BY t.payee_key, t.payee`,
       { accountId, from, to },
@@ -388,7 +424,8 @@ const READS = {
    */
   switchRows(db: UnscopedQuery, accountId: number, from: ISODate): SwitchRow[] {
     return db.all<SwitchRow>(
-      `SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amountMinor, t.name, t.payee, t.payee_key AS payeeKey, t.origin,
+      `${SPLIT_OFFS}
+       SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amountMinor, t.name, t.payee, t.payee_key AS payeeKey, t.origin,
          t.external_id AS externalId, t.deleted_at AS deletedAt,
          CASE WHEN ${FROZEN} THEN (SELECT s.name FROM accounts s WHERE s.id = t.account_id) END AS splitOff
        FROM transactions t
@@ -406,7 +443,8 @@ const READS = {
   switchStamp(db: UnscopedQuery, accountId: number): string {
     const rows = db
       .all(
-        `SELECT t.id, t.ledger_id, t.account_id, t.date, t.amount_minor, t.payee, t.name, t.external_id, t.deleted_at IS NOT NULL AS deleted
+        `${SPLIT_OFFS}
+         SELECT t.id, t.ledger_id, t.account_id, t.date, t.amount_minor, t.payee, t.name, t.external_id, t.deleted_at IS NOT NULL AS deleted
          FROM transactions t WHERE ${MATCHED} ORDER BY t.id`,
         { accountId },
       )
@@ -414,9 +452,43 @@ const READS = {
     return createHash('sha1').update(JSON.stringify(rows)).digest('hex')
   },
 
-  /** The accounts split off from this one (accounts.split_from_id), each in the ledger that kept its rows, oldest first. */
+  /**
+   * The accounts split off from this one, at any depth (SPLIT_OFFS): one a ledger kept its rows on,
+   * and one split off from that in turn. Each in the ledger that kept its rows, oldest first.
+   */
   splitOffs(db: UnscopedQuery, accountId: number): SplitOff[] {
-    return db.all<SplitOff>('SELECT s.id, s.name, s.ledger_id AS ledgerId FROM accounts s WHERE s.split_from_id = ? ORDER BY s.id', accountId)
+    return db.all<SplitOff>(
+      `${SPLIT_OFFS} SELECT s.id, s.name, s.ledger_id AS ledgerId FROM accounts s WHERE s.id IN (SELECT id FROM split_offs) ORDER BY s.id`,
+      { accountId },
+    )
+  },
+
+  /**
+   * What a split-off account leaves the account it was split off from (split_from_id) when it goes:
+   * that account and its home, or null when there's none (any more). And the rows with a bank id
+   * that account matches through this one (MATCHED there): this one's and those of the accounts
+   * split off from it in turn, created before it was made, deleted ones too, each bank id once, and
+   * none the parent has a row with already. For accounts.ts's leaveSplitOffBankIds only.
+   */
+  splitOffHistory(db: UnscopedQuery, splitOffId: number): { parent: { id: number; homeLedgerId: string } | null; rows: SplitOffHistoryRow[] } {
+    const parent = db.get<{ id: number; homeLedgerId: string }>(
+      'SELECT p.id, p.ledger_id AS homeLedgerId FROM accounts s JOIN accounts p ON p.id = s.split_from_id WHERE s.id = ?',
+      splitOffId,
+    )
+    if (!parent) return { parent: null, rows: [] }
+    const rows = db.all<SplitOffHistoryRow>(
+      `WITH RECURSIVE below(id) AS (SELECT @splitOffId UNION SELECT s.id FROM accounts s JOIN below b ON s.split_from_id = b.id)
+       SELECT t.date, t.datetime, t.amount_minor AS amountMinor, t.currency, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
+         t.external_id AS externalId, t.deleted_at AS deletedAt, t.created_at AS createdAt
+       FROM transactions t
+       WHERE t.account_id IN (SELECT id FROM below) AND t.external_id IS NOT NULL
+         AND t.created_at <= (SELECT a.created_at FROM accounts a WHERE a.id = @splitOffId)
+         AND NOT EXISTS (SELECT 1 FROM transactions p WHERE p.account_id = @parentId AND p.external_id = t.external_id)
+       ORDER BY t.id`,
+      { splitOffId, parentId: parent.id },
+    )
+    const seen = new Set<string>()
+    return { parent, rows: rows.filter((r) => !seen.has(r.externalId) && !!seen.add(r.externalId)) }
   },
 
   /**

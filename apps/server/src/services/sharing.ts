@@ -330,8 +330,8 @@ interface Kept {
  *    deleted (sendAsDeleted), so that the posted one Plaid says replaces one stays deleted too.
  * 3. A′ is made through its context: the account's name, type, currency, notes and opening date, its
  *    own institution, place and archive (its member row's), opening balance 0, no bank link and no
- *    import mapping. split_from_id names the account (or the one it was split off from itself), so
- *    the account's bank matching still knows these rows.
+ *    import mapping. split_from_id names the account, the one it's split off from directly (which
+ *    may be split off from another in turn), so the account's bank matching still knows these rows.
  * 4. One UPDATE puts its rows on the account, deleted ones too, on A′, out of their imports. It
  *    changes the account within one ledger, so it goes through its context.
  * 5. Its recurring items on the account are on A′, and so are its reports' filters.
@@ -361,7 +361,6 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
   for (let i = 0; i < gone.length; i += MOVE_LIMIT) sentAsDeleted += sendAsDeleted(member, ctxOf, { ids: gone.slice(i, i + MOVE_LIMIT), to: home.ledger.id })
 
   const facts = home.accountWide.account(accountId)!
-  const splitFrom = home.q.pluck<number | null>('SELECT split_from_id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', accountId) ?? null
   const place = member.q.get<{ institutionId: number; sort: number; archivedAt: string | null }>(
     'SELECT institution_id AS institutionId, sort, archived_at AS archivedAt FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?',
     accountId,
@@ -370,7 +369,7 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
     member.q.run(
       `INSERT INTO accounts (ledger_id, name, type, currency, opening_balance_minor, opening_date, institution_id, notes, archived_at, sort, split_from_id)
        VALUES (@ledger, @name, @type, @currency, 0, @openingDate, @institutionId, @notes, @archivedAt, @sort, @splitFrom)`,
-      { name: facts.name, type: facts.type, currency: facts.currency, openingDate: facts.openingDate, notes: facts.notes, ...place, splitFrom: splitFrom ?? accountId },
+      { name: facts.name, type: facts.type, currency: facts.currency, openingDate: facts.openingDate, notes: facts.notes, ...place, splitFrom: accountId },
     ).lastInsertRowid,
   )
 

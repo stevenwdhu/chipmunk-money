@@ -309,7 +309,7 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
 
     // So the ledger, then the account, can be deleted.
     w.storage.registry.remove(family.ledger.id)
-    deleteAccount(personal, w.visa)
+    deleteAccount(personal, w.ctxOf, w.visa)
     expect(listAccounts(personal)).toEqual([])
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
@@ -375,7 +375,7 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
     expect(family.q.column('SELECT payee FROM transactions WHERE ledger_id = @ledger AND import_batch_id IS NULL ORDER BY date')).toEqual(['Hardware', 'Bakery'])
     expect(w.check()).toEqual({ parts: { family: -1_100 }, totalMinor: -1_100 })
     expect(getAccount(family, w.visa).sharing).toBeNull()
-    deleteAccount(family, w.visa)
+    deleteAccount(family, w.ctxOf, w.visa)
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 
@@ -449,7 +449,7 @@ describe('setSharing', () => {
 
     // Nothing of Personal names the account: the ledger goes, then the account.
     w.storage.registry.remove(personal.ledger.id)
-    deleteAccount(family, w.visa)
+    deleteAccount(family, w.ctxOf, w.visa)
     expect(listAccounts(family)).toEqual([])
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })

@@ -164,11 +164,12 @@ export function matchTransactions(ctx: AppContext, opts: { since?: string; earli
   const paymentCategory = cardPaymentCategory(ctx)
   const shared = new Map<number, boolean>()
   /**
-   * A shared account's purchases from this merchant that other ledgers hold (one moved there): money
-   * back from it is still no card payment, though it can't be linked to them across ledgers.
+   * A shared account's purchases from this merchant that other ledgers hold (one moved there), or
+   * that a ledger kept on an account of its own when it stopped sharing it: money back from it is
+   * still no card payment, though it can't be linked to them across ledgers.
    */
   const boughtElsewhere = (c: Row) => {
-    if (!shared.has(c.accountId)) shared.set(c.accountId, ctx.accountWide.isShared(c.accountId))
+    if (!shared.has(c.accountId)) shared.set(c.accountId, ctx.accountWide.isShared(c.accountId) || ctx.accountWide.splitOffs(c.accountId).length > 0)
     if (!shared.get(c.accountId)) return false
     return ctx.accountWide
       .purchasePayees(c.accountId, addDays(c.date, -MERCHANT_DAYS), c.date)

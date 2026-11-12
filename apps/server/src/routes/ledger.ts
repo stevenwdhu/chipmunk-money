@@ -727,7 +727,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params }) => {
       const before = accounts.getAccount(c.var.ctx, params.id)
-      accounts.deleteAccount(c.var.ctx, params.id)
+      accounts.deleteAccount(c.var.ctx, storage.ctxOf, params.id)
       log(c, { action: 'delete', entity: 'account', entityId: before.id, summary: `Deleted the account ${before.name}`, before })
       removeIfEmpty(c, before.institutionId)
     },
