@@ -393,11 +393,33 @@ export function previewMove({ from, ...input }: MoveInput) {
   return api.post<MoveResult>(dry(ledgerPath('/transactions/move', from)), input)
 }
 
-/** Moves transactions to another ledger that has their account. */
+/**
+ * Transactions that just moved to another ledger. A list that keeps a row that stops matching
+ * (useTransactions with `keep`) lets these go instead of asking for each one where it no longer is.
+ * One is forgotten here once a list has it again (moved back, say).
+ */
+const movedAway = new Set<number>()
+
+/** What's asked of one transaction by its id (useTransaction, its bank data, its links and what it could link to). */
+const ONE_ROW = new Set(['one', 'bank-data', 'links', 'link-candidates'])
+
+/**
+ * Moves transactions to another ledger that has their account. Before everything is refreshed, what
+ * was asked of each one by its id is dropped (an editor still open on it asks nothing more), and the
+ * lists are told to let them go: refreshed where they were, each would be a 404.
+ */
 export function useMoveTransactions() {
+  const qc = useQueryClient()
+  const invalidateAll = useInvalidateAll()
   return useMutation({
     mutationFn: ({ from, ...input }: MoveInput) => api.post<MoveResult>(ledgerPath('/transactions/move', from), input),
-    onSuccess: useInvalidateAll(),
+    onSuccess: (_r, { ids }) => {
+      for (const id of ids) movedAway.add(id)
+      qc.removeQueries({
+        predicate: ({ queryKey: k }) => k[0] === 'l' && k[2] === 'transactions' && ONE_ROW.has(k[3] as string) && k.slice(4).some((id) => ids.includes(id as number)),
+      })
+      return invalidateAll()
+    },
   })
 }
 
@@ -712,8 +734,10 @@ export function useTransactions(filters: MaybeRefOrGetter<TransactionFilters>, p
         return
       }
       const ids = new Set(now.map((t) => t.id))
-      const next = new Map([...kept.value].filter(([id]) => !ids.has(id)))
-      const gone = rows.value.filter((t) => !ids.has(t.id) && !next.has(t.id))
+      for (const id of ids) movedAway.delete(id)
+      // One that moved to another ledger isn't kept: it's no longer this ledger's to show or ask for.
+      const next = new Map([...kept.value].filter(([id]) => !ids.has(id) && !movedAway.has(id)))
+      const gone = rows.value.filter((t) => !ids.has(t.id) && !next.has(t.id) && !movedAway.has(t.id))
       for (const t of gone) next.set(t.id, t)
       kept.value = next
       rows.value = withKept(rows.value, now, next)

@@ -8,7 +8,8 @@ import { foldGiven } from '@/lib/sharing'
  * How many transactions are listed and the money in and out. Transfers between your accounts cancel
  * out across accounts, so they count only for a single account's list. What a split payment gave the
  * other ledgers shows under the payment, not as a row, so it isn't counted as a transaction, and it
- * is money out like the amount the list shows there.
+ * is money out like the amount the list shows there. With more still to load, the count is what's
+ * loaded so far ("100+"), as the page asks for them.
  */
 const props = defineProps<{ items: Transaction[]; more?: boolean; singleAccount?: boolean }>()
 
@@ -20,7 +21,7 @@ const totals = computed(() => {
     if (t.amountMinor > 0) inflow += t.amountMinor
     else outflow += t.amountMinor
   }
-  return { inflow, outflow, count: foldGiven(props.items).items.length }
+  return { inflow, outflow, count: props.more ? props.items.length : foldGiven(props.items).items.length }
 })
 </script>
 

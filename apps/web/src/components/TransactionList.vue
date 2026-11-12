@@ -22,12 +22,17 @@ const props = withDefaults(
     balanceOf?: (tx: T) => number | null
     /** Rows shown faded: changed so they no longer match the filters, kept until those change. */
     faded?: Set<number>
+    /** Split payments whose given row was folded under them before the list got them (its rows are already folded). */
+    under?: Set<number>
   }>(),
   { showDate: true },
 )
 const emit = defineEmits<{ open: [Transaction]; accept: [Transaction] }>()
 
-const shown = computed(() => foldGiven(props.items).items)
+const folded = computed(() => foldGiven(props.items))
+const shown = computed(() => folded.value.items)
+/** A split payment with its given row folded under it, here or before. */
+const givenUnder = (tx: T) => folded.value.under.has(tx.id) || !!props.under?.has(tx.id)
 
 // Written out in full so Tailwind sees each one.
 const WIDE: Record<string, string> = {
@@ -51,6 +56,7 @@ const columns = computed(() => WIDE[[props.showDate && 'date', props.showAccount
         :show-date="showDate"
         :show-account="showAccount"
         :balance="balanceOf?.(tx) ?? null"
+        :given-under="givenUnder(tx)"
         :class="faded?.has(tx.id) && 'opacity-60'"
         :title="faded?.has(tx.id) ? 'It doesn’t match the filters any more. It stays until you change them.' : undefined"
         @open="emit('open', $event)"

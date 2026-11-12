@@ -21,6 +21,8 @@ const props = withDefaults(
     showDate?: boolean
     /** The account's balance after this transaction, as its statement shows it. */
     balance?: number | null
+    /** A split payment whose given row is folded under it: what it gave shows as an amount too. */
+    givenUnder?: boolean
   }>(),
   { showDate: true, balance: null },
 )
@@ -75,10 +77,10 @@ const meta = computed(() => {
           <LinkBadge :tx="tx" />
           <Repeat v-if="tx.recurringItemId" class="size-3 shrink-0 text-muted-foreground" aria-label="Recurring" />
         </div>
-        <!-- A split payment: what it gave the other ledgers, under it. -->
+        <!-- A split payment: what it gave the other ledgers, under it. The amount only when its given row is folded here, so the totals have it. -->
         <div v-if="tx.split?.part === 'payment'" class="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
           <span class="truncate">{{ sharesFor(tx.split.shares).text }}</span>
-          <MoneyText :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
+          <MoneyText v-if="givenUnder" :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
           <span v-if="tx.split.keptMinor < 0" class="text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
         </div>
         <div v-if="sentPayeeUnder(tx)" class="truncate text-xs text-muted-foreground">{{ sentPayeeUnder(tx) }}</div>

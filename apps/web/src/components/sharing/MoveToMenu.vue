@@ -11,13 +11,15 @@ import { previewMove, useLedgers, useMoveTransactions } from '@/composables/quer
 import { errorMessage } from '@/lib/api'
 import { currentLedger } from '@/lib/ledger'
 import { dropsAnything, moveDrops, moveSummary } from '@/lib/sharing'
+import { useUiStore } from '@/stores/ui'
 
 /**
  * "Move to…": a menu of the other ledgers that have the transactions' account, around the button in
  * its slot. Picking one asks the server what the move would let go of (a dry run). When it's
  * something, that's said first, to confirm. Otherwise they move right away. Nothing shows when there
  * is no ledger to move them to. When they can't move for another reason (`blocked`), that's said in
- * place of the button.
+ * place of the button. Once they've moved, an editor open on one of them closes: it's another
+ * ledger's now.
  */
 const props = withDefaults(
   defineProps<{
@@ -34,6 +36,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ moved: [MoveResult] }>()
 
+const ui = useUiStore()
 const all = useLedgers()
 const m = useMoveTransactions()
 const from = computed(() => props.from ?? currentLedger.value)
@@ -67,6 +70,7 @@ async function move(ids: number[], to: Ledger) {
   try {
     const r = await m.mutateAsync({ ids, to: to.slug, from: from.value })
     pending.value = null
+    if (ui.editorOpen && ui.editing && ids.includes(ui.editing.id)) ui.close()
     toast.success(`Moved ${r.moved} to ${to.name}`, { description: moveSummary(r, to.name) })
     emit('moved', r)
   } catch (err) {

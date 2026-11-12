@@ -85,6 +85,8 @@ const all = computed<Item[]>(() => props.list.rows.value)
  */
 const folded = computed(() => foldGiven(all.value))
 const items = computed<Item[]>(() => folded.value.items)
+/** The split payments with their given row folded under them, for the phone list (its rows are already folded). */
+const foldedUnder = computed(() => new Set(folded.value.under.keys()))
 /** The server sends running balances for one account's list with no filter but dates. */
 const hasBalances = computed(() => items.value.some((t) => t.balanceAfterMinor !== null))
 /** Changed so it no longer matches the filters: still listed, faded, until they change. */
@@ -330,15 +332,17 @@ const moveLedgers = computed(() => commonLedgers(selectedItems.value.map((t) => 
 const ledgers = useLedgers()
 /**
  * Why a selection with a shared account's transactions in it has no ledger they can all move to,
- * when it hasn't: said where Move to… would be. Nothing for a selection with none of those.
+ * when it hasn't: said where Move to… would be. Nothing unless one of their shared accounts has an
+ * open ledger to move to, and nothing when the ledger they share is only archived (Move to… has no
+ * ledger to offer then, as for one shared account whose other ledgers are archived).
  */
 const moveRefused = computed(() => {
   const of = selectedItems.value.map((t) => accounts.value.get(t.accountId))
-  if (!of.some((a) => a?.sharing)) return null
-  if (of.some((a) => !a?.sharing)) return 'Only transactions on a shared account can move to another ledger.'
   const open = (slug: string) => slug !== currentLedger.value && !ledgers.all.value.find((l) => l.slug === slug)?.archived
+  if (!of.some((a) => a?.sharing?.ledgers.some((l) => open(l.slug)))) return null
+  if (of.some((a) => !a?.sharing)) return 'Only transactions on a shared account can move to another ledger.'
   const several = new Set(of.map((a) => a!.id)).size > 1
-  return several && !moveLedgers.value.some((l) => open(l.slug)) ? 'Their accounts aren’t shared with the same ledger, so they can’t move together.' : null
+  return several && !moveLedgers.value.some((l) => l.slug !== currentLedger.value) ? 'Their accounts aren’t shared with the same ledger, so they can’t move together.' : null
 })
 /** A split payment, and the rows of its split, stay where they are until the split is undone. */
 const moveBlocked = computed(() => (selectedItems.value.some((t) => t.split) ? (selectedItems.value.length === 1 ? MOVE_SPLIT : MOVE_SPLIT_SELECTED) : null))
@@ -482,10 +486,10 @@ async function accept(tx: Transaction) {
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
                 </div>
-                <!-- A split payment: what it gave the other ledgers, under it. -->
+                <!-- A split payment: what it gave the other ledgers, under it. The amount only when its given row is folded here, so the totals have it. -->
                 <div v-if="tx.split?.part === 'payment'" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                   <span class="truncate">{{ sharesFor(tx.split.shares).text }}</span>
-                  <MoneyText :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
+                  <MoneyText v-if="folded.under.has(tx.id)" :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
                   <span v-if="tx.split.keptMinor < 0" class="shrink-0 text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
                 </div>
                 <!-- Under it: its payee as sent, when it shows as something else. Without an Account or Notes column (a narrow table), those too. -->
@@ -559,6 +563,7 @@ async function accept(tx: Transaction) {
             :show-date="false"
             :show-account="!hideAccount"
             :balance-of="balanceOf"
+            :under="foldedUnder"
             @open="ui.openEdit"
             @accept="accept"
           />

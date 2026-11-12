@@ -83,7 +83,8 @@ function request(choices: Record<string, Rows | null>): AccountSharingSet {
 }
 const inputsFor = (p: Part) => ({ home: request({ ...rows.value, [p.slug]: 'home' }), keep: request({ ...rows.value, [p.slug]: 'keep' }) })
 const input = computed(() => (changed.value && asked.value.every((p) => rows.value[p.slug]) ? request(rows.value) : null))
-const preview = useAccountSharingPreview(() => props.account.id, input)
+// Asked only while the dialog shows it: closed, what's ticked stays, and a refresh would ask again.
+const preview = useAccountSharingPreview(() => props.account.id, () => (open.value ? input.value : null))
 
 const holds = (p: Part) => {
   if (p.transactionCount === null || p.balanceMinor === null) return ''
