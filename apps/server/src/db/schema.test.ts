@@ -328,3 +328,42 @@ describe('content triggers', () => {
     expect(tx(w.b.refund)).toMatchObject({ linked: 4000, name: null })
   })
 })
+
+describe('AI request records', () => {
+  const insert = (w: ReturnType<typeof world>, ledger: string, ok: number, kind: string | null, key: string | null) =>
+    w.run("INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok, kind, subject_key) VALUES (?, 'primary', 'm', 10, ?, ?, ?)", ledger, ok, kind, key)
+
+  it('refuse a second open record for the same thing in a ledger', () => {
+    const w = world()
+    insert(w, 'A', 0, 'categorize', 'out:metro')
+    expect(() => insert(w, 'A', 0, 'categorize', 'out:metro')).toThrow(/UNIQUE constraint failed/)
+    // Another thing, another kind and another ledger each have their own.
+    insert(w, 'A', 0, 'categorize', 'in:metro')
+    insert(w, 'A', 0, 'names', 'out:metro')
+    insert(w, 'B', 0, 'categorize', 'out:metro')
+    // One that answered isn't open: any number, and one more open beside them is refused still.
+    insert(w, 'A', 1, 'categorize', 'out:metro')
+    insert(w, 'A', 1, 'categorize', 'out:metro')
+    expect(() => insert(w, 'A', 0, 'categorize', 'out:metro')).toThrow(/UNIQUE constraint failed/)
+    // A record that answered can't be turned back into a second open one.
+    expect(() => w.run("UPDATE ai_calls SET ok = 0 WHERE ledger_id = 'A' AND ok = 1 AND subject_key = 'out:metro'")).toThrow(/UNIQUE constraint failed/)
+    // The open one corrected leaves room for the next failure.
+    w.run("UPDATE ai_calls SET ok = 1 WHERE ledger_id = 'A' AND ok = 0 AND kind = 'categorize' AND subject_key = 'out:metro'")
+    insert(w, 'A', 0, 'categorize', 'out:metro')
+  })
+
+  it('let connection tests and rows from before fail any number of times', () => {
+    const w = world()
+    const failed = () => (w.all("SELECT count(*) AS n FROM ai_calls WHERE ledger_id = 'A' AND ok = 0")[0] as { n: number }).n
+    insert(w, 'A', 0, 'test', null)
+    insert(w, 'A', 0, 'test', null)
+    insert(w, 'A', 0, null, null)
+    insert(w, 'A', 0, null, null)
+    expect(failed()).toBe(4)
+    // A row written as before the columns came: asked once, nothing else known.
+    w.run("INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok) VALUES ('A', 'primary', 'm', 10, 0)")
+    expect(w.all("SELECT kind, subject, subject_key, outcome, tries, first_failed_at, primary_error, tried_at FROM ai_calls WHERE ledger_id = 'A' ORDER BY id DESC LIMIT 1")).toEqual([
+      { kind: null, subject: null, subject_key: null, outcome: null, tries: 1, first_failed_at: null, primary_error: null, tried_at: null },
+    ])
+  })
+})

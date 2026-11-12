@@ -36,6 +36,13 @@
       "when": 1794467474333,
       "tag": "0004_bank_id_rows",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794520319382,
+      "tag": "0005_ai_request_records",
+      "breakpoints": true
     }
   ]
 }

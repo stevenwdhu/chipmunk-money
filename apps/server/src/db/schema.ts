@@ -761,22 +761,57 @@ export const bankPayloads = sqliteTable(
   (t) => [index('bank_payloads_remote').on(t.accountId, t.remoteId), index('bank_payloads_transaction').on(t.transactionId)],
 )
 
+/**
+ * What AI was asked to do, one row per thing asked: a payee to categorize, a set of payees to name,
+ * a connection test. The primary failing and the fallback answering is one row. A row that failed
+ * stays open (`ok` 0) until the same thing is asked again and answered, which corrects that row:
+ * there's one open row per thing (`ai_calls_open`). A row from before requests were recorded has no
+ * `kind`: it's one call to one provider.
+ */
 export const aiCalls = sqliteTable(
   'ai_calls',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    /** The ledger the call was for; null for calls made for the whole app. */
+    /** The ledger the request was for; null for calls made for the whole app. */
     ledgerId: text('ledger_id').references(() => ledgers.id),
+    /** The provider that answered, or the last one tried. */
     slot: text('slot').$type<'primary' | 'fallback'>().notNull(),
     model: text('model').notNull(),
+    /** Of every call made for it: a failed primary's and each try's count too. */
     inputTokens: integer('input_tokens'),
     outputTokens: integer('output_tokens'),
+    /** How long the last try took, all its calls together. */
     latencyMs: integer('latency_ms').notNull(),
     ok: integer('ok', { mode: 'boolean' }).notNull(),
+    /** Why the last try failed. */
     error: text('error'),
     createdAt: timestamps.createdAt,
+    kind: text('kind').$type<'categorize' | 'names' | 'test'>(),
+    /** What it was about, to show: the payee as the ledger calls it (`categorize`). */
+    subject: text('subject'),
+    /**
+     * Which thing it is: `out:` or `in:` and the payee key (`categorize`), or the payees as sent, a
+     * sorted JSON list (`names`). Null for a connection test, which is never the same thing twice.
+     */
+    subjectKey: text('subject_key'),
+    /** What came of it: the category picked (`categorize`, `test`), or how many payees got a name (`names`). */
+    outcome: text('outcome'),
+    /** How many times it was asked, the first one counted. */
+    tries: integer('tries').notNull().default(1),
+    /** When it first failed, kept when a later try answers. */
+    firstFailedAt: text('first_failed_at'),
+    /** Why the primary failed, when the fallback was asked after it. */
+    primaryError: text('primary_error'),
+    /** When it was last asked; null on a row from before. */
+    triedAt: text('tried_at'),
   },
-  (t) => [index('ai_calls_ledger_created').on(t.ledgerId, t.createdAt)],
+  (t) => [
+    index('ai_calls_ledger_created').on(t.ledgerId, t.createdAt),
+    // One open (failed) row per thing asked: asking again corrects it.
+    uniqueIndex('ai_calls_open')
+      .on(t.ledgerId, t.kind, t.subjectKey)
+      .where(sql`${t.ok} = 0 AND ${t.subjectKey} IS NOT NULL`),
+  ],
 )
 
 /**
