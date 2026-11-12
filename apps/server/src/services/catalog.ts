@@ -4,6 +4,7 @@ import type { UnscopedQuery } from '../db/scope'
 import type { Storage } from '../storage'
 import type { AppContext } from './context'
 import { joinCategoryRefs } from './custom-reports'
+import { refuseCountingSplitRows } from './splits'
 
 /**
  * The shared category list, and how a ledger uses it.
@@ -373,7 +374,8 @@ export function leaveSharedList(ctx: AppContext) {
  * Brings a ledger with its own list onto the shared one. Its categories are matched to the shared
  * list by name (or a former default name), or as `resolve` says; ones the list doesn't have are
  * added to it. What used them moves to the shared ones, and its own rows go. A shared category is on
- * for it when one of its categories that became it was on, or when none did.
+ * for it when one of its categories that became it was on, or when none did. Refused (409) when a
+ * category split rows use would go, or become one that counts in totals (refuseCountingSplitRows).
  */
 export function joinSharedList(storage: Storage, ctx: AppContext, resolve?: Map<number, JoinResolution>) {
   if (usesSharedList(ctx)) return
@@ -414,6 +416,13 @@ export function joinSharedList(storage: Storage, ctx: AppContext, resolve?: Map<
         const target = map.get(c.id)
         if (target === null || target === undefined) continue
         off.set(target, off.has(target) && off.get(target) === null ? null : c.archivedAt)
+      }
+
+      // Split rows stay in a category left out of totals: refused when theirs goes, or becomes one that counts.
+      const targets = new Map(readCatalog(db).categories.map((c) => [c.id, c]))
+      for (const c of own) {
+        const target = map.get(c.id)
+        if (target === null || target === undefined || !targets.get(target)?.excludeFromTotals) refuseCountingSplitRows(ctx, c)
       }
 
       ctx.q.transaction(() => {

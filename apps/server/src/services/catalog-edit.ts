@@ -4,6 +4,7 @@ import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { onSharedList, readCatalog, usesSharedList, type Catalog, type SharedList } from './catalog'
 import { moveCategoryUsage } from './categories'
+import { refileSplitRows, refuseCountingSplitRows } from './splits'
 
 /**
  * Changes to the shared category list (App settings → Categories). The list is one set of rows
@@ -109,10 +110,12 @@ function setLabels(db: SharedList, categoryId: number, labelIds: number[]) {
 /**
  * Shared categories that are going: in every ledger, their transactions become uncategorized (and
  * no longer say a rule, AI or a link categorized them, or that they need review), and their
- * recurring payments lose them. Then they're deleted.
+ * recurring payments lose them. Then they're deleted. Split rows in them go to each ledger's other
+ * category for card payments first, or it's a 409 (refileSplitRows).
  */
-function forget(db: SharedList, ids: number[]) {
+function forget(storage: Storage, db: SharedList, ids: number[]) {
   if (!ids.length) return
+  for (const ctx of sharing(storage)) refileSplitRows(ctx, ids, null)
   const list = JSON.stringify(ids)
   db.run(
     `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0
@@ -122,6 +125,13 @@ function forget(db: SharedList, ids: number[]) {
   db.run('UPDATE recurring_items SET category_id = NULL WHERE category_id IN (SELECT value FROM json_each(?))', list)
   db.run('DELETE FROM categories WHERE ledger_id IS NULL AND id IN (SELECT value FROM json_each(?))', list)
 }
+
+/** The ledgers that use the shared list, each by its context. */
+const sharing = (storage: Storage) =>
+  storage.registry
+    .list()
+    .map((l) => storage.registry.context(l.id))
+    .filter(usesSharedList)
 
 // Groups ---------------------------------------------------------------------------
 
@@ -155,6 +165,7 @@ export function deleteCatalogGroup(storage: Storage, id: number): Category[] {
     const catalog = readCatalog(db)
     const removed = catalog.categories.filter((c) => c.groupId === id)
     forget(
+      storage,
       db,
       removed.map((c) => c.id),
     )
@@ -196,6 +207,8 @@ export function updateCatalogCategory(
   return edit(storage, (db) => {
     const c = categoryIn(db, id)
     if (input.groupId) groupIn(db, input.groupId)
+    // Split rows stay in a category left out of totals, in every ledger on the list.
+    if (input.excludeFromTotals === false && c.excludeFromTotals) for (const ctx of sharing(storage)) refuseCountingSplitRows(ctx, c)
     db.run(
       `UPDATE categories SET name = ?, group_id = ?, is_income = ?, exclude_from_totals = ?, sort = ?, updated_at = ${NOW} WHERE ledger_id IS NULL AND id = ?`,
       input.name ?? c.name,
@@ -214,7 +227,7 @@ export function updateCatalogCategory(
 export function deleteCatalogCategory(storage: Storage, id: number): Category {
   return edit(storage, (db) => {
     const c = categoryIn(db, id)
-    forget(db, [id])
+    forget(storage, db, [id])
     return c
   })
 }
@@ -236,9 +249,7 @@ export function mergeCatalogCategory(
     let transactions = 0
     let recurring = 0
     let reports = 0
-    for (const l of storage.registry.list()) {
-      const ctx = storage.registry.context(l.id)
-      if (!usesSharedList(ctx)) continue
+    for (const ctx of sharing(storage)) {
       const wasOn = !ctx.q.pluck('SELECT 1 FROM ledger_category_off WHERE ledger_id = @ledger AND category_id = @id', { id })
       const r = moveCategoryUsage(ctx, id, into)
       if (wasOn) ctx.q.run('DELETE FROM ledger_category_off WHERE ledger_id = @ledger AND category_id = @into', { into })

@@ -218,7 +218,8 @@ export function aiJobStatus(ctx: AppContext): AiJobStatus {
 
 /**
  * Asks the configured LLM about uncategorized transactions, one request per distinct payee, and
- * applies the answer to every transaction from that payee (flagged for review).
+ * applies the answer to every transaction from that payee (flagged for review). Never a split row
+ * (a share of a split payment, or what its holder gave): its category is the split's.
  */
 export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[]; limit?: number } = {}) {
   const aiJob = aiJobStatus(ctx)
@@ -238,6 +239,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
        bank_category AS bankCategory, bank_category_confident AS bankConfident
      FROM transactions
      WHERE ledger_id = @ledger AND category_id IS NULL AND deleted_at IS NULL AND transfer_pair_id IS NULL AND category_source IS NOT 'linked'
+       AND split_of IS NULL
        ${opts.batchId ? 'AND import_batch_id = ?' : ''}
        ${opts.ids ? 'AND id IN (SELECT value FROM json_each(?))' : ''}
      ORDER BY date DESC`,
@@ -260,7 +262,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
   const update = (...params: unknown[]) =>
     ctx.q.run(
       `UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ?
-       WHERE id = ? AND ledger_id = @ledger AND category_id IS NULL`,
+       WHERE id = ? AND ledger_id = @ledger AND category_id IS NULL AND split_of IS NULL`,
       ...params,
     )
   try {
@@ -312,7 +314,8 @@ export interface Recategorized {
  * once per payee, amount and notes. A different pick replaces the category as a suggestion to review
  * (applied, when the bank's category backs it). A payee you always set one way isn't asked about: its
  * transactions waiting for a category get yours. Left as they are: transfers, refunds and paybacks that
- * follow their purchase, and payments a recurring item categorizes. `onDone` hears what changed. Throws
+ * follow their purchase, payments a recurring item categorizes, and split rows (a share of a split
+ * payment, or what its holder gave), whose category must stay left out of totals. `onDone` hears what changed. Throws
  * when AI isn't set up or is already at work in this ledger.
  */
 export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: Recategorized[]) => void): AiJobStatus {
@@ -336,7 +339,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
        bank_category AS bankCategory, bank_category_confident AS bankConfident, category_id AS categoryId, category_source AS source
      FROM transactions
      WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND transfer_pair_id IS NULL
-       AND COALESCE(category_source, '') NOT IN ('linked', 'recurring')
+       AND COALESCE(category_source, '') NOT IN ('linked', 'recurring') AND split_of IS NULL
      ORDER BY date DESC`,
     JSON.stringify(ids),
   )
@@ -349,7 +352,10 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
   }
   const work = [...groups.values()]
   const set = (...params: unknown[]) =>
-    ctx.q.run('UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger', ...params)
+    ctx.q.run(
+      'UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger AND split_of IS NULL',
+      ...params,
+    )
   const changed: Recategorized[] = always.size ? applyPayeeChoices(ctx, [...always]) : []
   Object.assign(aiJob, { running: true, total: work.length, done: 0, categorized: changed.length, startedAt: new Date().toISOString() })
   void (async () => {

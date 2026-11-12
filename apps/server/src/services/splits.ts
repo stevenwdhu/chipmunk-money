@@ -213,6 +213,64 @@ export function checkSplitEdit(ctx: AppContext, part: SplitPart, edit: SplitEdit
   if (edit.amountMinor !== undefined || edit.date || edit.account || edit.payee || edit.status || edit.recurringItem || !offTotals) refuseSplitRow(ctx, part)
 }
 
+/** How many split rows of this ledger are in these categories. */
+function splitRowsIn(ctx: AppContext, categoryIds: readonly number[]): number {
+  return ctx.q.pluck<number>(
+    'SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL AND category_id IN (SELECT value FROM json_each(?))',
+    JSON.stringify(categoryIds),
+  )!
+}
+
+/** The 409 for a category change that would leave split rows counted in totals, naming the category they use. */
+function splitRowsUse(name: string): never {
+  throw new HTTPException(409, { message: `Split payments use ${name}. Undo those splits first.` })
+}
+
+/**
+ * Refuses (409) making a category count in totals while split rows of this ledger use it: they'd be
+ * counted as income and spending. "Split payments use Credit card payment. Undo those splits first."
+ */
+export function refuseCountingSplitRows(ctx: AppContext, category: { id: number; name: string }): void {
+  if (splitRowsIn(ctx, [category.id])) splitRowsUse(category.name)
+}
+
+/**
+ * Before categories go away in this ledger (`going`: deleted, turned off, or merged away), or their
+ * transactions go to another one (`into`: that category, or null for none), the split rows in them
+ * are kept in a category left out of totals, the only thing that keeps a share from counting as
+ * income and a given row as spending. When `into` is one left out of totals, they go there with the
+ * rest, and nothing is done here. Otherwise they go to the ledger's other category for card
+ * payments (as transferCategoryId: "Credit card payment", else its first one left out of totals
+ * that's on), none of those going. When it has none, a 409 naming the category they use. Run it in
+ * the caller's transaction, before the change. Returns how many split rows it filed elsewhere.
+ */
+export function refileSplitRows(ctx: AppContext, going: readonly number[], into: number | null): number {
+  if (!going.length || !splitRowsIn(ctx, going)) return 0
+  const list = JSON.stringify(going)
+  if (into !== null && ctx.q.pluck('SELECT exclude_from_totals FROM ledger_categories WHERE ledger_id = @ledger AND id = ?', into)) return 0
+  const to = ctx.q.pluck<number>(
+    `SELECT id FROM ledger_categories
+     WHERE ledger_id = @ledger AND exclude_from_totals = 1 AND archived_at IS NULL AND id NOT IN (SELECT value FROM json_each(?)) AND id IS NOT ?
+     ORDER BY name = 'Credit card payment' DESC, id LIMIT 1`,
+    list,
+    into,
+  )
+  if (to === undefined) {
+    const used = ctx.q.pluck<string>(
+      `SELECT c.name FROM transactions t JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+       WHERE t.ledger_id = @ledger AND t.split_of IS NOT NULL AND t.category_id IN (SELECT value FROM json_each(?)) ORDER BY t.id LIMIT 1`,
+      list,
+    )
+    splitRowsUse(used ?? 'a category that’s going')
+  }
+  return ctx.q.run(
+    `UPDATE transactions SET category_id = ?, category_source = 'user', category_confidence = NULL, needs_review = 0, updated_at = ${NOW}
+     WHERE ledger_id = @ledger AND split_of IS NOT NULL AND category_id IN (SELECT value FROM json_each(?))`,
+    to,
+    list,
+  ).changes
+}
+
 /** Refuses (409) deleting a split payment ("Undo the split first") or a split row of this ledger. */
 export function refuseSplitDelete(ctx: AppContext, id: number): void {
   const part = splitPartOf(ctx, id)

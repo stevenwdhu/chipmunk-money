@@ -5,6 +5,7 @@ import { requireOwnList, usesSharedList } from './catalog'
 import type { AppContext } from './context'
 import { remapCategoryRefs } from './custom-reports'
 import { labelIdsByCategory, listLabels, setCategoryLabels } from './labels'
+import { refileSplitRows, refuseCountingSplitRows } from './splits'
 
 /**
  * A ledger's categories: the list it uses (the shared one, or its own), read through the
@@ -88,10 +89,13 @@ export function createCategory(ctx: AppContext, input: Required<Pick<CategoryCre
   return getCategory(ctx, id)
 }
 
-/** Changes a category of the ledger's own list (`archived`: whether it's off). */
+/**
+ * Changes a category of the ledger's own list (`archived`: whether it's off). One that split rows
+ * use can't start counting in totals: 409 (refuseCountingSplitRows).
+ */
 export function updateCategory(ctx: AppContext, id: number, input: CategoryUpdate & { archived?: boolean }) {
   requireOwnList(ctx)
-  getCategory(ctx, id)
+  const before = getCategory(ctx, id)
   const { archived, labelIds, ...rest } = input
   requireGroup(ctx, rest.groupId)
   const columns = { name: 'name', groupId: 'group_id', isIncome: 'is_income', excludeFromTotals: 'exclude_from_totals', sort: 'sort' } as const
@@ -107,6 +111,8 @@ export function updateCategory(ctx: AppContext, id: number, input: CategoryUpdat
     sets.push('archived_at = @archivedAt')
     values.archivedAt = archived ? ctx.now().toISOString() : null
   }
+  // Split rows stay in a category left out of totals.
+  if (rest.excludeFromTotals === false && before.excludeFromTotals) refuseCountingSplitRows(ctx, before)
   ctx.q.transaction(() => {
     if (labelIds) setCategoryLabels(ctx, id, labelIds)
     ctx.q.run(`UPDATE categories SET ${[...sets, `updated_at = ${NOW}`].join(', ')} WHERE ledger_id = @ledger AND id = @id`, { ...values, id })
@@ -114,12 +120,18 @@ export function updateCategory(ctx: AppContext, id: number, input: CategoryUpdat
   return getCategory(ctx, id)
 }
 
-/** Deletes a category of the ledger's own list. */
+/**
+ * Deletes a category of the ledger's own list. Split rows in it go to its other category for card
+ * payments first, or it's a 409 (refileSplitRows).
+ */
 export function deleteCategory(ctx: AppContext, id: number) {
   requireOwnList(ctx)
   getCategory(ctx, id)
-  // Transactions keep existing but become uncategorized (FK is ON DELETE SET NULL).
-  ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger AND id = @id', { id })
+  ctx.q.transaction(() => {
+    refileSplitRows(ctx, [id], null)
+    // Transactions keep existing but become uncategorized (FK is ON DELETE SET NULL).
+    ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger AND id = @id', { id })
+  })
 }
 
 /** Turns a category on or off for this ledger: in ledger_category_off for a shared one, its archived_at for its own. */
@@ -143,7 +155,8 @@ function setArchived(ctx: AppContext, id: number, archived: boolean) {
  * Turns a category on or off in this ledger (the shared list says what categories there are). One
  * that's off isn't offered when you categorize. Turning off one that transactions use needs
  * `moveTo`: another category for them (and its recurring payments), or null to leave them
- * uncategorized.
+ * uncategorized. Split rows in it never end up uncategorized or counted in totals: they go to the
+ * ledger's other category for card payments, or it's a 409 (refileSplitRows).
  */
 export function setCategoryEnabled(
   ctx: AppContext,
@@ -168,6 +181,7 @@ export function setCategoryEnabled(
       if (input.moveTo) {
         reports = moveCategoryUsage(ctx, id, input.moveTo).reports
       } else {
+        refileSplitRows(ctx, [id], null)
         ctx.q.run(
           `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0,
              updated_at = ${NOW} WHERE ledger_id = @ledger AND category_id = @id`,
@@ -188,11 +202,14 @@ export function setCategoryEnabled(
 /**
  * Moves what uses a category in this ledger to another: its transactions (deleted ones too, so a
  * restore lands in the right place), recurring payments, what the app learned about payees, and
- * custom reports. Merging a shared category does this in every ledger on the list.
+ * custom reports. Merging a shared category does this in every ledger on the list. Split rows go
+ * along only to a category left out of totals: otherwise they go to the ledger's other category for
+ * card payments first, or it's a 409 (refileSplitRows).
  */
 export function moveCategoryUsage(ctx: AppContext, id: number, into: number) {
   return ctx.q.transaction(() => {
     const ids = { id, into }
+    refileSplitRows(ctx, [id], into)
     const transactions = ctx.q.pluck<number>('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND category_id = @id AND deleted_at IS NULL', { id })!
     ctx.q.run(`UPDATE transactions SET category_id = @into, updated_at = ${NOW} WHERE ledger_id = @ledger AND category_id = @id`, ids)
     const recurring = ctx.q.run('UPDATE recurring_items SET category_id = @into WHERE ledger_id = @ledger AND category_id = @id', ids).changes
@@ -261,7 +278,10 @@ export function getGroup(ctx: AppContext, id: number): CategoryGroup {
   return ctx.q.mustGet<CategoryGroup>('SELECT id, name, color, sort FROM ledger_category_groups WHERE ledger_id = @ledger AND id = @id', 'Group not found', { id })
 }
 
-/** Deletes a group of the ledger's own list with its categories (their transactions become uncategorized). Returns the categories it deleted. */
+/**
+ * Deletes a group of the ledger's own list with its categories (their transactions become
+ * uncategorized, but for split rows: refileSplitRows). Returns the categories it deleted.
+ */
 export function deleteGroup(ctx: AppContext, id: number): Category[] {
   requireOwnList(ctx)
   getGroup(ctx, id)
@@ -270,6 +290,11 @@ export function deleteGroup(ctx: AppContext, id: number): Category[] {
     .all<CategoryRow>(`SELECT ${CATEGORY_COLUMNS} FROM categories c WHERE c.ledger_id = @ledger AND c.group_id = @id ORDER BY c.sort, c.id`, { id })
     .map((r) => categoryDTO(r, labelled.get(r.id)))
   ctx.q.transaction(() => {
+    refileSplitRows(
+      ctx,
+      removed.map((c) => c.id),
+      null,
+    )
     ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger AND group_id = @id', { id })
     ctx.q.run('DELETE FROM category_groups WHERE ledger_id = @ledger AND id = @id', { id })
   })
