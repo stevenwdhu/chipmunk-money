@@ -78,7 +78,9 @@ const emptyDescription = computed(() =>
     ? undefined
     : account.value && accountTypeInfo(account.value.type).revalued
       ? 'That’s fine for one you keep up to date with Update balance.'
-      : 'Add one, or import a CSV export from your bank.',
+      : managed.value
+        ? 'Add one, or import a CSV export from your bank.'
+        : `Add one, or move one here from ${sharing.value?.home.name}.`,
 )
 const am = useAccountMutations()
 
@@ -303,16 +305,21 @@ async function removeSnapshot(snapshotId: number) {
       <DialogContent class="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>Delete {{ account.name }}?</DialogTitle>
-          <DialogDescription>
+          <!-- A shared account can't be deleted: the other ledgers have transactions on it. -->
+          <DialogDescription v-if="sharing">
+            {{ account.name }} is shared with {{ sharedWith }}. Stop sharing it first (Share with… in the account’s menu), then delete it. Or
+            archive it to keep its history in reports.
+          </DialogDescription>
+          <DialogDescription v-else>
             This permanently deletes the account and its {{ account.transactionCount }} transaction{{ account.transactionCount === 1 ? '' : 's' }}.
             Archive it instead to keep its history in reports.
           </DialogDescription>
-          <DialogDescription v-if="reportsUsing">{{ reportsUsing }}</DialogDescription>
+          <DialogDescription v-if="reportsUsing && !sharing">{{ reportsUsing }}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" @click="deleteOpen = false">Cancel</Button>
           <Button variant="outline" @click="(deleteOpen = false), toggleArchive()">Archive instead</Button>
-          <Button variant="destructive" :disabled="am.remove.isPending.value" @click="remove">Delete</Button>
+          <Button v-if="!sharing" variant="destructive" :disabled="am.remove.isPending.value" @click="remove">Delete</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

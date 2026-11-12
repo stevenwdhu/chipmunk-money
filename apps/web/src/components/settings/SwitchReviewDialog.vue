@@ -25,6 +25,7 @@ import { useAccountBankMutations, useBankMutations, useSettings } from '@/compos
 import { useToday } from '@/composables/useToday'
 import { ApiError, errorMessage } from '@/lib/api'
 import { shortDate, timeAgo } from '@/lib/format'
+import { sharedNote } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
@@ -35,6 +36,10 @@ import { cn } from '@/lib/utils'
  * same day and payee, another amount). Any two pair by clicking one on each side. What only one side
  * has is kept or added unless you uncheck it, and the bank's from before the account's first
  * transaction (its older history) are folded into one line you can open.
+ *
+ * On a shared account it compares every ledger's transactions, and names the ledger of each one
+ * another ledger holds. A card payment that's split between ledgers can be paired but not removed,
+ * and neither can one on an account a ledger kept when it stopped sharing this one.
  *
  * It compares what the bank account's syncs kept, without fetching, and its connections don't sync on
  * their own while it's open, so what you review is what switches. Desktop only: it's reached from
@@ -92,6 +97,16 @@ const oldSource = computed(() =>
 )
 const newSource = computed(() => (preview.value ? BANK_PROVIDER_LABELS[preview.value.provider] : 'The bank'))
 const money = (n: number) => formatMoney(n, props.account?.currency ?? 'CAD')
+
+/** The ledger that holds one of yours, when it isn't this one: "Family", or "Family · Visa" on an account split off from this one. */
+const heldIn = (l: Local) => (l.elsewhere ? [l.elsewhere.ledger.name, l.elsewhere.account].filter(Boolean).join(' · ') : '')
+/** Why one of yours can't be removed, whatever the bank has. Null when it can. */
+function stays(l: Local): string | null {
+  if (l.deleted) return 'You deleted it, and it stays deleted'
+  if (l.split) return 'It’s split between ledgers. Undo the split to remove it.'
+  if (l.elsewhere?.account) return `It’s on ${l.elsewhere.ledger.name}’s own account now, and stays there`
+  return null
+}
 
 function load(p: LinkPreview) {
   preview.value = p
@@ -250,6 +265,13 @@ const unpairedLocal = computed(() =>
   [...loneLocal.value, ...apart.value.map((a) => a.local)].filter((l) => !l.deleted),
 )
 const unpairedRemote = computed(() => [...loneRemote.value, ...apart.value.map((a) => a.remote)])
+/** Removing another ledger's transaction changes the balance of the ledger that carries the account's opening balance. */
+const removalNote = computed(() => {
+  const account = props.account
+  if (!account?.sharing) return null
+  const holders = new Set(unpairedLocal.value.filter((l) => !keep.value.has(l.id) && l.elsewhere && !l.elsewhere.account).map((l) => l.elsewhere!.ledger.slug))
+  return [...holders].map((slug) => sharedNote([account], slug)).find(Boolean) ?? null
+})
 const summary = computed(() => {
   const added = unpairedRemote.value.filter((r) => add.value.has(r.remoteId)).length
   const removed = unpairedLocal.value.filter((l) => !keep.value.has(l.id)).length
@@ -432,7 +454,8 @@ async function submit() {
                     <Checkbox
                       v-if="line.type !== 'pair'"
                       :model-value="keep.has(l.id)"
-                      :disabled="l.deleted"
+                      :disabled="stays(l) !== null"
+                      :title="stays(l) ?? undefined"
                       aria-label="Keep it"
                       @click.stop
                       @update:model-value="(v) => (keep = toggle(keep, l.id, !!v))"
@@ -445,7 +468,11 @@ async function submit() {
                       :class="line.type !== 'pair' && !keep.has(l.id) && 'text-muted-foreground line-through'"
                       >{{ l.payee }}</span
                     >
+                    <span v-if="l.elsewhere" class="max-w-32 shrink-0 truncate text-xs text-muted-foreground" :title="heldIn(l)">{{
+                      heldIn(l)
+                    }}</span>
                     <span v-if="l.deleted" class="shrink-0 text-xs text-muted-foreground">deleted</span>
+                    <span v-else-if="l.split" class="shrink-0 text-xs text-muted-foreground" :title="stays(l) ?? undefined">split</span>
                     <span class="tabular shrink-0">{{ money(l.amountMinor) }}</span>
                   </template>
                 </div>
@@ -570,6 +597,7 @@ async function submit() {
         </p>
       </template>
 
+      <p v-if="removalNote && preview?.fetchedAt" class="text-sm text-muted-foreground">{{ removalNote }}</p>
       <p v-if="error && preview" class="text-sm text-destructive">{{ error }}</p>
       <DialogFooter class="items-center">
         <span v-if="preview?.fetchedAt" class="mr-auto text-sm text-muted-foreground">{{ summary }}</span>
