@@ -362,8 +362,8 @@ describe('AI request records', () => {
     expect(failed()).toBe(4)
     // A row written as before the columns came: asked once, nothing else known.
     w.run("INSERT INTO ai_calls (ledger_id, slot, model, latency_ms, ok) VALUES ('A', 'primary', 'm', 10, 0)")
-    expect(w.all("SELECT kind, subject, subject_key, outcome, tries, first_failed_at, primary_error, tried_at FROM ai_calls WHERE ledger_id = 'A' ORDER BY id DESC LIMIT 1")).toEqual([
-      { kind: null, subject: null, subject_key: null, outcome: null, tries: 1, first_failed_at: null, primary_error: null, tried_at: null },
+    expect(w.all("SELECT kind, subject, subject_key, outcome, tries, first_failed_at, primary_error, tried_at, asked FROM ai_calls WHERE ledger_id = 'A' ORDER BY id DESC LIMIT 1")).toEqual([
+      { kind: null, subject: null, subject_key: null, outcome: null, tries: 1, first_failed_at: null, primary_error: null, tried_at: null, asked: null },
     ])
   })
 })

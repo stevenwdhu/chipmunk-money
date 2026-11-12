@@ -804,6 +804,12 @@ export const aiCalls = sqliteTable(
     primaryError: text('primary_error'),
     /** When it was last asked; null on a row from before. */
     triedAt: text('tried_at'),
+    /**
+     * The transactions a failed “Ask AI again” asked about, a JSON list of each one's id, the category
+     * it had and whether it waited for review then: what a retry asks about again, while they are as
+     * they were. Null on every other record, and on one that was answered.
+     */
+    asked: text('asked'),
   },
   (t) => [
     index('ai_calls_ledger_created').on(t.ledgerId, t.createdAt),
