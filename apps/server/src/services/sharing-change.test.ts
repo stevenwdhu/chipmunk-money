@@ -501,7 +501,6 @@ describe('setSharing', () => {
     refused({ ledgers: ['family'] }, 'Personal is Visa’s home. Keep it in the list, or name the new home.')
     refused({ ledgers: ['personal', 'family'], home: 'trip' }, 'Trip isn’t in the list, so it can’t be Visa’s home.')
     refused({ ledgers: ['personal'] }, 'Say whether Family’s 1 transaction goes home or stays in Family.')
-    refused({ ledgers: ['personal'], rows: { family: 'keep' } }, 'Keeping Family’s transactions in Family isn’t available yet. Send them home instead.')
     refused({ ledgers: ['personal'], rows: { family: 'elsewhere' } }, 'Say “home” or “keep” for Family’s transactions.')
     expect(status(() => setSharing(personal, w.ctxOf, chequing, { ledgers: ['personal', 'family'] }, { actor: TESTER }))).toEqual({
       status: 400,

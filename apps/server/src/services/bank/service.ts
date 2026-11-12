@@ -23,7 +23,7 @@ import {
 import type { z } from 'zod'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import { aiEnabled } from '../../ai/runner'
-import { bankAccounts, bankConnections, bankTransactions } from '../../db/schema'
+import { bankAccounts, bankConnections, bankTransactions, ledgers as ledgersTable } from '../../db/schema'
 import { badRequest, notFound } from '../../lib/http'
 import { ulid } from '../../lib/ids'
 import { WrongSecretKeyError } from '../../lib/secrets'
@@ -42,7 +42,7 @@ import { tidyNewPayees } from '../payee-tidy'
 import { payeeKeyOf, payeeNameOf } from '../payee-namer'
 import { applyRemoteTransactions, type ApplyScope } from './apply'
 import { keepTransactions, oldestStored, storedStamp, storedTransactions, type Received } from './store'
-import { applySwitch, localStamp, planSwitch } from './switching'
+import { applySwitch, localStamp, planSwitch, refuseSplitOffRemoval } from './switching'
 import { createPlaid } from './plaid'
 import { createSimpleFin } from './simplefin'
 import {
@@ -106,11 +106,13 @@ export type UsableLedgers = readonly string[] | null
 
 /**
  * Switching which bank account a shared account syncs from changes and deletes rows in every ledger
- * that has it, so a caller limited to some ledgers must be allowed in all of them.
+ * that has it, and gives new bank ids to the rows of the accounts split off from it, in the ledgers
+ * that kept them. So a caller limited to some ledgers must be allowed in all of those.
  */
 function requireEveryLedger(ctx: AppContext, accountId: number, usable: UsableLedgers) {
   if (!usable) return
-  if (ctx.accountWide.ledgers(accountId).every((l) => usable.includes(l.ledgerId))) return
+  const involved = [...ctx.accountWide.ledgers(accountId), ...ctx.accountWide.splitOffs(accountId)].map((l) => l.ledgerId)
+  if (involved.every((id) => usable.includes(id))) return
   throw new HTTPException(403, { message: 'A key limited to some ledgers can’t switch a shared account. Do it in the app.' })
 }
 
@@ -475,9 +477,23 @@ export class BankService {
    * twice, where it can tell; an account with transactions is better switched with a review, see
    * `previewSwitch`). Then `fill` brings it up to date. From then on its balance is the bank's (see
    * `alignWithBank`). A shared account is linked in its home, by a caller that may use every ledger
-   * that has it (`usable`).
+   * that has it (`usable`). An account some of whose transactions went to an account of their own,
+   * when a ledger stopped sharing it, is switched with a review only (409): their bank ids are the
+   * old ones, and a link that isn't reviewed would bring them back as new rows.
    */
   linkAccount(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }, usable: UsableLedgers) {
+    accounts.requireHome(ctx, accountId, 'bank')
+    if (ctx.accountWide.splitOffs(accountId).length) {
+      const { name } = accounts.getAccount(ctx, accountId)
+      throw new HTTPException(409, {
+        message: `Some of ${name}’s transactions went to an account of their own when a ledger stopped sharing it. Switch it with a review, so the bank doesn’t add them again.`,
+      })
+    }
+    return this.link(ctx, accountId, input, usable)
+  }
+
+  /** linkAccount, for a switch whose review has paired the split-off accounts' rows too. */
+  private link(ctx: AppContext, accountId: number, input: { bankAccountId: string; syncFrom?: string | null }, usable: UsableLedgers) {
     const acct = this.bankAccount(input.bankAccountId)
     if (!acct) notFound('Bank account not found')
     accounts.requireHome(ctx, accountId, 'bank')
@@ -623,12 +639,20 @@ export class BankService {
     const plan = planSwitch(local, remote, (payee) => payeeKeyOf(ctx, payee))
     const L = new Map(local.map((l) => [l.id, l]))
     const R = new Map(remote.map((r) => [r.remoteId, r]))
-    const ledgers = new Map(ctx.accountWide.ledgers(target.id).map((l) => [l.ledgerId, { slug: l.slug, name: l.name }]))
-    // Each side as it shows: its name, or what the payee name rules call its payee. One another ledger holds says which.
+    // Every ledger by id: a split-off account's rows are in a ledger that no longer has this one.
+    const ledgers = new Map(
+      this.db
+        .select({ id: ledgersTable.id, slug: ledgersTable.slug, name: ledgersTable.name })
+        .from(ledgersTable)
+        .all()
+        .map((l) => [l.id, { slug: l.slug, name: l.name }]),
+    )
+    // Each side as it shows: its name, or what the payee name rules call its payee. One another ledger
+    // holds says which, and one a split-off account has says which account too.
     const side = (id: number) => {
       const l = L.get(id)!
       const shown = { id: l.id, date: l.date, payee: l.name ?? payeeNameOf(ctx, l.payee).name, amountMinor: l.amountMinor, deleted: l.deleted }
-      return l.ledgerId === ctx.ledger.id ? shown : { ...shown, elsewhere: { ledger: ledgers.get(l.ledgerId)!, account: null } }
+      return l.ledgerId === ctx.ledger.id && l.splitOff === null ? shown : { ...shown, elsewhere: { ledger: ledgers.get(l.ledgerId)!, account: l.splitOff } }
     }
     const remoteSide = (id: string) => {
       const r = R.get(id)!
@@ -668,11 +692,12 @@ export class BankService {
     if (input.version !== this.switchVersion(ctx, target.id, acct)) {
       throw new HTTPException(409, { message: 'Transactions changed since this review was made (a sync, or an edit). It has been made again: check it, then switch.' })
     }
+    refuseSplitOffRemoval(ctx, target.id, input)
     const provider = this.row(acct.connectionId).provider
     const remote = storedTransactions(this.app, acct.id, input.from)
     // Reviewed from the oldest one kept (as it starts): no limit. From later, only from there on.
     const oldest = oldestStored(this.app, acct.id)
-    const { bankAccount } = this.linkAccount(ctx, target.id, { bankAccountId: acct.id, syncFrom: oldest && input.from > oldest ? input.from : null }, usable)
+    const { bankAccount } = this.link(ctx, target.id, { bankAccountId: acct.id, syncFrom: oldest && input.from > oldest ? input.from : null }, usable)
     const { newIds, ledgers, ...result } = applySwitch(ctx, this.storage.ctxOf, target.id, provider, remote, input)
     this.caughtUp(ctx, target.id, acct)
     // As after a sync, in each ledger whose rows changed (the home first): refunds and card payments,

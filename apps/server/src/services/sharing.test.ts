@@ -152,11 +152,6 @@ describe('sharing an account', () => {
     // Deleted ones count: they go home too, still deleted.
     w.family.q.run('UPDATE transactions SET deleted_at = ? WHERE id = ? AND ledger_id = @ledger', '2026-10-01T00:00:00Z', id)
     ask('Say whether Family’s 1 deleted transaction goes home or stays in Family.')
-    // Staying, on an account of their own, isn't there yet.
-    expect(status(() => removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'keep' }))).toEqual({
-      status: 400,
-      message: 'Keeping Family’s transactions in Family isn’t available yet. Send them home instead.',
-    })
     expect(getSharing(w.personal, w.visa).members.map((m) => m.slug)).toEqual(['family'])
   })
 })

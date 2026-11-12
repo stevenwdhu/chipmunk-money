@@ -174,7 +174,8 @@ function getRow(ctx: AppContext, id: number, includeDeleted = false): TxRow {
 /**
  * The transaction in `accountId` that has this external id, if any (deleted ones included). An
  * external id is the account's, in every ledger that has it: when another ledger holds that
- * transaction (a shared account's), it's a 409 that doesn't say which one it is.
+ * transaction (a shared account's), it's a 409 that doesn't say which one it is. So is one an account
+ * split off from it has, which a ledger kept when it stopped sharing it.
  */
 export function findByExternalId(ctx: AppContext, accountId: number, externalId: string) {
   const row = ctx.q.get<{ id: number; deletedAt: string | null }>(
@@ -184,6 +185,7 @@ export function findByExternalId(ctx: AppContext, accountId: number, externalId:
   )
   if (row) return { id: row.id, deleted: !!row.deletedAt }
   const held = ctx.q.pluck('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', accountId) ? ctx.accountWide.holder(accountId, externalId) : undefined
+  if (held?.frozen) throw new HTTPException(409, { message: 'Another account has this transaction' })
   if (held) throw new HTTPException(409, { message: 'Another ledger has this transaction' })
   return null
 }

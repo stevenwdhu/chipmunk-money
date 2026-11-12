@@ -26,7 +26,10 @@ type CommitInput = z.output<typeof importCommitSchema>
 /** What an import's row duplicates: a transaction of the account, and whether another ledger holds it. */
 interface Duplicate {
   id: number
-  /** Another ledger holds it (a shared account's): still a duplicate, but a preview doesn't name it. */
+  /**
+   * Another ledger holds it (a shared account's), or an account split off from this one has it: still
+   * a duplicate, but a preview doesn't name it.
+   */
   elsewhere: boolean
 }
 
@@ -36,6 +39,7 @@ interface Duplicate {
  * otherwise rows match on date, amount and payee, allowing a few days of drift because pending
  * dates often shift when they post. A shared account's transactions count in every ledger that
  * holds them (ctx.accountWide.importedRows), so one moved to another ledger isn't imported again.
+ * So do the ones a ledger kept, on an account of its own, when it stopped sharing this one.
  */
 function findDuplicates(
   ctx: AppContext,
@@ -52,7 +56,7 @@ function findDuplicates(
   const wanted = new Set(externalIds)
   const byExternalId = new Map(found.filter((r) => r.externalId && wanted.has(r.externalId)).map((r) => [r.externalId!, r]))
   const existing = found.filter((r) => !r.deleted && r.date >= from && r.date <= to)
-  const duplicate = (r: { id: number; ledgerId: string }): Duplicate => ({ id: r.id, elsewhere: r.ledgerId !== ctx.ledger.id })
+  const duplicate = (r: { id: number; ledgerId: string; frozen: boolean }): Duplicate => ({ id: r.id, elsewhere: r.frozen || r.ledgerId !== ctx.ledger.id })
   const used = new Set<number>()
 
   return rows.map((row) => {

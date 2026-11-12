@@ -1,6 +1,7 @@
 import { addDays, daysBetween, payeeKey, payeeSimilarity, type BankProviderKind, type ISODate, type SwitchResult } from '@chipmunk/shared'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
 import type { z } from 'zod'
+import { badRequest } from '../../lib/http'
 import { historySuggestion } from '../categorize'
 import type { SwitchRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
@@ -119,6 +120,17 @@ export function localStamp(ctx: AppContext, accountId: number): string {
 
 type SwitchInput = z.output<typeof accountBankSwitchSchema>
 
+/**
+ * A switch can't delete a row of an account split off from this one (a frozen row): a 400 naming
+ * it, before anything changes, the link included.
+ */
+export function refuseSplitOffRemoval(ctx: AppContext, accountId: number, input: Pick<SwitchInput, 'from' | 'remove'>): void {
+  if (!input.remove.length) return
+  const remove = new Set(input.remove)
+  const row = ctx.accountWide.switchRows(accountId, addDays(input.from, -1)).find((r) => r.splitOff !== null && remove.has(r.id))
+  if (row) badRequest(`${row.name ?? row.payee} on ${row.date} is on ${row.splitOff} in another ledger now, so the switch can’t delete it. Pair it or keep it.`)
+}
+
 /** What a switch changed, and the ledgers whose rows it changed (its home, where new ones land, always). */
 export type AppliedSwitch = SwitchResult & { newIds: number[]; ledgers: Set<string> }
 
@@ -136,6 +148,8 @@ function one(result: { changes: number }, what: string, id: number) {
  * - only the bank's: added in the home, or (skipped) kept deleted, so a sync doesn't bring it back.
  *   One whose bank id a row already has, in any ledger, isn't added again;
  * - only yours: deleted (`remove`), or kept as they are, where syncs leave them alone.
+ * A frozen row, which a ledger that stopped sharing the account kept on an account of its own, is
+ * paired too, and only ever given the new bank id: never changed or removed.
  */
 export function applySwitch(
   ctx: AppContext,
@@ -147,8 +161,6 @@ export function applySwitch(
 ): AppliedSwitch {
   const home = ctx.ledger.id
   const result: AppliedSwitch = { matched: 0, added: 0, skipped: 0, removed: 0, kept: 0, newIds: [], ledgers: new Set([home]) }
-  // The frozen rows of an account split off from this one are to be paired here too: such a row is
-  // only ever given the new bank id, never changed or removed.
   const local = ctx.accountWide.switchRows(accountId, addDays(input.from, -1))
   const localById = new Map(local.map((l) => [l.id, l]))
   const byRemote = new Map(remote.map((r) => [r.remoteId, r]))
@@ -179,6 +191,7 @@ export function applySwitch(
       confident: category.confident ? 1 : 0,
     })
   const now = ctx.now().toISOString()
+  const frozenId = `UPDATE transactions SET external_id = @externalId, updated_at = @now WHERE id = @id AND ledger_id = @ledger`
   const forget = (l: SwitchRow) =>
     one(holderOf(l).q.run('UPDATE transactions SET external_id = NULL WHERE id = @id AND ledger_id = @ledger', { id: l.id }), 'kept bank id', l.id)
   const markDeleted = (id: number) => ctx.q.run('UPDATE transactions SET deleted_at = @now WHERE id = @id AND ledger_id = @ledger', { id, now })
@@ -195,6 +208,14 @@ export function applySwitch(
       const held = holder(r.remoteId)
       if (held !== undefined && held !== l.id) continue
       const at = holderOf(l)
+      if (l.splitOff !== null) {
+        // A split-off account's row: the new bank id, so syncs know it, and nothing else.
+        one(at.q.run(frozenId, { id: l.id, externalId: r.remoteId, now }), 'bank id', l.id)
+        paired.add(l.id)
+        pairedRemote.add(r.remoteId)
+        result.matched++
+        continue
+      }
       const changed = at.q.run(updateFromBank, {
         id: l.id,
         externalId: r.remoteId,
@@ -247,6 +268,11 @@ export function applySwitch(
 
     for (const l of local) {
       if (paired.has(l.id) || l.deletedAt || l.date < input.from) continue
+      if (l.splitOff !== null) {
+        if (remove.has(l.id)) throw new Error(`The switch can't delete transaction ${l.id}, which is on a split-off account (refuseSplitOffRemoval)`)
+        result.kept++
+        continue
+      }
       if (remove.has(l.id)) {
         // Deleted where it's held. A split payment is to be refused here, until its split is undone.
         deleteTransaction(holderOf(l), l.id)

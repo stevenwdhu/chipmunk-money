@@ -254,6 +254,15 @@ export function remapCategoryRefs(ctx: AppContext, from: number, into: number): 
   return remap(ctx.q, (c) => (c.field === 'category' ? { ...c, ids: c.ids.map((i) => (i === from ? into : i)) } : c)).changed.length
 }
 
+/**
+ * An account's transactions moved onto another account of this ledger, all of them (a ledger that
+ * stopped sharing an account keeps its rows on one of its own): reports filtering by it, in Only
+ * count or a Filter out rule, filter by the new one. Returns how many changed.
+ */
+export function remapAccountRefs(ctx: AppContext, from: number, into: number): number {
+  return remap(ctx.q, (c) => (c.field === 'account' ? { ...c, ids: c.ids.map((i) => (i === from ? into : i)) } : c)).changed.length
+}
+
 /** Category ids in a filter's Only count conditions, and in its rules. */
 function categoryPlaces(f: ReportFilter) {
   const only = new Set<number>()

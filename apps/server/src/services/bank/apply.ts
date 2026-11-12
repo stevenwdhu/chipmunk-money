@@ -83,6 +83,10 @@ export type ApplyScope =
  * (under its id, or posted under a new one), is restored where it is: otherwise the posted one would
  * land in the home, in the wrong ledger. One a person deleted is never restored.
  *
+ * A frozen row, which a ledger that stopped sharing the account kept on an account of its own
+ * (`frozen`), is only known: nothing is added for its bank id, and it's never updated, adopted,
+ * restored or removed.
+ *
  * Transactions before `floor` (the account's "sync from" date), or well before a window's `from`, are ignored,
  * and so are trades (a buy or sell inside an investment account isn't money in or out).
  * What the provider sent for each one is logged (`logPayloads`).
@@ -115,7 +119,10 @@ export function applyRemoteTransactions(
   // Rows the bank's data can touch, in every ledger: anything with a bank id, and recent ones that could be adopted.
   const since = window ? addDays(window.from, -10) : incoming.length ? addDays(incoming[0]!.date, -10) : '9999-12-31'
   const local = ctx.accountWide.bankRows(accountId, since)
-  const byExternalId = new Map(local.filter((t) => t.externalId).map((t) => [t.externalId!, t]))
+  // The account's own row first, should a frozen one have the same bank id.
+  const byExternalId = new Map(
+    [...local.filter((t) => t.frozen), ...local.filter((t) => !t.frozen)].filter((t) => t.externalId).map((t) => [t.externalId!, t]),
+  )
   const used = new Set<number>()
 
   const contexts = new Map<string, AppContext>([[home, ctx]])
@@ -172,7 +179,7 @@ export function applyRemoteTransactions(
         continue
       }
       used.add(row.id)
-      if (row.deletedAt && !restorable(row)) continue
+      if (row.frozen || (row.deletedAt && !restorable(row))) continue
       const status = r.pending ? 'pending' : 'cleared'
       const differs =
         !!row.deletedAt ||
@@ -188,19 +195,20 @@ export function applyRemoteTransactions(
     // Rows whose id the bank no longer reports (inside the window we fetched), or that Plaid says were
     // removed: a pending one that posted under a new id (or was dropped), or one with a re-issued id.
     // Then the pending ones other ledgers hold that the bank removed lately, which can come back.
-    const orphaned = local.filter((t) =>
+    const own = local.filter((t) => !t.frozen)
+    const orphaned = own.filter((t) =>
       window
         ? t.origin === 'sync' && !t.deletedAt && t.externalId && !reported.has(t.externalId) && t.date >= addDays(window.from, -3) && t.date <= window.to
         : !t.deletedAt && t.externalId && removedIds.has(t.externalId),
     )
-    const returning = local.filter((t) => restorable(t) && !used.has(t.id))
-    const candidates = local.filter((t) => !t.externalId && !t.deletedAt && t.origin !== 'sync')
+    const returning = own.filter((t) => restorable(t) && !used.has(t.id))
+    const candidates = own.filter((t) => !t.externalId && !t.deletedAt && t.origin !== 'sync')
 
     for (const r of fresh) {
       // 2. The same transaction under a new id. Plaid names the pending one a posted one replaces
       // (if you deleted that one, the posted one stays deleted too).
       const replaced = r.replaces ? byExternalId.get(r.replaces) : undefined
-      if (replaced && !used.has(replaced.id)) {
+      if (replaced && !replaced.frozen && !used.has(replaced.id)) {
         used.add(replaced.id)
         const back = restorable(replaced)
         if (back) restore(replaced)
@@ -307,7 +315,8 @@ export function latestBankPayload(ctx: AppContext, transactionId: number): BankP
  * from what was last kept (SimpleFIN sends the same ones every sync), plus what Plaid said when
  * removing one. Payloads are the account's, written in its home (`ctx`). Each is tied to the
  * transaction it landed on when the home holds that one, and to none when another ledger holds it
- * (a payload can't point across ledgers): it's found by the account and the bank id instead.
+ * (a payload can't point across ledgers): it's found by the account and the bank id instead. What's
+ * sent for a frozen row's bank id isn't kept: that row is another account's, which nothing syncs.
  */
 export function logPayloads(
   ctx: AppContext,
@@ -333,6 +342,7 @@ export function logPayloads(
     const event = removal ? 'removed' : before ? 'changed' : 'added'
     // A pending one that posted under a new id isn't found by its old id any more: it's where it was.
     const landed = ctx.accountWide.holder(accountId, remoteId)
+    if (landed?.frozen) return
     const transactionId = landed ? (landed.ledgerId === ctx.ledger.id ? landed.id : null) : (before?.transactionId ?? null)
     ctx.q.run(
       `INSERT INTO bank_payloads (account_id, provider, remote_id, transaction_id, event, payload, received_at)
