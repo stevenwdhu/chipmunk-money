@@ -31,6 +31,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 - New API keys start with `cm_`. Keys made before keep working.
 - The stdio MCP server reads `CHIPMUNK_API_URL` and `CHIPMUNK_API_KEY`, in place of `ST_API_URL` and `ST_API_KEY`.
 - Deleting a ledger, erasing it or `pnpm seed:demo --force` first saves a copy of the whole database in `backups/`, every ledger and the sealed bank sign-ins included, in place of a copy of that ledger alone. These copies are never deleted for you, so clear out old ones now and then.
+- In App settings → AI, a failed request in the usage list shows **Error**, with the reason on hover, keyboard focus or tap, in place of a message cut off at the edge.
 
 ### Fixed
 
