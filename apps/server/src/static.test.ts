@@ -76,7 +76,8 @@ const NOT_LEDGER_LED: Record<string, string> = {
   tx_external_id: "A bank's transaction id is unique within the account it came to, whatever the ledger.",
   tx_account_date: "An account's register and balance, by account: a shared account's rows are in several ledgers, and reads across them find them by account.",
   tx_transfer_pair: 'What names a row as its transfer’s other side, found by that row’s id alone, as a move checks there’s nothing left before the row changes ledger.',
-  labels_shared_name: "The shared list's label names are unique among the shared rows (ledger_id is null).",
+  tx_split: 'A split payment’s rows, found by the payment’s id alone: they’re in every ledger that has a share, and there’s one per ledger.',
+  labels_shared_name:"The shared list's label names are unique among the shared rows (ledger_id is null).",
 }
 
 describe('the schema', () => {

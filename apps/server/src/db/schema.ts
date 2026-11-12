@@ -527,6 +527,14 @@ export const transactions = sqliteTable(
      * deleted with this unset was deleted by a person.
      */
     removedAt: text('removed_at'),
+    /**
+     * A split row: the id of the card payment (on the same account) it's a piece of. A payment split
+     * between the ledgers that share its account keeps its amount, and each other ledger gets a share
+     * row with its amount, while the ledger that holds the payment gets one row for everything it gave
+     * (services/splits.ts). A payment's split rows sum to zero. No foreign key: triggers keep it to a
+     * live payment that isn't a split row itself.
+     */
+    splitOf: integer('split_of'),
     ...timestamps,
   },
   (t) => [
@@ -555,6 +563,10 @@ export const transactions = sqliteTable(
     uniqueIndex('tx_external_id')
       .on(t.accountId, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL`),
+    // One split row per ledger per payment, found by the payment's id whatever ledger holds them.
+    uniqueIndex('tx_split')
+      .on(t.splitOf, t.ledgerId)
+      .where(sql`${t.splitOf} IS NOT NULL`),
   ],
 )
 
