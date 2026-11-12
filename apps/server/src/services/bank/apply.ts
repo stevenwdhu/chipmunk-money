@@ -99,6 +99,11 @@ export type ApplyScope =
  * adopted, and the removed row stays deleted, or one charge would be two rows. One a person deleted
  * is never restored.
  *
+ * A row kept only for its bank id (bank_id_only: a ledger that left the account had it, and a sync
+ * must not add it again) stays deleted whatever the bank sends. A pending one the bank stops
+ * reporting can still post under a new id: the posted one is matched to it by its payee and amount
+ * when nothing live is the bank's row, and it takes the new id, so nothing is added.
+ *
  * A frozen row, which a ledger that stopped sharing the account kept on an account of its own
  * (`frozen`), is only known: nothing is added for its bank id, and it's never updated, adopted,
  * restored or removed.
@@ -252,6 +257,16 @@ export function applyRemoteTransactions(
         : !t.deletedAt && t.externalId && removedIds.has(t.externalId),
     )
     const returning = own.filter((t) => restorable(t) && !used.has(t.id))
+    // And the pending ones kept only for their bank ids, which the bank stopped reporting the same
+    // way: each can post under a new id, which it must then know.
+    const known = own.filter(
+      (t) =>
+        t.bankIdOnly &&
+        t.status === 'pending' &&
+        !!t.externalId &&
+        !used.has(t.id) &&
+        (window ? !reported.has(t.externalId) && t.date >= addDays(window.from, -3) && t.date <= window.to : removedIds.has(t.externalId)),
+    )
 
     for (const r of fresh) {
       // 2. The same transaction under a new id. Plaid names the pending one a posted one replaces
@@ -294,6 +309,14 @@ export function applyRemoteTransactions(
         restore(back)
         write(back, r)
         counted(back.ledgerId, 'updated')
+        continue
+      }
+      // A pending row kept only for its bank id, posted (or sent again) under a new one: it takes the
+      // new id and status and stays deleted, as when Plaid names it, and nothing is added.
+      const kept = known.find((p) => !used.has(p.id) && (!r.pending ? couldBePosted(p, r, key) : sameTransaction(p, r, key)))
+      if (kept) {
+        used.add(kept.id)
+        write(kept, r)
         continue
       }
       // 4. New, in the home.

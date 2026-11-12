@@ -3,7 +3,7 @@
  * screen, or from the command line with `pnpm seed:demo` (seed-demo-cli.ts).
  */
 import { addDays, addMonthsToDate, monthOf, recurringCreateSchema, transactionCreateSchema, type TransactionCreate } from '@chipmunk/shared'
-import { createAccount, setBalance } from '../services/accounts'
+import { createAccount, leaveSplitOffBankIds, setBalance } from '../services/accounts'
 import { historySuggestion } from '../services/categorize'
 import type { AppContext } from '../services/context'
 import { createCustomReport } from '../services/custom-reports'
@@ -31,7 +31,9 @@ const KEPT_FOR_DEMO = ['ledger_settings', 'activity', 'payee_rules', 'category_g
  * Clears a ledger that has data for the demo (`pnpm seed:demo --force`), after saving a copy of the
  * whole database, the same safety net the app keeps before erasing a ledger. Not while it has a
  * shared account: erasing it in the app asks what happens to it first, and here there's nobody to
- * ask. Returns the copy's path, or null when nothing was cleared (or there's no copy, in memory).
+ * ask. An account it kept its rows on when it stopped sharing one leaves their bank ids with the
+ * account it was split off from first, as erasing it does, or that one's sync would add them again.
+ * Returns the copy's path, or null when nothing was cleared (or there's no copy, in memory).
  */
 export function clearForDemo(storage: Storage, ctx: AppContext): string | null {
   const n = ctx.q.pluck<number>(
@@ -42,7 +44,11 @@ export function clearForDemo(storage: Storage, ctx: AppContext): string | null {
   if (!n) return null
   refuseWhileSharing(ctx, 'Erase this ledger in the app first.')
   const backup = safetyCopy(storage.sqlite, `pre-seed-demo-${ctx.ledger.slug}`)
-  clearLedger(storage.sqlite, ctx.ledger.id, KEPT_FOR_DEMO)
+  storage.sqlite.transaction(() => {
+    const splitOff = ctx.q.column<number>('SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND home_ledger_id = @ledger AND split_from_id IS NOT NULL ORDER BY id')
+    for (const id of splitOff) leaveSplitOffBankIds(ctx, storage.ctxOf, id)
+    clearLedger(storage.sqlite, ctx.ledger.id, KEPT_FOR_DEMO)
+  })()
   return backup
 }
 

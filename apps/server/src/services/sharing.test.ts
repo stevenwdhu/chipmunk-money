@@ -6,11 +6,14 @@ import { makeAccount } from '../test/helpers'
 import { expectPartsSumToAccount, sharedWorld, TESTER, type SharedWorld } from '../test/shared-accounts'
 import { createAccount, getAccount, listAccounts, setBalance } from './accounts'
 import { listActivity } from './activity'
+import { applyRemoteTransactions } from './bank/apply'
 import { BankService } from './bank/service'
+import type { RemoteTransaction } from './bank/types'
 import type { AppContext } from './context'
 import { listInstitutions } from './institutions'
+import { moveTransactions } from './moves'
 import { eraseAll } from './setup'
-import { addMember, getSharing, removeMember } from './sharing'
+import { addMember, getSharing, removeMember, setSharing } from './sharing'
 
 /**
  * Sharing an account with other ledgers, at the service level: adding a ledger, the sharing
@@ -294,6 +297,30 @@ describe('deleting, erasing or clearing a ledger that has a shared account', () 
     w.addTx(w.personal, '2026-09-01', -200)
     expect(ways(w, w.personal).erase()).toEqual({ backup: null, changes: ['Personal’s data was erased.'] })
     expect(listAccounts(w.personal)).toEqual([])
+  })
+
+  it('clears a ledger for the demo that kept its rows on an account of its own: the account it was split off from keeps their bank ids', () => {
+    const w = sharedWorld()
+    const sent: RemoteTransaction[] = [
+      { remoteId: 'k1', date: '2026-09-20', amountMinor: -9_000, payee: 'Book Shop', description: 'BOOK SHOP', pending: false },
+      { remoteId: 'k2', date: '2026-09-21', amountMinor: -1_200, payee: 'Gas Bar', description: 'GAS BAR', pending: false },
+    ]
+    const sync = () => applyRemoteTransactions(w.personal, w.ctxOf, w.visa, sent, { from: '2026-07-05', to: '2026-10-03', floor: null }, 'simplefin')
+    expect(sync()).toMatchObject({ added: 2 })
+    const k1 = w.personal.q.pluck<number>("SELECT id FROM transactions WHERE ledger_id = @ledger AND external_id = 'k1'")!
+    moveTransactions(w.personal, w.ctxOf, { ids: [k1], to: w.family.ledger.id }, TESTER)
+    setSharing(w.personal, w.ctxOf, w.visa, { ledgers: ['personal'], rows: { family: 'keep' } }, { actor: TESTER, usable: null })
+    expect(sync()).toMatchObject({ added: 0 })
+    const kept = () => w.personal.q.column<string>('SELECT external_id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND bank_id_only = 1', w.visa)
+    expect(kept()).toEqual([])
+
+    // Visa isn't shared any more, so the seeding goes ahead, and leaves k1's bank id with it first.
+    clearForDemo(w.storage, w.family)
+    expect(listAccounts(w.family)).toEqual([])
+    expect(kept()).toEqual(['k1'])
+    expect(sync()).toMatchObject({ added: 0, updated: 0, adopted: 0, removed: 0 })
+    expect(w.personal.q.column('SELECT external_id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL', w.visa)).toEqual(['k2'])
+    expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 
   for (const way of ['delete', 'erase'] as const) {

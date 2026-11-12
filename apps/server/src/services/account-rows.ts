@@ -115,6 +115,8 @@ export interface BankRow {
   frozen: boolean
   /** It's a payment split between the ledgers (its split rows name it): its split follows what the bank changes. */
   splitPayment: boolean
+  /** It's deleted and kept only so the account keeps knowing its bank id (bank_id_only): it stays deleted, whatever the bank sends. */
+  bankIdOnly: boolean
 }
 
 /** Which row of the account has a bank id, wherever it's held. For the bank code and findByExternalId only. */
@@ -383,17 +385,17 @@ const READS = {
    */
   bankRows(db: UnscopedQuery, accountId: number, since: ISODate): BankRow[] {
     return db
-      .all<Omit<BankRow, 'frozen' | 'splitPayment'> & { frozen: number; splitPayment: number }>(
+      .all<Omit<BankRow, 'frozen' | 'splitPayment' | 'bankIdOnly'> & { frozen: number; splitPayment: number; bankIdOnly: number }>(
         `${SPLIT_OFFS}
          SELECT t.id, t.ledger_id AS ledgerId, t.date, t.amount_minor AS amount, t.payee, t.payee_key AS payeeKey, t.status, t.origin,
            t.external_id AS externalId, t.corrected_at AS correctedAt, t.deleted_at AS deletedAt, t.removed_at AS removedAt,
-           t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen, ${SPLIT_PAYMENT} AS splitPayment
+           t.transfer_pair_id AS transferPairId, ${FROZEN} AS frozen, ${SPLIT_PAYMENT} AS splitPayment, t.bank_id_only AS bankIdOnly
          FROM transactions t
          WHERE ${MATCHED} AND ${NOT_SPLIT} AND (t.external_id IS NOT NULL OR (t.account_id = @accountId AND t.date >= @since))
          ORDER BY t.id`,
         { accountId, since },
       )
-      .map((r) => ({ ...r, frozen: !!r.frozen, splitPayment: !!r.splitPayment }))
+      .map((r) => ({ ...r, frozen: !!r.frozen, splitPayment: !!r.splitPayment, bankIdOnly: !!r.bankIdOnly }))
   },
 
   /** The bank ids the account's rows carry, in every ledger, deleted ones and frozen ones (MATCHED) included. For the bank code only. */

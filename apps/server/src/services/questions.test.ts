@@ -592,6 +592,163 @@ describe('a synced account', () => {
   })
 })
 
+describe('a synced account with a recorded balance', () => {
+  /**
+   * Visa opens at −$1,000.00. Entered by hand in August: Personal −$250.00, Family −$300.00 and Trip
+   * −$50.00, and −$1,600.00 recorded on 31 August. Then it's linked to a fake bank, which says
+   * −$1,495.00 and has Grocer −$100.00 (Personal), Book Shop −$170.00 (Family), Cafe −$40.00 (Trip),
+   * Bakery −$25.00 (Family, which deleted it), a payment of $500.00 (Personal, split Family $150.00
+   * and Trip $50.00) and Diner −$60.00, pending (Family). Family also entered −$25.00 by hand, so the
+   * rows since 31 August come to what the bank says: −1,600 − 100 − 170 − 40 + 500 − 60 − 25 = −1,495.
+   * Family −300 − 170 − 60 − 25 + 150 = −405. Trip −50 − 40 + 50 = −40. Personal, the rest: −1,050.
+   */
+  async function recorded() {
+    const card: FakeCard = {
+      balance: '-1495.00',
+      transactions: [
+        fakeTx('b1', '2026-09-01', '-100.00', 'Grocer'),
+        fakeTx('b2', '2026-09-05', '-170.00', 'Book Shop'),
+        fakeTx('b3', '2026-09-08', '-40.00', 'Cafe'),
+        fakeTx('b4', '2026-09-09', '-25.00', 'Bakery'),
+        fakeTx('b5', '2026-09-20', '500.00', 'Payment thank you'),
+        fakeTx('b6', '2026-09-30', '-60.00', 'Diner', { pending: true }),
+      ],
+    }
+    const w = world({ fetch: fakeBridge(card) })
+    w.spentIn(w.personal, '2026-08-05', -25_000)
+    w.spentIn(w.family, '2026-08-10', -30_000)
+    w.spentIn(w.trip, '2026-08-12', -5_000)
+    setBalance(w.personal, w.visa, { date: '2026-08-31', balanceMinor: -160_000 })
+    const bank = new BankService(w.storage)
+    const conn = await bank.connect({ setupToken: TOKEN })
+    bank.linkAccount(w.personal, w.visa, { bankAccountId: conn.accounts.find((a) => a.remoteId === 'visa')!.id }, null)
+    const sync = async () => {
+      const result = await bank.sync(conn.id)
+      expect(result.ok, result.error ?? '').toBe(true)
+      const { added, updated, adopted, removed } = result.accounts[0]!
+      return { added, updated, adopted, removed }
+    }
+    expect(await sync()).toMatchObject({ added: 6 })
+    w.move(w.personal, [w.bankRow(w.personal, 'b2'), w.bankRow(w.personal, 'b4'), w.bankRow(w.personal, 'b6')], w.family)
+    w.move(w.personal, [w.bankRow(w.personal, 'b3')], w.trip)
+    deleteTransaction(w.family, w.bankRow(w.family, 'b4'))
+    w.row(w.family, '2026-09-10', -2_500)
+    const paid = w.bankRow(w.personal, 'b5')
+    w.personal.q.run("UPDATE transactions SET category_id = ?, category_source = 'user' WHERE ledger_id = @ledger AND id = ?", categoryId(w.personal, 'Credit card payment'), paid)
+    const shares = [
+      { ledger: 'family', amountMinor: 15_000 },
+      { ledger: 'trip', amountMinor: 5_000 },
+    ]
+    setSplit(w.personal, w.ctxOf, paid, { shares }, { actor: TESTER, usable: null })
+    expect(await sync()).toEqual(NOTHING)
+    expect(w.parts()).toEqual({ personal: -105_000, family: -40_500, trip: -4_000 })
+    return { ...w, card, sync }
+  }
+  const NOTHING = { added: 0, updated: 0, adopted: 0, removed: 0 }
+
+  it('says what changes at once and what the next sync adds, and both then happen', async () => {
+    const w = await recorded()
+    // Deleted: Family's −300 from August is inside the balance recorded on the 31st, so Personal takes
+    // it at once, and its share of $150.00 comes back: −300 + 150. The sync then finds Visa −255 short
+    // of the bank (−170 − 60 − 25), which Personal takes too.
+    expect(w.ask(w.family, 'delete').questions[0]!.note).toBe(
+      'Delete them: Personal’s balance on Visa changes by -$150.00 now, and by -$255.00 more at the next sync. Move to Personal: Personal’s balance on Visa changes by -$405.00. Move to Trip: Trip’s balance on Visa changes by -$405.00.',
+    )
+    w.act(w.family, 'delete', { rows: 'delete' })
+    expect(w.check(w.family)).toEqual({ personal: -120_000, trip: -4_000 })
+    expect(w.kept()).toEqual(['b2', 'b4', 'b6'])
+    expect(await w.sync()).toEqual(NOTHING)
+    expect(w.check(w.family)).toEqual({ personal: -145_500, trip: -4_000 })
+    expect(getAccount(w.personal, w.visa).sharing?.totalBalanceMinor).toBe(-149_500)
+  })
+
+  it('knows the pending row it kept for its bank id when the bank posts it under a new id', async () => {
+    const w = await recorded()
+    w.act(w.family, 'delete', { rows: 'delete' })
+    expect(await w.sync()).toEqual(NOTHING)
+    const before = w.check(w.family)
+    // Diner posts, with a tip, under another id: the row kept for b6 takes it, still deleted.
+    w.card.transactions[5] = fakeTx('b6p', '2026-10-01', '-66.00', 'Diner')
+    expect(await w.sync()).toEqual(NOTHING)
+    expect(w.kept()).toEqual(['b2', 'b4', 'b6p'])
+    expect(w.personal.q.get('SELECT status, amount_minor AS amount, deleted_at IS NOT NULL AS deleted, bank_id_only AS kept FROM transactions WHERE ledger_id = @ledger AND external_id = ?', 'b6p')).toEqual({
+      status: 'cleared',
+      amount: -6_600,
+      deleted: 1,
+      kept: 1,
+    })
+    expect(w.personal.q.pluck("SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND payee = 'Diner' AND deleted_at IS NULL")).toBe(0)
+    expect(w.check(w.family)).toEqual(before)
+    // And again, and after the purge: nothing more.
+    purgeDeleted(w.personal, -1)
+    expect(await w.sync()).toEqual(NOTHING)
+    expect(w.kept()).toEqual(['b2', 'b4', 'b6p'])
+  })
+})
+
+describe('a pending row kept only for its bank id', () => {
+  /** Visa with a pending Diner −$60.00 and a posted Gas Bar −$12.00 from the bank. Diner was moved to Family, which was then deleted with "Delete them". */
+  function pending() {
+    const w = world({ shareWith: ['family'], opening: 0 })
+    const gas = remote('k2', '2026-09-21', -1_200, 'Gas Bar')
+    w.plaid([remote('p1', '2026-09-28', -6_000, 'Diner', { pending: true }), gas])
+    w.move(w.personal, [w.bankRow(w.personal, 'p1')], w.family)
+    expect(w.act(w.family, 'delete', { rows: 'delete' })).toEqual([
+      'Family’s 1 transaction on Visa was deleted.',
+      'Visa keeps the bank ids of 1 transaction Family had, deleted, so a sync doesn’t add it again.',
+      'Family and all its data were deleted.',
+    ])
+    expect(w.kept()).toEqual(['p1'])
+    const keptRow = () =>
+      w.personal.q.get<{ id: number; status: string; amount: number; date: string; deleted: number; removed: number }>(
+        'SELECT id, status, amount_minor AS amount, date, deleted_at IS NOT NULL AS deleted, removed_at IS NOT NULL AS removed FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND bank_id_only = 1',
+        w.visa,
+      )!
+    return { ...w, gas, keptRow, id: keptRow().id }
+  }
+  const NOTHING = { added: 0, updated: 0, adopted: 0, removed: 0 }
+
+  it('takes the new id when it posts under one on SimpleFIN, and nothing is added', () => {
+    const w = pending()
+    // While the bank still reports it, pending, nothing happens.
+    expect(w.window([remote('p1', '2026-09-28', -6_000, 'Diner', { pending: true }), w.gas])).toMatchObject(NOTHING)
+    // It posts under a new id, a day later and with a tip.
+    const posted = remote('p1x', '2026-09-29', -6_350, 'Diner')
+    expect(w.window([posted, w.gas])).toMatchObject({ ...NOTHING, newIds: [] })
+    expect(w.kept()).toEqual(['p1x'])
+    expect(w.keptRow()).toEqual({ id: w.id, status: 'cleared', amount: -6_350, date: '2026-09-29', deleted: 1, removed: 0 })
+    expect(w.check(w.family)).toEqual({ personal: -1_200 })
+    // The same window again, and after the purge: it's a known id now.
+    purgeDeleted(w.personal, -1)
+    expect(w.window([posted, w.gas])).toMatchObject(NOTHING)
+    expect(w.kept()).toEqual(['p1x'])
+    // Another charge at the same place is a new transaction.
+    expect(w.window([posted, w.gas, remote('n1', '2026-09-30', -6_000, 'Diner')])).toMatchObject({ ...NOTHING, added: 1 })
+    expect(w.check(w.family)).toEqual({ personal: -7_200 })
+  })
+
+  it('leaves it alone for a posted row that isn’t its charge, or while the bank still reports it', () => {
+    const w = pending()
+    // Another payee, and an amount too far off: each is new.
+    expect(w.window([w.gas, remote('n1', '2026-09-29', -6_000, 'Hardware'), remote('n2', '2026-09-29', -16_000, 'Diner')])).toMatchObject({ ...NOTHING, added: 2 })
+    expect(w.kept()).toEqual(['p1'])
+    // One you entered for it is adopted first, and the kept row keeps its id.
+    const w2 = pending()
+    const mine = w2.row(w2.personal, '2026-09-29', -6_350, { payee: 'Diner' })
+    expect(w2.window([w2.gas, remote('p1x', '2026-09-29', -6_350, 'Diner')])).toMatchObject({ ...NOTHING, adopted: 1 })
+    expect(w2.bankRow(w2.personal, 'p1x')).toBe(mine)
+    expect(w2.kept()).toEqual(['p1'])
+  })
+
+  it('takes the new id on Plaid, which names it', () => {
+    const w = pending()
+    expect(w.plaid([remote('p1x', '2026-09-29', -6_350, 'Diner', { replaces: 'p1' })])).toMatchObject({ ...NOTHING, newIds: [] })
+    expect(w.kept()).toEqual(['p1x'])
+    expect(w.keptRow()).toEqual({ id: w.id, status: 'cleared', amount: -6_350, date: '2026-09-29', deleted: 1, removed: 0 })
+    expect(w.check(w.family)).toEqual({ personal: -1_200 })
+  })
+})
+
 describe('a ledger with only deleted rows on the account, or an account split off from it', () => {
   it('leaves the bank ids of its deleted rows with the home, without a question', () => {
     const w = world({ shareWith: ['family'], opening: 0 })

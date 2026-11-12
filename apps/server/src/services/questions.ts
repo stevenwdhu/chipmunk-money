@@ -209,7 +209,8 @@ function openingBase(m: PartsModel, me: string): number {
  * The note under the question about this ledger's transactions on an account: for each choice, the
  * change in each other ledger's balance on it, beyond what the opening balance going to the home
  * does (its notice has that). For a synced account it's as if a sync had then run with the bank
- * unchanged, which is when the opening ledger takes the difference. While the new home is still to
+ * unchanged, which is when the opening ledger takes the difference: what changes at once and what
+ * the sync then adds are both said, when they differ. While the new home is still to
  * be chosen and would also be the opening ledger, it's named "the new home", or each choice of home
  * is spelled out when they differ by more than that.
  */
@@ -226,7 +227,8 @@ function rowsNote(a: SharedAccount, m: PartsModel, options: Array<{ label: strin
       const synced = (after.synced.get(l.ledgerId) ?? 0) - (before.synced.get(l.ledgerId) ?? 0)
       if (!now && !synced) return []
       const whose = `${l === home ? homeName : l.name}’s balance on ${a.facts.name}`
-      return [synced === now ? `${whose} changes by ${money(now)}` : `at the next sync, ${whose} changes by ${money(synced)}`]
+      if (synced === now) return [`${whose} changes by ${money(now)}`]
+      return [now ? `${whose} changes by ${money(now)} now, and by ${money(synced - now)} more at the next sync` : `at the next sync, ${whose} changes by ${money(synced)}`]
     })
     return changed.length ? list(changed) : `no other ledger’s balance on ${a.facts.name} changes`
   }
