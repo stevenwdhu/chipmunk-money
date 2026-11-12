@@ -31,17 +31,20 @@ function what(c: AiRecord) {
 /** What an answered request came to. */
 function answer(c: AiRecord) {
   if (c.kind === 'names') return count(c.named ?? 0, 'name')
+  // A test asks about a sample: that it answered is what counts, not what it picked.
+  if (c.kind === 'test') return 'Works'
   if (c.outcome) return `→ ${c.outcome}`
   return c.kind === 'categorize' ? '→ no category' : null
 }
 
 const STATUS = { ok: 'Answered', failed: 'Failed', unneeded: 'No longer needed' }
 
-/** Why it failed: the last error, the primary provider's when the fallback failed after it, and how often it was asked. */
+/** Why it failed: the last error, the primary provider's when the fallback failed after it, how often it was asked, and why it can't be retried here. */
 function reason(c: AiRecord) {
   const lines = [c.error ?? 'No reason was given']
   if (c.primaryError && c.primaryError !== c.error) lines.push(`The primary provider failed first: ${c.primaryError}`)
   if (c.tries > 1 && c.firstFailedAt) lines.push(`Asked ${c.tries} times, first failed ${dateTime(c.firstFailedAt, tz.value)}`)
+  if (c.noRetry) lines.push(c.noRetry)
   return lines.join('\n')
 }
 
@@ -50,10 +53,8 @@ function unneeded(c: AiRecord) {
   return `Nothing is left to ask: ${left}\nIt failed: ${c.error ?? 'no reason was given'}`
 }
 
-function retried(c: AiRecord) {
-  const first = `First failed ${dateTime(c.firstFailedAt ?? c.createdAt, tz.value)}`
-  return c.tries > 1 ? `${first}\nAnswered on try ${c.tries}` : first
-}
+/** A request that failed first and was answered later, by a retry or by the next time the same thing was asked. */
+const later = (c: AiRecord) => (c.tries > 1 ? `Answered on try ${c.tries}` : 'Answered later')
 
 /** The request whose Retry was just pressed, until the server says it started. */
 const asking = ref<number | null>(null)
@@ -149,16 +150,15 @@ async function retryAll() {
               <X v-else-if="c.status === 'failed'" class="size-3 text-destructive" :stroke-width="3.5" />
               <span v-else class="size-2 rounded-full border border-muted-foreground" />
             </span>
-            <!-- On a phone what it was for has a line of its own, with the time and ledger under the rest. -->
+            <!-- On a phone what it was for has lines of its own, with the time and ledger under the rest. -->
             <div class="flex min-w-0 flex-1 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
               <div class="order-last flex min-w-0 gap-2 text-xs text-muted-foreground sm:order-none sm:shrink-0 sm:gap-3">
                 <time :datetime="c.createdAt" class="shrink-0 whitespace-nowrap tabular sm:w-40">{{ dateTime(c.createdAt, tz, { seconds: true }) }}</time>
                 <span class="min-w-0 truncate sm:w-24" :title="c.ledger">{{ c.ledger }}</span>
               </div>
               <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span class="truncate sm:[overflow-wrap:anywhere] sm:whitespace-normal" :class="{ 'text-muted-foreground': c.kind === null }" :title="what(c)">
-                  {{ what(c) }}
-                </span>
+                <!-- Never cut, also on a phone: payees that start the same are told apart by their end. -->
+                <span class="[overflow-wrap:anywhere]" :class="{ 'text-muted-foreground': c.kind === null }">{{ what(c) }}</span>
                 <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
                   <span v-if="c.model" class="min-w-0 truncate">{{ c.model }}</span>
                   <span v-if="busy(c)" class="flex items-center gap-1"><Loader2 class="size-3 shrink-0 animate-spin" />Asking again…</span>
@@ -170,7 +170,7 @@ async function retryAll() {
                     </template>
                     <template v-if="c.firstFailedAt">
                       <span>·</span>
-                      <TextTip label="Retried" :text="retried(c)" />
+                      <TextTip :label="later(c)" :text="`First failed ${dateTime(c.firstFailedAt ?? c.createdAt, tz)}`" />
                     </template>
                   </template>
                   <template v-else>
