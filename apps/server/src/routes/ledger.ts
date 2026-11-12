@@ -9,7 +9,6 @@ import {
   activityQuerySchema,
   aiJobStatusSchema,
   aiUsageSchema,
-  backupResultSchema,
   balancePointSchema,
   balanceSnapshotSchema,
   balanceUpdateSchema,
@@ -55,6 +54,10 @@ import {
   institutionSchema,
   institutionUpdateSchema,
   isoDate,
+  ledgerActionResultSchema,
+  ledgerActionSchema,
+  ledgerEraseSchema,
+  ledgerQuestionsSchema,
   linkableBankAccountSchema,
   linkPreviewSchema,
   switchResultSchema,
@@ -126,6 +129,7 @@ import type { AppContext } from '../services/context'
 import * as imports from '../services/import'
 import * as institutions from '../services/institutions'
 import { matchTransactions } from '../services/matching'
+import { questionsFor } from '../services/questions'
 import * as recurring from '../services/recurring'
 import * as reports from '../services/reports'
 import { today } from '../services/settings'
@@ -171,6 +175,11 @@ function log(c: C, entry: ActivityEntry) {
 const limitedKey = (c: C) => c.var.actor.kind === 'key' && !!c.var.actor.key.ledgers
 /** The ledgers the caller may use, by id, or null for every one. */
 const usableLedgers = (c: C) => (c.var.actor.kind === 'key' ? c.var.actor.key.ledgers : null)
+/** The same, as a set: for what's asked before the ledger is deleted, erased or archived. */
+const allowedLedgers = (c: C) => {
+  const usable = usableLedgers(c)
+  return usable ? new Set(usable) : null
+}
 
 /**
  * Bank connections belong to the whole app, so a key limited to some ledgers can only use the bank
@@ -1609,20 +1618,40 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       return result
     },
   )
+  r.get(
+    '/questions',
+    {
+      ...data,
+      scope: 'admin',
+      summary: 'Get what’s asked before deleting, erasing or archiving this ledger',
+      description:
+        'A ledger that has a shared account can’t just go: `questions` is what must be answered first (which ledger becomes the home of an account it’s the home of, and whether its transactions on a shared account are deleted or moved to another ledger that has it), each with its options and a note on what each does to the other ledgers’ balances. `notices` is what happens without a choice, and `blockers` why it can’t be done at all (no other ledger can be the home, or the API key can’t use every ledger involved). Send each question’s `id` with the chosen option’s `value` as `answers` to DELETE /ledgers/{ledger}, POST /ledgers/{ledger}/erase or PATCH /ledgers/{ledger}. All three lists are empty for a ledger with nothing to ask about.',
+      query: z.object({ action: ledgerActionSchema }),
+      response: ledgerQuestionsSchema,
+    },
+    (c, { query }) => questionsFor(c.var.ctx, query.action, allowedLedgers(c)),
+  )
   r.post(
     '/erase',
     {
       ...data,
       scope: 'admin',
       summary: 'Erase this ledger’s data',
-      description: 'Deletes all accounts, transactions, recurring items and tags, and resets the categories. A copy of the whole database is saved in data/backups first (`pre-erase-<slug>-<time>.db`). Send `{ "confirm": "erase" }`.',
-      body: z.object({ confirm: z.literal('erase') }),
-      response: backupResultSchema,
+      description:
+        'Deletes all accounts, transactions, recurring items and tags, and resets the categories. A copy of the whole database is saved in data/backups first (`pre-erase-<slug>-<time>.db`). Send `{ "confirm": "erase" }`. A ledger that has a shared account asks first (GET /ledgers/{ledger}/questions?action=erase): send the answers as `answers`, or it’s refused with a 409. Afterwards it has none of the accounts that were shared with it. `changes` says what was done, in every ledger it touched. With `dryRun=true` it says what would be done, changes nothing and saves no copy.',
+      body: ledgerEraseSchema,
+      response: ledgerActionResultSchema,
+      dryRun: true,
     },
-    (c) => {
-      const result = setup.eraseAll(storage, c.var.ctx)
+    (c, { body, dryRun }) => {
+      const actor = c.var.actor
+      const result = setup.eraseAll(storage, c.var.ctx, {
+        answers: body.answers,
+        allowed: allowedLedgers(c),
+        actor: { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null },
+      })
       log(c, { action: 'erase', entity: 'ledger', summary: 'Erased all data', after: result })
-      return result
+      return { ...result, dryRun }
     },
   )
   r.get(

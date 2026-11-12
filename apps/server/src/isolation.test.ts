@@ -179,6 +179,7 @@ const READS: Case[] = [
   { route: 'GET /ledgers/:ledger/activity', query: () => ({ actor: 'web', entity: 'ledger' }) },
   { route: 'GET /ledgers/:ledger/activity/actors' },
   { route: 'GET /ledgers/:ledger/setup' },
+  { route: 'GET /ledgers/:ledger/questions', query: () => ({ action: 'erase' }) },
   { route: 'GET /ledgers/:ledger/export/transactions.csv' },
   { route: 'GET /ledgers/:ledger/export/transactions.csv', query: (c) => ({ ...RANGE, filter: filter(c) }) },
 ]

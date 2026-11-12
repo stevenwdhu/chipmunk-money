@@ -513,7 +513,8 @@ describe('setSharing', () => {
     storage.registry.update(family.ledger.id, { archived: true })
     refused({ ledgers: ['personal', 'family', 'trip'], home: 'family' }, 'Family is archived, so it can’t be Visa’s home.')
     storage.registry.update(family.ledger.id, { archived: false })
-    storage.registry.update(personal.ledger.id, { archived: true })
+    // A home can't be archived while it's the home (the questions ask for another first): set as it would be if it were.
+    storage.sqlite.prepare("UPDATE ledgers SET archived_at = '2026-10-01T00:00:00Z' WHERE id = ?").run(personal.ledger.id)
     refused({ ledgers: ['personal'], rows: { family: 'home' } }, 'Personal is archived. Restore it before changing how Visa is shared.')
     expect(w.everything(personal, family, trip)).toEqual(before)
   })

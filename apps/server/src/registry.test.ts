@@ -97,7 +97,7 @@ describe('the ledger registry', () => {
     family.q.run("INSERT INTO ledger_settings (ledger_id, key, value) VALUES (@ledger, 'setup.completed', 'true')")
     const before = ledgerRowCounts(storage.sqlite, personal.ledger.id)
 
-    expect(storage.registry.remove(family.ledger.id)).toEqual({ backup: null })
+    expect(storage.registry.remove(family.ledger.id)).toEqual({ backup: null, changes: ['Family and all its data were deleted.'] })
     expect(storage.registry.find(family.ledger.id)).toBeUndefined()
     expect(Object.values(ledgerRowCounts(storage.sqlite, family.ledger.id)).every((n) => n === 0)).toBe(true)
     expect(ledgerRowCounts(storage.sqlite, personal.ledger.id)).toEqual(before)

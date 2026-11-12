@@ -106,7 +106,7 @@ describe('erasing a ledger', () => {
     const rolledBack = new Error('rolled back')
     expect(() =>
       storage.sqlite.transaction(() => {
-        expect(eraseAll(storage, a)).toEqual({ backup: null })
+        expect(eraseAll(storage, a)).toMatchObject({ backup: null })
         throw rolledBack
       })(),
     ).toThrow(rolledBack)
@@ -147,7 +147,7 @@ describe('deleting a ledger', () => {
     const rolledBack = new Error('rolled back')
     expect(() =>
       storage.sqlite.transaction(() => {
-        expect(storage.registry.remove(f.ledger.id)).toEqual({ backup: null })
+        expect(storage.registry.remove(f.ledger.id)).toMatchObject({ backup: null })
         throw rolledBack
       })(),
     ).toThrow(rolledBack)

@@ -2,7 +2,7 @@ import path from 'node:path'
 import { asc, eq } from 'drizzle-orm'
 import { zipSync } from 'fflate'
 import { HTTPException } from 'hono/http-exception'
-import type { Ledger, LedgerUpdate } from '@chipmunk/shared'
+import type { Ledger, LedgerAnswers, LedgerUpdate } from '@chipmunk/shared'
 import { CATEGORY_COLORS } from '@chipmunk/shared'
 import type { LlmCategorizer } from './ai/types'
 import { DB_FILE, openDatabase, type SQLite } from './db/client'
@@ -13,7 +13,8 @@ import { deleteLedgerRows } from './db/tables'
 import type { UnscopedReason } from './db/unscoped-sites'
 import { accountReadsOn, accountWideOf, type AccountReads } from './services/account-rows'
 import { seedCatalog } from './services/catalog'
-import { refuseWhileSharing } from './services/sharing'
+import type { ActivityActor } from './services/activity'
+import { applyAnswers, categorizeMoved, requireAnswers } from './services/questions'
 import { slugify, ulid } from './lib/ids'
 import { SecretBox } from './lib/secrets'
 import type { AppContext, AppStore, CtxOf } from './services/context'
@@ -26,6 +27,19 @@ import { getAppSetting, sealStoredSecrets, setAppSetting, today } from './servic
  * its rows, and ctx.app reaches the app-wide tables. Deleting a ledger deletes its rows
  * (deleteLedgerRows), after saving a copy of the whole database.
  */
+
+/** Who deletes or archives a ledger, and with what answers to the questions asked first (services/questions.ts). */
+export interface LedgerActionOptions {
+  /** Each question's id with the option chosen. None is needed for a ledger that has nothing to ask about. */
+  answers?: LedgerAnswers
+  /** The ledgers the caller may use, by id: null (or left out) for all of them. */
+  allowed?: ReadonlySet<string> | null
+  /** Who it is, in the activity of every ledger touched. */
+  actor?: ActivityActor
+}
+
+/** Who acts when a caller doesn't say: the app itself. */
+const APP_ACTOR: ActivityActor = { name: 'web', apiKeyId: null }
 
 type LedgerRow = typeof ledgers.$inferSelect
 
@@ -194,10 +208,26 @@ export class LedgerRegistry {
     return row
   }
 
-  update(idOrSlug: string, input: LedgerUpdate): LedgerRow {
+  /**
+   * Changes a ledger's name (its slug follows), colour, icon, place, archive, or makes it the
+   * default. Archiving it goes through `archive`, with `input.answers`.
+   */
+  update(idOrSlug: string, input: LedgerUpdate, opts: Omit<LedgerActionOptions, 'answers'> = {}): LedgerRow {
+    return this.change(idOrSlug, input, opts).row
+  }
+
+  /**
+   * `update`, which also says what archiving did. Archiving a ledger that isn't archived asks its
+   * questions first (services/questions.ts): the answers are applied in the same transaction, so a
+   * shared account whose home it is gets another home, and one whose opening balance it carries
+   * hands it to the home. It stays in the accounts shared with it and keeps its rows. Restoring it
+   * needs nothing.
+   */
+  change(idOrSlug: string, input: LedgerUpdate, opts: Omit<LedgerActionOptions, 'answers'> = {}): { row: LedgerRow; changes: string[] } {
     const row = this.get(idOrSlug)
     const active = this.rows().filter((r) => !r.archivedAt)
-    if (input.archived && !row.archivedAt && active.length === 1) {
+    const archiving = !!input.archived && !row.archivedAt
+    if (archiving && active.length === 1) {
       throw new HTTPException(409, { message: "You can't archive your only ledger. Create another one first." })
     }
     const patch: Partial<LedgerRow> = { updatedAt: this.now().toISOString() }
@@ -209,34 +239,55 @@ export class LedgerRegistry {
     if (input.icon !== undefined) patch.icon = input.icon ?? null
     if (input.sort !== undefined) patch.sort = input.sort
     if (input.archived !== undefined) patch.archivedAt = input.archived ? this.now().toISOString() : null
-    this.app.db.update(ledgers).set(patch).where(eq(ledgers.id, row.id)).run()
-    if (input.isDefault) setAppSetting(this.app, DEFAULT_LEDGER_KEY, row.id)
-    if (input.archived && this.defaultLedger().id === row.id) setAppSetting(this.app, DEFAULT_LEDGER_KEY, null)
-    return this.get(row.id)
+    const changes: string[] = []
+    this.sqlite.transaction(() => {
+      if (archiving) {
+        const applied = applyAnswers(this.context(row.id), (id) => this.contextById(id), 'archive', input.answers ?? {}, {
+          allowed: opts.allowed ?? null,
+          actor: opts.actor ?? APP_ACTOR,
+        })
+        changes.push(...applied.changes, `${row.name} was archived.`)
+      }
+      this.app.db.update(ledgers).set(patch).where(eq(ledgers.id, row.id)).run()
+      if (input.isDefault) setAppSetting(this.app, DEFAULT_LEDGER_KEY, row.id)
+      if (input.archived && this.defaultLedger().id === row.id) setAppSetting(this.app, DEFAULT_LEDGER_KEY, null)
+    })()
+    return { row: this.get(row.id), changes }
   }
 
   /**
    * Deletes a ledger and all its data, after saving a copy of the whole database as
-   * data/backups/pre-delete-<slug>-<time>.db (safetyCopy, not in a dry run). Not while it's a shared
-   * account's home or opening ledger (refuseWhileSharing). Bank accounts linked to its accounts are
-   * unlinked (their foreign key). Then the freed pages go back to the disk.
+   * data/backups/pre-delete-<slug>-<time>.db (safetyCopy, not in a dry run). What's asked first
+   * (services/questions.ts) is answered in `opts.answers` and applied in the same transaction, before
+   * its rows go: a shared account it's the home of gets another home, and its transactions on a
+   * shared account move to another ledger or are deleted. Bank accounts linked to its accounts are
+   * unlinked (their foreign key). Then the freed pages go back to the disk, and AI categorizes what
+   * moved to another ledger uncategorized. Returns the copy's file name and what was done, in words.
    */
-  remove(idOrSlug: string): { backup: string | null } {
+  remove(idOrSlug: string, opts: LedgerActionOptions = {}): { backup: string | null; changes: string[] } {
     const row = this.get(idOrSlug)
     if (this.rows().length === 1) {
       throw new HTTPException(409, { message: "You can't delete your only ledger. Erase its data instead." })
     }
-    refuseWhileSharing(this.context(row.id))
+    const ctx = this.context(row.id)
+    const ctxOf: CtxOf = (id) => this.contextById(id)
+    const answers = opts.answers ?? {}
+    const allowed = opts.allowed ?? null
+    requireAnswers(ctx, 'delete', answers, allowed)
     const backup = safetyCopy(this.sqlite, `pre-delete-${row.slug}`)
-    ledgerMaintenance(this.sqlite, row.id, () =>
-      this.sqlite.transaction(() => {
+    const applied = this.sqlite.transaction(() => {
+      const applied = applyAnswers(ctx, ctxOf, 'delete', answers, { allowed, actor: opts.actor ?? APP_ACTOR })
+      ledgerMaintenance(this.sqlite, row.id, () => {
         deleteLedgerRows(this.sqlite, row.id)
         this.app.db.delete(ledgers).where(eq(ledgers.id, row.id)).run()
         if (getAppSetting(this.app, DEFAULT_LEDGER_KEY, null) === row.id) setAppSetting(this.app, DEFAULT_LEDGER_KEY, null)
-      })(),
-    )
+      })
+      return applied
+    })()
     reclaimSpace(this.sqlite)
-    return { backup: backup ? path.basename(backup) : null }
+    // Inside a transaction still: a dry run, which is rolled back.
+    if (!this.sqlite.inTransaction) categorizeMoved(ctxOf, applied)
+    return { backup: backup ? path.basename(backup) : null, changes: [...applied.changes, `${row.name} and all its data were deleted.`] }
   }
 
   /** Whether there's any ledger yet. */

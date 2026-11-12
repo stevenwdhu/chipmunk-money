@@ -51,7 +51,7 @@ export function safetyCopy(sqlite: SQLite, label: string): string | null {
 /**
  * Deletes a ledger's data but its ledger settings and activity log, and forgets that it was set
  * up. Every shared category is on again (its ledger_category_off rows go). Then the freed pages go
- * back to the disk.
+ * back to the disk (not inside a caller's transaction: the caller does that once it has committed).
  */
 export function eraseLedger(sqlite: SQLite, ledgerId: string, setupKey: string) {
   ledgerMaintenance(sqlite, ledgerId, () =>

@@ -131,8 +131,8 @@ Separate sets of books, e.g. “Personal” and “Family”. Every other ledger
 | GET | `/ledgers` | List ledgers. | read |
 | POST | `/ledgers` | Create a ledger. | admin |
 | GET | `/ledgers/{ledger}` | Get a ledger. | read |
-| PATCH | `/ledgers/{ledger}` | Update a ledger. | admin |
-| DELETE | `/ledgers/{ledger}` | Delete a ledger. | admin |
+| PATCH | `/ledgers/{ledger}` | Update a ledger. Accepts `?dryRun=true`. | admin |
+| DELETE | `/ledgers/{ledger}` | Delete a ledger. Accepts `?dryRun=true`. | admin |
 
 ### Transactions
 
@@ -349,7 +349,8 @@ Setup, the full backup, erase and export.
 | GET | `/ledgers/{ledger}/setup` | Get setup status. | read |
 | POST | `/ledgers/{ledger}/setup/start` | Start from scratch. | write |
 | POST | `/ledgers/{ledger}/setup/demo` | Load the demo data. | write |
-| POST | `/ledgers/{ledger}/erase` | Erase this ledger’s data. | admin |
+| GET | `/ledgers/{ledger}/questions` | Get what’s asked before deleting, erasing or archiving this ledger. | admin |
+| POST | `/ledgers/{ledger}/erase` | Erase this ledger’s data. Accepts `?dryRun=true`. | admin |
 | GET | `/ledgers/{ledger}/export/transactions.csv` | Export transactions as CSV. | read |
 
 ### Settings

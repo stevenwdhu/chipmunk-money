@@ -805,7 +805,7 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     w.check()
   })
 
-  it('leaves them when the ledger that holds the split-off account goes, once that calls for it, and deleting it doesn’t fail before then', () => {
+  it('leaves them when the ledger that holds the split-off account goes, whether or not they were left before', () => {
     const kept = () => {
       const w = world()
       plaid(w, [remote('k1', '2026-09-20', -9_000, 'Book Shop')])
@@ -820,8 +820,11 @@ describe('a ledger that keeps its rows, for the account’s bank and CSV imports
     expect(w.rowsOn(w.personal, w.visa)).toMatchObject([{ externalId: 'k1', deleted: 1 }])
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
 
-    const before = kept()
-    expect(() => before.storage.registry.remove(before.family.ledger.id)).not.toThrow()
-    expect(before.storage.sqlite.pragma('foreign_key_check')).toEqual([])
+    // Deleting the ledger leaves them by itself.
+    const alone = kept()
+    alone.storage.registry.remove(alone.family.ledger.id)
+    expect(plaid(alone, [remote('k1', '2026-09-20', -9_000, 'Book Shop')])).toMatchObject({ added: 0, updated: 0 })
+    expect(alone.rowsOn(alone.personal, alone.visa)).toMatchObject([{ externalId: 'k1', deleted: 1 }])
+    expect(alone.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 })

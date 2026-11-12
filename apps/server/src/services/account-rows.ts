@@ -508,6 +508,18 @@ const READS = {
   },
 
   /**
+   * The account a split-off account was split off from (split_from_id), by name, with its home: where
+   * the bank ids of the split-off account's rows must stay known once it goes. Undefined when it
+   * isn't split off from one, or that one is gone.
+   */
+  splitOffParent(db: UnscopedQuery, splitOffId: number): { id: number; name: string; homeLedgerId: string } | undefined {
+    return db.get<{ id: number; name: string; homeLedgerId: string }>(
+      'SELECT p.id, p.name, p.ledger_id AS homeLedgerId FROM accounts s JOIN accounts p ON p.id = s.split_from_id WHERE s.id = ?',
+      splitOffId,
+    )
+  },
+
+  /**
    * What a split-off account leaves the account it was split off from (split_from_id) when it goes:
    * that account and its home, or null when there's none (any more). And the rows with a bank id
    * that account matches through this one (MATCHED there): this one's and those of the accounts

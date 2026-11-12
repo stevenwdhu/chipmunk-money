@@ -1004,6 +1004,35 @@ export const backupResultSchema = z.object({
 })
 export type BackupResult = z.output<typeof backupResultSchema>
 
+export const ledgerQuestionSchema = z
+  .object({
+    id: z.string().describe('What to answer it by, in `answers`.'),
+    text: z.string(),
+    note: z.string().nullable().describe('What each choice does, in words: for a question about transactions, the change in each other ledger’s balance.'),
+    options: z.array(z.object({ value: z.string().describe('What to send as the answer.'), label: z.string() })),
+  })
+  .meta({ id: 'LedgerQuestion' })
+export type LedgerQuestion = z.output<typeof ledgerQuestionSchema>
+
+export const ledgerQuestionsSchema = z
+  .object({
+    questions: z.array(ledgerQuestionSchema).describe('What must be answered before the action. Each needs an answer.'),
+    notices: z.array(z.string()).describe('What the action does without a choice.'),
+    blockers: z.array(z.string()).describe('Why the action can’t be done at all, whatever the answers. Empty when it can.'),
+  })
+  .meta({ id: 'LedgerQuestions' })
+export type LedgerQuestions = z.output<typeof ledgerQuestionsSchema>
+
+/** What deleting, erasing or archiving a ledger did, or would do in a dry run. */
+const ledgerChanges = {
+  changes: z.array(z.string()).describe('What was done, in words, in every ledger it touched.'),
+  dryRun: z.boolean().describe('True when nothing was changed: `changes` is what would be done.'),
+}
+export const ledgerActionResultSchema = backupResultSchema.extend(ledgerChanges).meta({ id: 'LedgerActionResult' })
+export type LedgerActionResult = z.output<typeof ledgerActionResultSchema>
+export const ledgerUpdateResultSchema = ledgerSchema.extend(ledgerChanges).meta({ id: 'LedgerUpdateResult' })
+export type LedgerUpdateResult = z.output<typeof ledgerUpdateResultSchema>
+
 // API keys -----------------------------------------------------------------
 
 export const API_SCOPES = ['read', 'write', 'admin'] as const

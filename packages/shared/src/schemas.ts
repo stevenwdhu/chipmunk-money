@@ -744,6 +744,12 @@ export const ledgerCreateSchema = z.object({
 })
 export type LedgerCreate = z.input<typeof ledgerCreateSchema>
 
+/** The answers to what's asked before a ledger is deleted, erased or archived: each question's id with the chosen option's value. */
+export const ledgerAnswersSchema = z
+  .record(z.string().max(100), z.string().max(200))
+  .describe('The answers to GET /ledgers/{ledger}/questions for this action: each question’s `id` with the `value` of the option chosen. Answers to questions that aren’t asked are ignored.')
+export type LedgerAnswers = z.infer<typeof ledgerAnswersSchema>
+
 export const ledgerUpdateSchema = z.object({
   name: name(40).optional(),
   color: color.optional(),
@@ -752,11 +758,20 @@ export const ledgerUpdateSchema = z.object({
   archived: z.boolean().optional(),
   /** Make this the ledger the app opens by default. */
   isDefault: z.literal(true).optional(),
+  /** With `archived: true`: the answers to what's asked before the ledger is archived. */
+  answers: ledgerAnswersSchema.optional(),
 })
 export type LedgerUpdate = z.input<typeof ledgerUpdateSchema>
 
+/** What's done to a whole ledger that asks its questions first. */
+export const ledgerActionSchema = z.enum(['delete', 'erase', 'archive'])
+export type LedgerAction = z.infer<typeof ledgerActionSchema>
+
 /** Deleting a ledger requires repeating its name. */
-export const ledgerDeleteSchema = z.object({ confirm: z.string() })
+export const ledgerDeleteSchema = z.object({ confirm: z.string(), answers: ledgerAnswersSchema.optional() })
+
+/** Erasing a ledger's data requires the word "erase". */
+export const ledgerEraseSchema = z.object({ confirm: z.literal('erase'), answers: ledgerAnswersSchema.optional() })
 
 /** A new order for a list: every id, first to last. */
 export const reorderSchema = z.object({ ids: z.array(id).min(1).max(1000) })

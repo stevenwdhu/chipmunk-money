@@ -12,6 +12,7 @@ import {
   monthOf,
   monthRange,
 } from '@chipmunk/shared'
+import type { AccountFacts, Held } from './account-rows'
 import type { AppContext, CtxOf } from './context'
 import { resolveInstitution } from './institutions'
 import { today } from './settings'
@@ -138,8 +139,20 @@ export function requireManualBalance(ctx: AppContext, id: number) {
 export function currentParts(ctx: AppContext, accountId: number): { totalMinor: number; parts: Map<string, number> } {
   const facts = ctx.accountWide.account(accountId)
   if (!facts) return { totalMinor: 0, parts: new Map() }
+  return partsOf(facts, ctx.accountWide.held(accountId, { split: facts.recorded?.date }))
+}
+
+/**
+ * The arithmetic of currentParts, on what's handed in: the account's opening ledger, opening balance
+ * and latest recorded balance, and what each ledger holds, split at that recorded balance's date
+ * (`afterMinor` is what's dated after it). Also for working out what the parts would be once a
+ * ledger's rows have gone or moved, without changing anything (questions.ts).
+ */
+export function partsOf(
+  facts: Pick<AccountFacts, 'openingLedgerId' | 'openingBalanceMinor'> & { recorded: { balanceMinor: number } | null },
+  held: ReadonlyArray<Pick<Held, 'ledgerId' | 'totalMinor' | 'afterMinor'>>,
+): { totalMinor: number; parts: Map<string, number> } {
   const recorded = facts.recorded
-  const held = ctx.accountWide.held(accountId, { split: recorded?.date })
   const totalMinor = (recorded?.balanceMinor ?? facts.openingBalanceMinor) + held.reduce((sum, h) => sum + (recorded ? h.afterMinor : h.totalMinor), 0)
   const others = held.filter((h) => h.ledgerId !== facts.openingLedgerId).reduce((sum, h) => sum + h.totalMinor, 0)
   return { totalMinor, parts: new Map(held.map((h) => [h.ledgerId, h.ledgerId === facts.openingLedgerId ? totalMinor - others : h.totalMinor])) }
@@ -308,9 +321,8 @@ export function deleteAccount(ctx: AppContext, ctxOf: CtxOf, id: number) {
  * account that isn't split off from one, or whose parent is gone. Run it in the caller's
  * transaction, before the account's rows go. Returns how many were left.
  *
- * Deleting or erasing the ledger that holds a split-off account must call this for each of its
- * split-off accounts first. That comes with the questions asked before a ledger goes, so nothing
- * calls it there yet: until then those bank ids go with the ledger.
+ * Deleting or erasing the ledger that holds a split-off account calls this for each of its
+ * split-off accounts first (questions.ts).
  */
 export function leaveSplitOffBankIds(ctx: AppContext, ctxOf: CtxOf, accountId: number): number {
   ctx.q.mustGet('SELECT 1 FROM ledger_accounts WHERE ledger_id = @ledger AND id = ? AND home_ledger_id = @ledger', 'Account not found', accountId)

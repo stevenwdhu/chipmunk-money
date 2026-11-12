@@ -104,7 +104,8 @@ describe('sharing an account', () => {
       message: 'Trip is archived, so Visa can’t be shared with it.',
     })
     w.storage.registry.update(w.trip.ledger.id, { archived: false })
-    w.storage.registry.update(w.personal.ledger.id, { archived: true })
+    // A home can't be archived while it's the home (the questions ask for another first): set as it would be if it were.
+    w.storage.sqlite.prepare("UPDATE ledgers SET archived_at = '2026-10-01T00:00:00Z' WHERE id = ?").run(w.personal.ledger.id)
     expect(status(() => addMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER))).toEqual({
       status: 400,
       message: 'Personal is archived. Restore it before sharing Visa.',
@@ -258,49 +259,47 @@ describe('deleting, erasing or clearing a ledger that has a shared account', () 
     erase: () => eraseAll(w.storage, ctx),
     seed: () => clearForDemo(w.storage, ctx),
   })
-  const stop = (account: string, other: string) => ({ status: 409, message: `${account} is shared with ${other}. Stop sharing it first.` })
+  const ask = { status: 409, message: 'Answer the questions first' }
   const inApp = (account: string, other: string) => ({ status: 409, message: `${account} is shared with ${other}. Erase this ledger in the app first.` })
 
-  it('refuses the home, before anything changes', () => {
+  it('asks the home its questions first, and the demo seeding refuses it, before anything changes', () => {
     const w = sharedWorld()
     w.addTx(w.personal, '2026-09-01', -200)
     w.addTx(w.family, '2026-09-02', -300)
     const way = ways(w, w.personal)
-    expect(status(way.delete)).toEqual(stop('Visa', 'Family'))
-    expect(status(way.erase)).toEqual(stop('Visa', 'Family'))
+    expect(status(way.delete)).toEqual(ask)
+    expect(status(way.erase)).toEqual(ask)
     expect(status(way.seed)).toEqual(inApp('Visa', 'Family'))
     expect(w.storage.registry.find(w.personal.ledger.id)).toBeDefined()
     expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: -200, family: -300 }, totalMinor: -500 })
   })
 
-  it('refuses the ledger whose part carries the opening balance, naming the home', () => {
+  it('asks a ledger the account is shared with what happens to its transactions, and the demo seeding refuses it, naming the home', () => {
     const w = sharedWorld({ opening: -1_000 })
     w.addTx(w.family, '2026-09-02', -300)
-    w.personal.q.run('UPDATE accounts SET opening_ledger_id = ? WHERE ledger_id = @ledger AND id = ?', w.family.ledger.id, w.visa)
     const way = ways(w, w.family)
-    expect(status(way.delete)).toEqual(stop('Visa', 'Personal'))
-    expect(status(way.erase)).toEqual(stop('Visa', 'Personal'))
+    expect(status(way.delete)).toEqual(ask)
+    expect(status(way.erase)).toEqual(ask)
     expect(status(way.seed)).toEqual(inApp('Visa', 'Personal'))
-    expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: 0, family: -1_300 }, totalMinor: -1_300 })
+    expect(expectPartsSumToAccount(w.storage, w.visa)).toEqual({ parts: { personal: -1_000, family: -300 }, totalMinor: -1_300 })
   })
 
   it('names the first other ledger when the home shares it with several', () => {
     const w = sharedWorld({ shareWith: ['trip', 'family'] })
-    expect(status(ways(w, w.personal).delete)).toEqual(stop('Visa', 'Family'))
+    expect(status(ways(w, w.personal).seed)).toEqual(inApp('Visa', 'Family'))
   })
 
   it('leaves a ledger with no shared account, and an account that isn’t shared, as they were', () => {
     const w = sharedWorld({ shareWith: [] })
     w.addTx(w.personal, '2026-09-01', -200)
-    expect(ways(w, w.personal).erase()).toEqual({ backup: null })
+    expect(ways(w, w.personal).erase()).toEqual({ backup: null, changes: ['Personal’s data was erased.'] })
     expect(listAccounts(w.personal)).toEqual([])
   })
 
-  for (const way of ['delete', 'erase', 'seed'] as const) {
-    it(`lets a ledger the account is only shared with go (${way}): its rows and its member row go, the home's stay`, () => {
+  for (const way of ['delete', 'erase'] as const) {
+    it(`lets a ledger the account is only shared with go without a question when it holds nothing on it (${way}): its member row goes, the home's rows stay`, () => {
       const w = sharedWorld({ opening: -1_000 })
       w.addTx(w.personal, '2026-09-01', -200)
-      w.addTx(w.family, '2026-09-02', -300)
       ways(w, w.family)[way]()
       expect(w.personal.accountWide.ledgers(w.visa).map((l) => l.slug)).toEqual(['personal'])
       expect(getSharing(w.personal, w.visa)).toMatchObject({ members: [], totalBalanceMinor: -1_200 })

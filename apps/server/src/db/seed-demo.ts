@@ -29,9 +29,9 @@ const KEPT_FOR_DEMO = ['ledger_settings', 'activity', 'payee_rules', 'category_g
 
 /**
  * Clears a ledger that has data for the demo (`pnpm seed:demo --force`), after saving a copy of the
- * whole database, the same safety net the app keeps before erasing a ledger. Not while it's a shared
- * account's home or opening ledger. Returns the copy's path, or null when nothing was cleared (or
- * there's no copy, in memory).
+ * whole database, the same safety net the app keeps before erasing a ledger. Not while it has a
+ * shared account: erasing it in the app asks what happens to it first, and here there's nobody to
+ * ask. Returns the copy's path, or null when nothing was cleared (or there's no copy, in memory).
  */
 export function clearForDemo(storage: Storage, ctx: AppContext): string | null {
   const n = ctx.q.pluck<number>(

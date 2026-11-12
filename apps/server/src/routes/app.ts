@@ -9,7 +9,6 @@ import {
   apiKeyCreatedSchema,
   apiKeyCreateSchema,
   apiKeySchema,
-  backupResultSchema,
   bankConnectionCreateSchema,
   bankConnectionSchema,
   bankConnectionUpdateSchema,
@@ -27,8 +26,10 @@ import {
   labelSchema,
   labelUpdateSchema,
   ledgerCreateSchema,
+  ledgerActionResultSchema,
   ledgerDeleteSchema,
   ledgerSchema,
+  ledgerUpdateResultSchema,
   ledgerUpdateSchema,
   settingsSchema,
   settingsUpdateSchema,
@@ -86,6 +87,12 @@ export function appRoutes(storage: Storage, bank: BankService) {
       summary,
       ...extra,
     })
+
+  /** Who is acting, and the ledgers they may use, for what's asked before a ledger is deleted or archived. */
+  const acting = (actor: BaseEnv['Variables']['actor']) => ({
+    actor: { name: actorName(actor), apiKeyId: actor.kind === 'key' ? actor.key.id : null },
+    allowed: actor.kind === 'key' && actor.key.ledgers ? new Set(actor.key.ledgers) : null,
+  })
 
   /**
    * What belongs to the whole app (API keys, the full backup, app settings, payee names, bank
@@ -167,21 +174,24 @@ export function appRoutes(storage: Storage, bank: BankService) {
     {
       scope: 'admin',
       summary: 'Update a ledger',
-      description: 'Rename (the slug follows the name), recolour, reorder, archive, or make it the default (not with a key limited to some ledgers).',
+      description:
+        'Rename (the slug follows the name), recolour, reorder, archive, or make it the default (not with a key limited to some ledgers). Archiving a ledger that has a shared account asks first (GET /ledgers/{ledger}/questions?action=archive): send the answers as `answers`, or it’s refused with a 409. The ledger keeps the accounts shared with it and its transactions on them, and a sync still updates those. `changes` says what archiving did. Try it with `dryRun=true` first.',
       params: ledgerParam,
       body: ledgerUpdateSchema,
-      response: ledgerSchema,
+      response: ledgerUpdateResultSchema,
+      dryRun: true,
     },
-    (c, { params, body }) => {
+    (c, { params, body, dryRun }) => {
       const before = registry.toDTO(registry.get(params.ledger), false)
       requireLedger(c.var.actor, before.id)
       // Which ledger the app opens, and the ledgers' order (the first one opens when none is chosen), are the whole app's.
       const isDefault = registry.defaultLedger().id === before.id
       if (body.isDefault || body.sort !== undefined || (body.archived && isDefault)) requireAllLedgers(c.var.actor, DEFAULT_LEDGER)
-      const after = registry.toDTO(registry.update(before.id, body), false)
+      const { row, changes } = registry.change(before.id, body, acting(c.var.actor))
+      const after = registry.toDTO(row, false)
       const d = diff(before, after)
       if (d) logTo(after.id, c.var.actor, `Edited the ledger ${before.name}`, d)
-      return registry.toDTO(registry.get(after.id))
+      return { ...registry.toDTO(registry.get(after.id)), changes, dryRun }
     },
   )
   r.delete(
@@ -189,17 +199,19 @@ export function appRoutes(storage: Storage, bank: BankService) {
     {
       scope: 'admin',
       summary: 'Delete a ledger',
-      description: 'Deletes the ledger and all its data, after saving a copy of the whole database in data/backups (`pre-delete-<slug>-<time>.db`). Send its name as `confirm`.',
+      description:
+        'Deletes the ledger and all its data, after saving a copy of the whole database in data/backups (`pre-delete-<slug>-<time>.db`). Send its name as `confirm`. A ledger that has a shared account asks first (GET /ledgers/{ledger}/questions?action=delete): send the answers as `answers`, or it’s refused with a 409. `changes` says what was done, in every ledger it touched. With `dryRun=true` it says what would be done, changes nothing and saves no copy.',
       params: ledgerParam,
       body: ledgerDeleteSchema,
-      response: backupResultSchema,
+      response: ledgerActionResultSchema,
+      dryRun: true,
     },
-    (c, { params, body }) => {
+    (c, { params, body, dryRun }) => {
       const row = registry.get(params.ledger)
       requireLedger(c.var.actor, row.id)
       if (registry.defaultLedger().id === row.id) requireAllLedgers(c.var.actor, DEFAULT_LEDGER)
       if (body.confirm !== row.name) badRequest(`Type the ledger's name, “${row.name}”, to delete it`)
-      return registry.remove(row.id)
+      return { ...registry.remove(row.id, { answers: body.answers, ...acting(c.var.actor) }), dryRun }
     },
   )
   r.get(

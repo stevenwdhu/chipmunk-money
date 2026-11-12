@@ -956,14 +956,14 @@ describe('the all-ledgers list', () => {
 })
 
 describe('deleting a ledger that takes part in a split', () => {
-  it('is refused until its splits are let go of (leaveLedgerSplits), and then leaves the others’ splits whole', () => {
+  it('asks its questions first, and with its splits let go of (leaveLedgerSplits) leaves the others’ splits whole', () => {
     const w = three()
     const { personal, family, trip } = w
-    const message = 'A payment onto Visa is split between Family and other ledgers. Stop sharing it first.'
+    const message = 'Answer the questions first'
     refused(() => w.storage.registry.remove(family.ledger.id), 409, message)
     refused(() => eraseAll(w.storage, family), 409, message)
 
-    // For the questions asked before a ledger goes: its shares dropped, as its rows are going, and its own payment's split detached.
+    // As the answer "delete them" does it: its shares dropped, as its rows are going, and its own payment's split detached.
     const left = leaveLedgerSplits(family, w.ctxOf, { actor: TESTER })
     expect([...left.keys()]).toEqual([w.visa])
     expect(left.get(w.visa)!.map((s) => s.done)).toEqual(['droppedShare', 'droppedShare', 'detachedSplit'])
@@ -973,7 +973,7 @@ describe('deleting a ledger that takes part in a split', () => {
       family.q.pluck('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL'),
     ).toBe(0)
 
-    w.storage.registry.remove(family.ledger.id)
+    w.storage.registry.remove(family.ledger.id, { answers: { [`rows:${w.visa}`]: 'delete' } })
     // Visa is −300 less Family's −190: Personal −95 and Trip −15, A and B still split between them.
     expect(expectPartsSumToAccount(w.storage, w.visa, { dates: DATES }).parts).toEqual({
       personal: -9_500,

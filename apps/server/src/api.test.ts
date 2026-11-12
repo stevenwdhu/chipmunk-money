@@ -96,7 +96,9 @@ describe('API coverage', () => {
           ? `?${new URLSearchParams(query)}`
           : path.endsWith('/payees/choice')
             ? '?payeeKey=loblaws'
-            : ''
+            : path.endsWith('/questions')
+              ? '?action=delete'
+              : ''
       const res = await call('GET', path + qs)
       expect(res.status, `${path}: ${JSON.stringify(res.body)}`).toBe(200)
       const parsed = s.response!.safeParse(res.body)

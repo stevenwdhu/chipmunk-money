@@ -50,7 +50,7 @@ describe('setup', () => {
     startDemo(ctx)
     startDemo(other)
     const before = setupStatus(other)
-    expect(eraseAll(storage, ctx)).toEqual({ backup: null })
+    expect(eraseAll(storage, ctx)).toEqual({ backup: null, changes: ['Personal’s data was erased.'] })
     expect(setupStatus(ctx)).toEqual({ needsSetup: true, accounts: 0, transactions: 0 })
     // The shared categories are all on again, and app-wide settings are untouched.
     expect(ctx.q.pluck('SELECT count(*) FROM ledger_categories WHERE ledger_id = @ledger AND archived_at IS NULL')).toBeGreaterThan(10)

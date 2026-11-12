@@ -59,25 +59,16 @@ function inHome(ctx: AppContext, accountId: number): { account: Account; ledgers
 }
 
 /**
- * Refuses to delete, erase or clear a ledger that is a shared account's home, or whose part carries
- * one's opening balance: the account would be left without its home or that balance. A 409 naming
- * the account and another ledger that has it, then what to do first (`then`). Run it before the
- * safety copy and the transaction. A ledger an account is only shared with can go, and its member
- * row goes with it, unless it takes part in a split payment on it: its rows going would leave the
- * other half of the split behind, so it's refused too (409) until the questions asked before a
- * ledger goes let go of its splits first (leaveLedgerSplits).
+ * Refuses to clear a ledger that has a shared account, as its home or as a ledger it's shared with,
+ * where there's nobody to ask what happens to the account and to this ledger's transactions on it
+ * (`pnpm seed:demo --force`). A 409 naming the account and another ledger that has it, then what to
+ * do instead (`then`). Run it before the safety copy and the transaction. Deleting, erasing or
+ * archiving a ledger in the app asks its questions first instead (questions.ts).
  */
-export function refuseWhileSharing(ctx: AppContext, then = 'Stop sharing it first.'): void {
+export function refuseWhileSharing(ctx: AppContext, then: string): void {
   for (const accountId of ctx.accountWide.sharedAccounts(ctx.ledger.id)) {
-    const ledgers = ctx.accountWide.ledgers(accountId)
-    const here = ledgers.find((l) => l.ledgerId === ctx.ledger.id)
-    if (!here?.isHome && !here?.isOpening) continue
-    const other = ledgers.find((l) => l.ledgerId !== ctx.ledger.id)!
+    const other = ctx.accountWide.ledgers(accountId).find((l) => l.ledgerId !== ctx.ledger.id)!
     throw new HTTPException(409, { message: `${ctx.accountWide.account(accountId)!.name} is shared with ${other.name}. ${then}` })
-  }
-  const split = ctx.q.pluck<number>('SELECT account_id FROM transactions WHERE ledger_id = @ledger AND split_of IS NOT NULL ORDER BY id LIMIT 1')
-  if (split !== undefined) {
-    throw new HTTPException(409, { message: `A payment onto ${ctx.accountWide.account(split)!.name} is split between ${ctx.ledger.name} and other ledgers. ${then}` })
   }
 }
 
@@ -269,7 +260,7 @@ export interface Left {
  * The leaving ledger's live rows on the account, in chunks of at most MOVE_LIMIT. Rows linked to
  * each other (a purchase and its refund) go in one chunk, so their links are carried home with them.
  */
-function moveChunks(member: AppContext, accountId: number): number[][] {
+export function moveChunks(member: AppContext, accountId: number): number[][] {
   const ids = member.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND account_id = ? AND deleted_at IS NULL ORDER BY date, id', accountId)
   if (ids.length <= MOVE_LIMIT) return ids.length ? [ids] : []
   const links = member.q.all<{ a: number; b: number }>(
@@ -577,7 +568,7 @@ function leave(
 }
 
 /** What happened to a split payment a ledger that left took part in, in words. */
-function splitNotice(leaving: LedgerName, s: LeftSplit): string {
+export function splitNotice(leaving: LedgerName, s: LeftSplit): string {
   const money = (minor: number) => formatMoney(minor, s.currency)
   const payment = `the ${money(s.paymentMinor)} payment on ${s.date}`
   switch (s.done) {
