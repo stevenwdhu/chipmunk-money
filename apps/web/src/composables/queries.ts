@@ -148,11 +148,18 @@ export const keys = {
   bank: ['bank'] as const,
 }
 
-/** Anything that changes money moves these views. */
+/**
+ * Anything that changes money moves these views. With a shared account in this ledger, a change here
+ * moves the other ledgers' parts, totals and all-ledgers lists too, so what they have is marked
+ * stale. None of it is on screen, so nothing is asked for until one of them is opened.
+ */
 export function useInvalidateLedger() {
   const qc = useQueryClient()
-  return () =>
-    Promise.all([
+  return () => {
+    const ledger = currentLedger.value
+    if (qc.getQueryData<Account[]>(keys.accounts())?.some((a) => a.sharing))
+      void qc.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'l' && q.queryKey[1] !== ledger })
+    return Promise.all([
       qc.invalidateQueries({ queryKey: keys.transactions() }),
       qc.invalidateQueries({ queryKey: keys.accounts() }),
       qc.invalidateQueries({ queryKey: keys.summary() }),
@@ -161,15 +168,21 @@ export function useInvalidateLedger() {
       qc.invalidateQueries({ queryKey: keys.tags() }),
       qc.invalidateQueries({ queryKey: keys.payees() }),
     ])
+  }
 }
+
+/** What a ledger asks before it's deleted, erased or archived, and what that would do (useLedgerQuestions). */
+const isQuestions = (key: readonly unknown[]) => key[0] === 'l' && key[2] === 'questions'
 
 /**
  * What changes more than one ledger refreshes everything: a move, a split, a change to how an
- * account is shared, and deleting, erasing or archiving a ledger.
+ * account is shared, and deleting, erasing or archiving a ledger. All but a ledger's questions,
+ * which are asked each time their dialog opens: asked again here, after the action they were for,
+ * they'd be about a ledger that may be gone.
  */
 export function useInvalidateAll() {
   const qc = useQueryClient()
-  return () => qc.invalidateQueries()
+  return () => qc.invalidateQueries({ predicate: (q) => !isQuestions(q.queryKey) })
 }
 
 /** The same request as a dry run: the server works it all out, answers it, and changes nothing. */
@@ -1134,9 +1147,8 @@ export function useSetupStatus(enabled: MaybeRefOrGetter<boolean> = true) {
 }
 
 export function useSetupMutations() {
-  const qc = useQueryClient()
   // Everything changes after any of these, so refetch all data.
-  const refreshAll = () => qc.invalidateQueries()
+  const refreshAll = useInvalidateAll()
   return {
     start: useMutation({ mutationFn: () => lapi.post<SetupStatus>('/setup/start'), onSuccess: refreshAll }),
     demo: useMutation({
@@ -1177,7 +1189,14 @@ export function useLedgerMutations() {
     remove: useMutation({
       mutationFn: ({ id, confirm, answers }: { id: string; confirm: string; answers?: LedgerAnswers }) =>
         api.del<LedgerActionResult>(`/ledgers/${id}`, { confirm, answers }),
-      onSuccess: refreshAll,
+      // Nothing of the deleted ledger is asked for again (it would answer 404): what's cached of it is
+      // only marked stale, and the page goes to another ledger.
+      onSuccess: (_d, { id }) => {
+        const slug = qc.getQueryData<Ledger[]>(keys.ledgers)?.find((l) => l.id === id)?.slug
+        const gone = (key: readonly unknown[]) => key[0] === 'l' && key[1] === slug
+        void qc.invalidateQueries({ predicate: (q) => gone(q.queryKey), refetchType: 'none' })
+        return qc.invalidateQueries({ predicate: (q) => !isQuestions(q.queryKey) && !gone(q.queryKey) })
+      },
     }),
   }
 }

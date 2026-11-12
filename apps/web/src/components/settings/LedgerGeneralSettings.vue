@@ -17,6 +17,7 @@ import { useArchiveLedger } from '@/composables/useArchiveLedger'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { errorMessage } from '@/lib/api'
 import { lapi } from '@/lib/ledger'
+import { alsoDone } from '@/lib/sharing'
 
 const router = useRouter()
 const qc = useQueryClient()
@@ -41,7 +42,7 @@ async function makeDefault() {
 }
 
 function archived(l: Ledger, changes: string[]) {
-  toast.success(`Archived ${l.name}. Restore it from App settings → Ledgers.`, { description: changes.length ? changes.join(' ') : undefined })
+  toast.success(`Archived ${l.name}. Restore it from App settings → Ledgers.`, { description: alsoDone(changes) })
   router.replace('/')
 }
 const archiving = useArchiveLedger(archived)

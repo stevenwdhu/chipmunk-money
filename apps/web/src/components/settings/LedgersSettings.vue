@@ -23,6 +23,7 @@ import { useLedgerMutations, useLedgers } from '@/composables/queries'
 import { useArchiveLedger } from '@/composables/useArchiveLedger'
 import { errorMessage } from '@/lib/api'
 import { currentLedger } from '@/lib/ledger'
+import { alsoDone } from '@/lib/sharing'
 
 const ledgers = useLedgers()
 const m = useLedgerMutations()
@@ -40,7 +41,7 @@ function askDelete(l: Ledger) {
   deleting.value = l
   deleteOpen.value = true
 }
-const archived = (l: Ledger, changes: string[]) => toast.success(`Archived ${l.name}`, { description: changes.length ? changes.join(' ') : undefined })
+const archived = (l: Ledger, changes: string[]) => toast.success(`Archived ${l.name}`, { description: alsoDone(changes) })
 const archiving = useArchiveLedger(archived)
 async function run(p: Promise<unknown>, message: string) {
   try {

@@ -56,9 +56,14 @@ export const router = createRouter({
   routes,
   // Going to a transaction (?jump=, see TransactionTable) scrolls to it there, so neither that nor
   // dropping it from the URL after scrolls to the top. Nor does changing the report you're looking at
-  // (its filter, range or comparison are in the URL), so a row you filter out stays where it was.
+  // (its filter, range or comparison are in the URL), so a row you filter out stays where it was. Nor
+  // does flipping a shared account's page between This ledger and All ledgers (`ledgers`), a switch
+  // that sits above the list it changes.
   scrollBehavior: (to, from, saved) =>
-    to.query.jump || (from.query.jump && to.path === from.path) || (to.name === 'reports' && to.path === from.path) ? false : (saved ?? { top: 0 }),
+    to.query.jump ||
+    (to.path === from.path && (from.query.jump || to.name === 'reports' || to.query.ledgers !== from.query.ledgers))
+      ? false
+      : (saved ?? { top: 0 }),
 })
 
 function pickLedger(ledgers: Ledger[], wanted?: string): Ledger | undefined {

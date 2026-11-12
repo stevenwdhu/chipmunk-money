@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { useLedgerMutations } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { currentLedger } from '@/lib/ledger'
+import { alsoDone } from '@/lib/sharing'
 import LedgerQuestions from './LedgerQuestions.vue'
 
 const props = defineProps<{ ledger: Ledger | null }>()
@@ -26,14 +27,14 @@ const ready = ref(false)
 const can = computed(() => ready.value && typed.value === props.ledger?.name && !m.remove.isPending.value)
 
 async function remove() {
-  if (!props.ledger || !can.value) return
+  // The ledger as it was: the list it comes from is refreshed without it once it's deleted.
+  const ledger = props.ledger
+  if (!ledger || !can.value) return
   try {
-    const wasCurrent = props.ledger.slug === currentLedger.value
-    const { backup, changes } = await m.remove.mutateAsync({ id: props.ledger.id, confirm: typed.value, answers: answers.value })
+    const wasCurrent = ledger.slug === currentLedger.value
+    const { backup, changes } = await m.remove.mutateAsync({ id: ledger.id, confirm: typed.value, answers: answers.value })
     open.value = false
-    toast.success(backup ? `Deleted ${props.ledger.name}. A copy was saved as data/backups/${backup}.` : `Deleted ${props.ledger.name}.`, {
-      description: changes.length ? changes.join(' ') : undefined,
-    })
+    toast.success(backup ? `Deleted ${ledger.name}. A copy was saved as data/backups/${backup}.` : `Deleted ${ledger.name}.`, { description: alsoDone(changes) })
     // The router sends "/" to the default ledger.
     if (wasCurrent) router.replace('/')
   } catch (err) {

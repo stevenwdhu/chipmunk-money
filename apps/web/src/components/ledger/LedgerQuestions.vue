@@ -31,8 +31,13 @@ const asked = useLedgerQuestions(
   () => props.action,
   () => props.active,
 )
-/** Asked and answered by the server, for this opening of the dialog. */
-const data = computed(() => (props.active && !asked.isFetching.value ? asked.data.value : undefined))
+/**
+ * Asked and answered by the server since the dialog opened. It stays while it's asked again in the
+ * background (the window got focus again), so answers that come back the same change nothing here.
+ */
+const fresh = ref(false)
+watch(asked.dataUpdatedAt, () => (fresh.value = true))
+const data = computed(() => (props.active && fresh.value ? asked.data.value : undefined))
 /** The questions changed after the dialog asked them. */
 const changed = ref(false)
 
@@ -42,6 +47,7 @@ watch(
     if (!v) return
     answers.value = {}
     changed.value = false
+    fresh.value = false
   },
   { immediate: true },
 )
@@ -70,12 +76,14 @@ const preview = useQuery({
   gcTime: 0,
   retry: false,
 })
-const changes = computed(() => (something.value && !blocked.value && answered.value && !preview.isFetching.value ? preview.data.value?.changes : undefined))
+// The list for these answers stays while it's worked out again in the background.
+const changes = computed(() => (something.value && !blocked.value && answered.value ? preview.data.value?.changes : undefined))
 
 /** The server's answer when the questions aren't the ones that were answered: what the ledgers hold changed meanwhile. */
 const isStale = (err: unknown) => err instanceof ApiError && err.status === 409 && err.message.startsWith('Answer the questions first')
 function askAgain() {
   changed.value = true
+  fresh.value = false
   void asked.refetch()
 }
 watch(
@@ -101,9 +109,9 @@ const pick = (q: LedgerQuestion, value: string) => (answers.value = { ...answers
 
 <template>
   <template v-if="active">
+    <!-- Nothing until the questions have answered with something to show: most ledgers have nothing to ask or say. -->
     <p v-if="asked.error.value && !asked.isFetching.value" class="text-sm text-destructive">{{ errorMessage(asked.error.value) }}</p>
-    <Skeleton v-else-if="!data" class="h-9" />
-    <div v-else-if="something" class="grid min-w-0 gap-4">
+    <div v-else-if="data && something" class="grid min-w-0 gap-4">
       <p v-if="changed" class="text-sm text-amber-700 dark:text-amber-400">Something changed since you opened this. Check the answers again.</p>
 
       <ul v-if="blocked" class="grid gap-1.5 rounded-lg border border-destructive/40 px-3 py-2 text-sm">

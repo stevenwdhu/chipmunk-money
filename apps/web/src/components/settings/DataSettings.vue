@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label'
 import { useLedgers, useSetupMutations } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { ledgerApiHref } from '@/lib/ledger'
+import { alsoDone } from '@/lib/sharing'
 
 const m = useSetupMutations()
 const { current } = useLedgers()
@@ -33,9 +34,7 @@ async function erase() {
   try {
     const { backup, changes } = await m.erase.mutateAsync(answers.value)
     eraseOpen.value = false
-    toast.success(backup ? `All data erased. A copy was saved as data/backups/${backup}.` : 'All data erased.', {
-      description: changes.length ? changes.join(' ') : undefined,
-    })
+    toast.success(backup ? `All data erased. A copy was saved as data/backups/${backup}.` : 'All data erased.', { description: alsoDone(changes) })
   } catch (err) {
     // Refused because the questions changed: they're asked again in the dialog.
     if (!questions.value?.refused(err)) toast.error(errorMessage(err))
