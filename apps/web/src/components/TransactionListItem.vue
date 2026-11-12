@@ -6,6 +6,7 @@ import CategoryBadge from '@/components/CategoryBadge.vue'
 import LinkBadge from '@/components/LinkBadge.vue'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
+import { sharesFor, SHARES_OVER, splitTitle } from '@/lib/sharing'
 import MoneyText from '@/components/MoneyText.vue'
 import { useAccounts } from '@/composables/queries'
 import { shortDate } from '@/lib/format'
@@ -68,9 +69,17 @@ const meta = computed(() => {
       <div class="min-w-0">
         <!-- Its name, or what you call its payee, or its payee as sent (then that, small, under it). -->
         <div class="flex items-center gap-1.5">
-          <span class="truncate text-sm font-medium">{{ titleOf(tx) }}</span>
+          <!-- A split row says what it is: whose payment it's a share of, or who its shares are for. -->
+          <span :class="['truncate text-sm font-medium', tx.split?.part === 'given' && 'text-muted-foreground']">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
+          <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split</span>
           <LinkBadge :tx="tx" />
           <Repeat v-if="tx.recurringItemId" class="size-3 shrink-0 text-muted-foreground" aria-label="Recurring" />
+        </div>
+        <!-- A split payment: what it gave the other ledgers, under it. -->
+        <div v-if="tx.split?.part === 'payment'" class="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+          <span class="truncate">{{ sharesFor(tx.split.shares).text }}</span>
+          <MoneyText :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
+          <span v-if="tx.split.keptMinor < 0" class="text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
         </div>
         <div v-if="sentPayeeUnder(tx)" class="truncate text-xs text-muted-foreground">{{ sentPayeeUnder(tx) }}</div>
         <!-- While the list is too narrow for their own columns: the category, then date and account. -->

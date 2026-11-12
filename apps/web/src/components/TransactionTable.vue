@@ -3,7 +3,7 @@ import { computed, nextTick, ref, useTemplateRef, watch, type ComponentPublicIns
 import { useRoute, useRouter } from 'vue-router'
 import { useElementSize, useIntersectionObserver } from '@vueuse/core'
 import { toast } from 'vue-sonner'
-import { ArrowLeftRight, Check, GripVertical, HandCoins, Loader2, Receipt, Repeat, Sparkles, Tag, Trash2 } from '@lucide/vue'
+import { ArrowLeftRight, ArrowRightFromLine, Check, GripVertical, HandCoins, Loader2, Receipt, Repeat, Sparkles, Tag, Trash2 } from '@lucide/vue'
 import {
   COLUMN_WIDTH_RANGE,
   formatDateLong,
@@ -23,6 +23,7 @@ import MoneyText from '@/components/MoneyText.vue'
 import CategoryBadge from '@/components/CategoryBadge.vue'
 import PayeeChoicePopover from '@/components/PayeeChoicePopover.vue'
 import PaybackDialog from '@/components/PaybackDialog.vue'
+import MoveToMenu from '@/components/sharing/MoveToMenu.vue'
 import TransactionList from '@/components/TransactionList.vue'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -47,8 +48,10 @@ import { jumpToTransaction } from '@/composables/useGoToTransaction'
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { shortDate } from '@/lib/format'
+import { currentLedger } from '@/lib/ledger'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
+import { commonLedgers, givenUnder, sharedNote, sharesFor, SHARES_OVER, splitTitle } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore } from '@/stores/ui'
 
@@ -73,16 +76,34 @@ const recurring = useRecurring()
 const itemLabels = computed(() => new Map((recurring.data.value ?? []).map((i) => [i.id, recurringLabel(i)])))
 const m = useTransactionMutations()
 
-const items = computed<Item[]>(() => props.list.rows.value)
+const all = computed<Item[]>(() => props.list.rows.value)
+/**
+ * A split payment's given row (what this ledger gave the others of it) sits under its payment as a
+ * muted line, not as a row of its own, wherever the payment is listed too. With a filter that leaves
+ * the payment out, the given row is a row like any other.
+ */
+const under = computed(() => givenUnder(all.value))
+const items = computed<Item[]>(() => {
+  if (!under.value.size) return all.value
+  const hidden = new Set([...under.value.values()].map((t) => t.id))
+  return all.value.filter((t) => !hidden.has(t.id))
+})
 /** The server sends running balances for one account's list with no filter but dates. */
 const hasBalances = computed(() => items.value.some((t) => t.balanceAfterMinor !== null))
 /** Changed so it no longer matches the filters: still listed, faded, until they change. */
 const kept = computed(() => props.list.kept.value)
 const KEPT_TITLE = 'It doesn’t match the filters any more. It stays until you change them.'
 /** A running balance as the bank's statement shows it: for a credit card, what you owe. */
-const balanceOf = (tx: Item) =>
-  tx.balanceAfterMinor === null ? null : statementBalance(tx.balanceAfterMinor, accounts.value.get(tx.accountId)?.type ?? 'chequing')
-const overdrawn = (tx: Item) => !accounts.value.get(tx.accountId)?.isLiability && (tx.balanceAfterMinor ?? 0) < 0
+const balanceOf = (tx: Item) => {
+  const after = balanceAfter(tx)
+  return after === null ? null : statementBalance(after, accounts.value.get(tx.accountId)?.type ?? 'chequing')
+}
+/** A split payment with its given row under it shows the balance after both: the one listed first is the later one. */
+function balanceAfter(tx: Item) {
+  const given = under.value.get(tx.id)
+  return given && all.value.indexOf(given) < all.value.indexOf(tx) ? given.balanceAfterMinor : tx.balanceAfterMinor
+}
+const overdrawn = (tx: Item) => !accounts.value.get(tx.accountId)?.isLiability && (balanceAfter(tx) ?? 0) < 0
 
 /**
  * Desktop table columns: drag a header to move one, or its right edge to resize it. The rightmost
@@ -187,13 +208,15 @@ useIntersectionObserver(sentinel, ([entry]) => {
 // Phone: group by day
 const days = computed(() => {
   const groups: Array<{ date: string; items: Item[]; total: number }> = []
-  for (const t of items.value) {
+  const listed = new Set(items.value.map((t) => t.id))
+  for (const t of all.value) {
     let g = groups[groups.length - 1]
     if (!g || g.date !== t.date) {
       g = { date: t.date, items: [], total: 0 }
       groups.push(g)
     }
-    g.items.push(t)
+    // A given row under its payment still counts in the day's total.
+    if (listed.has(t.id)) g.items.push(t)
     if (!t.transferPairId || props.hideAccount) g.total += t.amountMinor
   }
   return groups
@@ -256,8 +279,10 @@ async function bulk(action: 'category' | 'tag' | 'accept' | 'delete') {
           : action === 'accept'
             ? { ids, acceptSuggestions: true }
             : { ids, delete: true }
+    // Deleting from a shared account whose balances another ledger carries changes that ledger's balance.
+    const note = action === 'delete' ? sharedNote(selectedItems.value.map((t) => accounts.value.get(t.accountId)), currentLedger.value) : null
     const { updated } = await m.bulk.mutateAsync(input)
-    toast.success(`${action === 'delete' ? 'Deleted' : 'Updated'} ${updated} transaction${updated === 1 ? '' : 's'}`)
+    toast.success(`${action === 'delete' ? 'Deleted' : 'Updated'} ${updated} transaction${updated === 1 ? '' : 's'}`, { description: note ?? undefined })
     selected.value = new Set()
     bulkTag.value = ''
   } catch (err) {
@@ -299,6 +324,8 @@ watch(aiRunning, (running, was) => {
  * the bill, to pick the money in that paid it back.
  */
 const selectedItems = computed(() => items.value.filter((t) => selected.value.has(t.id)))
+/** The ledgers the selection can move to: the ones every selected row's account is shared with. */
+const moveLedgers = computed(() => commonLedgers(selectedItems.value.map((t) => accounts.value.get(t.accountId))))
 const payback = ref<{ tx: Transaction; together: Transaction[]; preselect: Transaction[] } | null>(null)
 const paybackOpen = ref(false)
 function markPayback() {
@@ -366,6 +393,10 @@ async function accept(tx: Transaction) {
       </Button>
       <Button size="sm" variant="outline" @click="markPayback"><HandCoins />Mark as payback</Button>
       <FilterOutOfReport :transactions="items.filter((t) => selected.has(t.id))" variant="button" @done="selected = new Set()" />
+      <!-- On a shared account: to another ledger that has it. -->
+      <MoveToMenu v-slot="{ busy }" :ids="[...selected]" :ledgers="moveLedgers" @moved="selected = new Set()">
+        <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
+      </MoveToMenu>
       <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" @click="bulk('delete')"><Trash2 />Delete</Button>
       <Button size="sm" variant="ghost" class="ml-auto" @click="selected = new Set()">Cancel</Button>
     </div>
@@ -429,9 +460,16 @@ async function accept(tx: Transaction) {
               <TableCell v-else-if="col === 'payee'" :style="columns.cellStyle(col)" class="max-w-0">
                 <!-- Its name, or what you call its payee, or its payee as sent. -->
                 <div class="flex min-w-0 items-center gap-1.5">
-                  <span class="truncate font-medium">{{ titleOf(tx) }}</span>
+                  <span :class="cn('truncate font-medium', tx.split?.part === 'given' && 'text-muted-foreground')">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
+                  <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split</span>
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
+                </div>
+                <!-- A split payment: what it gave the other ledgers, under it. -->
+                <div v-if="tx.split?.part === 'payment'" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <span class="truncate">{{ sharesFor(tx.split.shares).text }}</span>
+                  <MoneyText :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
+                  <span v-if="tx.split.keptMinor < 0" class="shrink-0 text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
                 </div>
                 <!-- Under it: its payee as sent, when it shows as something else. Without an Account or Notes column (a narrow table), those too. -->
                 <div

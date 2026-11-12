@@ -4,7 +4,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { useAccounts, useGroupedAccounts } from '@/composables/queries'
 
 const props = withDefaults(
-  defineProps<{ id?: string; exclude?: number | null; placeholder?: string; allowAll?: boolean; allLabel?: string; class?: string; managed?: boolean }>(),
+  defineProps<{ id?: string; exclude?: number | null; placeholder?: string; allowAll?: boolean; allLabel?: string; class?: string; managed?: boolean; disabled?: boolean }>(),
   { placeholder: 'Pick an account', allLabel: 'All accounts' },
 )
 const model = defineModel<number | null>({ default: null })
@@ -19,7 +19,7 @@ const value = computed({
 </script>
 
 <template>
-  <Select v-model="value">
+  <Select v-model="value" :disabled="disabled">
     <SelectTrigger :id="id" :class="['w-full min-w-0', props.class]">
       <SelectValue :placeholder="placeholder" class="block! min-w-0 truncate" />
     </SelectTrigger>

@@ -11,6 +11,8 @@ import CategoryPicker from '@/components/CategoryPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
 import PaybackDialog from '@/components/PaybackDialog.vue'
 import RefundPicker from '@/components/RefundPicker.vue'
+import MoveToMenu from '@/components/sharing/MoveToMenu.vue'
+import SplitPaymentDialog from '@/components/sharing/SplitPaymentDialog.vue'
 import TagInput from '@/components/TagInput.vue'
 import TransactionLinks from '@/components/TransactionLinks.vue'
 import { Button } from '@/components/ui/button'
@@ -21,18 +23,22 @@ import {
   suggestCategory,
   useAccounts,
   useCategories,
+  useLedgers,
   useRecurring,
   useRecurringMutations,
   usePayeeNameMutations,
   useSettings,
+  useTransaction,
   useTransactionMutations,
 } from '@/composables/queries'
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { usePayeeOptions } from '@/composables/usePayeeOptions'
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
-import { lapi } from '@/lib/ledger'
+import { money } from '@/lib/format'
+import { currentLedger, lapi } from '@/lib/ledger'
 import { titleOf } from '@/lib/payee'
+import { SHARES_OVER, sharedNote, sharesFor, splitLock } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore, type QuickAddDefaults } from '@/stores/ui'
 
@@ -53,6 +59,25 @@ const isDesktop = useIsDesktop()
 const editing = computed(() => props.transaction)
 /** A synced or imported one's payee is what the bank or file sent: matching and learning go by it. */
 const payeeLocked = computed(() => !!editing.value && editing.value.origin !== 'manual')
+
+// Part of a card payment split between the ledgers that share its account. A split row (another
+// ledger's share, or what this one gave) has its amount, date, account and payee from the split,
+// and the payment keeps its date, account and payee while it's split. The server refuses those
+// changes, so they can't be made here, and the reason is said.
+const { current: ledger } = useLedgers()
+const split = computed(() => editing.value?.split ?? null)
+const splitRow = computed(() => !!split.value && split.value.part !== 'payment')
+const splitLocked = computed(() => (split.value ? splitLock(split.value, ledger.value?.name ?? 'this ledger') : null))
+const splitHeading = computed(() => {
+  const s = split.value
+  if (!s) return ''
+  if (s.part === 'share') return `Share of a ${s.from.name} payment`
+  if (s.part === 'given') return `${sharesFor(s.shares).text} of a split payment`
+  return `Split between ledgers: ${[...s.shares.map((x) => `${x.ledger.name} ${money(x.amountMinor)}`), `${ledger.value?.name ?? 'this ledger'} keeps ${money(s.keptMinor)}`].join(', ')}`
+})
+/** The payee as it is, not typed over: the bank's or file's, or a split's. */
+const payeeFixed = computed(() => payeeLocked.value || !!split.value)
+const splitOpen = ref(false)
 
 // Renaming its payee, on all of the payee's transactions: a payee name rule is made or changed, right
 // here, apart from saving.
@@ -114,12 +139,12 @@ const nameLocked = computed(() => {
 // Money in that could pay something back: not a transfer, linked already, or a recurring payment.
 const canBeRefund = computed(() => {
   const tx = editing.value
-  return !!tx && tx.amountMinor > 0 && !tx.transferPairId && !tx.links.length && !tx.recurringItemId
+  return !!tx && tx.amountMinor > 0 && !tx.transferPairId && !tx.links.length && !tx.recurringItemId && !tx.split
 })
 // A bill others could pay you back for: money out, not a transfer, that nobody paid back yet.
 const canBePaidBack = computed(() => {
   const tx = editing.value
-  return !!tx && tx.amountMinor < 0 && !tx.transferPairId && !tx.links.some((l) => l.kind === 'payback')
+  return !!tx && tx.amountMinor < 0 && !tx.transferPairId && !tx.links.some((l) => l.kind === 'payback') && !tx.split
 })
 const paybackOpen = ref(false)
 /** Linked as a refund or payback: it shows as one, with the category of what it pays back, keeping what you've typed. */
@@ -225,6 +250,31 @@ onMounted(() => {
 // Another transaction (not a newer copy of this one, like after linking a refund), or new defaults.
 watch([() => props.transaction?.id, () => props.defaults], () => reset())
 
+// A shared account's transactions can move to another ledger that has it, and a payment onto it can
+// be split between them.
+const editedAccount = computed(() => (editing.value ? accountsById.value.get(editing.value.accountId) : undefined))
+const moveLedgers = computed(() => editedAccount.value?.sharing?.ledgers ?? [])
+/** A card payment: money onto the account that's a transfer or in a category left out of totals, linked to nothing. One that's split already stays one. */
+const canSplit = computed(() => {
+  const tx = editing.value
+  if (!tx || !editedAccount.value?.sharing) return false
+  if (tx.split) return tx.split.part === 'payment'
+  return tx.amountMinor > 0 && !tx.links.length && (!!tx.transferPairId || !!categoriesById.value.get(tx.categoryId ?? -1)?.excludeFromTotals)
+})
+
+// The note for a shared account whose balances another ledger carries: for the account picked, the
+// one it was on, and the other side of a transfer.
+const someShared = computed(() => [...accountsById.value.values()].some((a) => a.sharing && a.sharing.opening.slug !== currentLedger.value))
+const pair = useTransaction(() => (someShared.value ? (editing.value?.transferPairId ?? null) : null))
+const sharedAccountNote = computed(() =>
+  sharedNote(
+    [accountId.value, editing.value?.accountId, kind.value === 'transfer' ? transferAccountId.value : null, pair.data.value?.accountId].map((id) =>
+      id ? accountsById.value.get(id) : undefined,
+    ),
+    currentLedger.value,
+  ),
+)
+
 const amountMinor = computed(() => {
   const v = parseMoney(amountText.value)
   if (v === null) return null
@@ -319,7 +369,7 @@ async function save(addAnother = false): Promise<boolean> {
         date: date.value,
         datetime: datetime(),
         amountMinor: amountMinor.value!,
-        ...(payeeLocked.value ? {} : { payee: payee.value.trim() }),
+        ...(payeeFixed.value ? {} : { payee: payee.value.trim() }),
         ...(nameChanged.value ? { name: name.value.trim() || null } : {}),
         notes: notes.value.trim() || null,
         tags: tags.value,
@@ -389,6 +439,15 @@ const kinds: Array<{ value: Kind; label: string }> = [
 <template>
   <form class="flex flex-col gap-4" novalidate @submit.prevent="save()">
     <TransactionLinks v-if="editing" :tx="editing" @unlinked="emit('done')" />
+    <!-- Part of a split payment: what it is, and why some of it can't be changed here. -->
+    <div v-if="split" class="grid gap-1 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+      <p class="font-medium">{{ splitHeading }}</p>
+      <p v-if="split.part === 'payment' && split.keptMinor < 0" class="text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}.</p>
+      <p class="text-xs text-muted-foreground">
+        {{ splitLocked }}
+        <template v-if="splitRow">Its name, notes and tags are yours to change, and its category to another one left out of totals.</template>
+      </p>
+    </div>
     <div v-if="!isTransferEdit" class="grid grid-cols-3 rounded-lg bg-muted p-1" role="radiogroup" aria-label="Type">
       <button
         v-for="k in kinds"
@@ -396,7 +455,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
         type="button"
         role="radio"
         :aria-checked="kind === k.value"
-        :disabled="!!editing && k.value === 'transfer'"
+        :disabled="(!!editing && k.value === 'transfer') || splitRow"
         :class="
           cn(
             'rounded-md py-1.5 text-sm font-medium transition-colors disabled:opacity-40',
@@ -424,7 +483,8 @@ const kinds: Array<{ value: Kind; label: string }> = [
           inputmode="decimal"
           autocomplete="off"
           placeholder="0.00"
-          class="h-12 pl-9 text-xl font-semibold tabular"
+          :readonly="splitRow"
+          :class="cn('h-12 pl-9 text-xl font-semibold tabular', splitRow && 'bg-muted/40 text-muted-foreground')"
           :aria-invalid="!!errors.amount"
         />
       </div>
@@ -435,14 +495,16 @@ const kinds: Array<{ value: Kind; label: string }> = [
       <FieldLabel
         html-for="tx-payee"
         :hint="
-          payeeLocked
-            ? 'As the bank or file sent it. Matching and learning go by it, so it stays as it is. Rename the payee to show another name on all its transactions.'
-            : undefined
+          split
+            ? (splitLocked ?? undefined)
+            : payeeLocked
+              ? 'As the bank or file sent it. Matching and learning go by it, so it stays as it is. Rename the payee to show another name on all its transactions.'
+              : undefined
         "
         >{{ kind === 'transfer' ? 'Description' : 'Payee' }}</FieldLabel
       >
       <div class="flex items-center gap-2">
-        <Input v-if="payeeLocked" id="tx-payee" :model-value="editing!.payee" readonly class="bg-muted/40 text-muted-foreground" />
+        <Input v-if="payeeFixed" id="tx-payee" :model-value="editing!.payee" readonly class="bg-muted/40 text-muted-foreground" />
         <Input
           v-else
           id="tx-payee"
@@ -452,11 +514,11 @@ const kinds: Array<{ value: Kind; label: string }> = [
           :placeholder="kind === 'transfer' ? 'Credit card payment' : 'Where did the money go?'"
           :aria-invalid="!!errors.payee"
         />
-        <Button v-if="editing && kind !== 'transfer' && !renaming" type="button" variant="outline" size="sm" class="h-9 shrink-0" @click="startRename">
+        <Button v-if="editing && kind !== 'transfer' && !renaming && !splitRow" type="button" variant="outline" size="sm" class="h-9 shrink-0" @click="startRename">
           Rename
         </Button>
       </div>
-      <datalist v-if="!payeeLocked" id="tx-payee-options">
+      <datalist v-if="!payeeFixed" id="tx-payee-options">
         <option v-for="p in payeeOptions" :key="p" :value="p" />
       </datalist>
       <p v-if="errors.payee" class="text-xs text-destructive">{{ errors.payee }}</p>
@@ -527,7 +589,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
     <div :class="cn('grid gap-3', kind === 'transfer' && !isTransferEdit && 'grid-cols-2')">
       <div class="grid min-w-0 gap-1.5">
         <Label for="tx-account">{{ kind !== 'transfer' ? 'Account' : (editing?.amountMinor ?? 0) > 0 ? 'To' : 'From' }}</Label>
-        <AccountSelect id="tx-account" v-model="accountId" :exclude="kind === 'transfer' ? transferAccountId : null" />
+        <AccountSelect id="tx-account" v-model="accountId" :exclude="kind === 'transfer' ? transferAccountId : null" :disabled="!!split" />
         <p v-if="errors.account" class="text-xs text-destructive">{{ errors.account }}</p>
       </div>
       <div v-if="kind === 'transfer' && !isTransferEdit" class="grid min-w-0 gap-1.5">
@@ -540,7 +602,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
     <div class="grid grid-cols-2 gap-3">
       <div class="grid min-w-0 gap-1.5">
         <Label for="tx-date">Date</Label>
-        <Input id="tx-date" v-model="date" type="date" />
+        <Input id="tx-date" v-model="date" type="date" :disabled="!!split" />
       </div>
       <div class="grid min-w-0 gap-1.5">
         <FieldLabel
@@ -549,7 +611,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
           hint="When it happened, if you know: a day’s transactions are listed in time order. Without a time, money in counts as first thing that day and money out as last."
           >Time</FieldLabel
         >
-        <Input id="tx-time" v-model="time" type="time" />
+        <Input id="tx-time" v-model="time" type="time" :disabled="!!split" />
       </div>
     </div>
 
@@ -585,6 +647,18 @@ const kinds: Array<{ value: Kind; label: string }> = [
       Not part of {{ recurringItem ? recurringLabel(recurringItem) : 'its recurring item' }}
     </button>
     <FilterOutOfReport v-if="editing" :transactions="[editing]" />
+    <!-- On a shared account: to another ledger that has it, and a card payment between them. -->
+    <template v-if="editing">
+      <MoveToMenu v-slot="{ busy }" :ids="[editing.id]" :ledgers="moveLedgers" @moved="emit('done')">
+        <button type="button" class="self-start text-sm text-muted-foreground underline-offset-4 hover:underline" :disabled="busy">Move to…</button>
+      </MoveToMenu>
+      <template v-if="canSplit">
+        <button type="button" class="self-start text-sm text-muted-foreground underline-offset-4 hover:underline" @click="splitOpen = true">
+          {{ split ? 'Change the split…' : 'Split between ledgers…' }}
+        </button>
+        <SplitPaymentDialog v-model:open="splitOpen" :tx="editing" @saved="(r) => ui.openEdit(r.transaction)" />
+      </template>
+    </template>
     <!-- The bank's raw data is for checking a sync, on a computer. -->
     <template v-if="isDesktop && editing?.origin === 'sync'">
       <button type="button" class="self-start text-sm text-muted-foreground underline-offset-4 hover:underline" @click="showBankData = true">
@@ -593,8 +667,17 @@ const kinds: Array<{ value: Kind; label: string }> = [
       <BankDataDialog v-model:open="showBankData" :tx="editing" />
     </template>
 
+    <p v-if="sharedAccountNote" class="text-xs text-muted-foreground">{{ sharedAccountNote }}</p>
     <div class="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:items-center">
-      <Button v-if="editing" type="button" variant="ghost" class="text-destructive hover:text-destructive sm:mr-auto" @click="remove">
+      <Button
+        v-if="editing"
+        type="button"
+        variant="ghost"
+        class="text-destructive hover:text-destructive sm:mr-auto"
+        :disabled="!!split"
+        :title="splitLocked ?? undefined"
+        @click="remove"
+      >
         <Trash2 />Delete
       </Button>
       <Button v-else type="button" variant="outline" class="sm:mr-auto" :disabled="saving" @click="save(true)">
