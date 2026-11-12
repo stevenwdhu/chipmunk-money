@@ -81,7 +81,8 @@ export type ApplyScope =
  *
  * A pending row another ledger holds that the bank removed in the last 7 days, and then sends again
  * (under its id, or posted under a new one), is restored where it is: otherwise the posted one would
- * land in the home, in the wrong ledger. One a person deleted is never restored.
+ * land in the home, in the wrong ledger. Under a new id it's matched by its payee and amount, and
+ * only after one you entered by hand had its chance. One a person deleted is never restored.
  *
  * A frozen row, which a ledger that stopped sharing the account kept on an account of its own
  * (`frozen`), is only known: nothing is added for its bank id, and it's never updated, adopted,
@@ -194,7 +195,7 @@ export function applyRemoteTransactions(
 
     // Rows whose id the bank no longer reports (inside the window we fetched), or that Plaid says were
     // removed: a pending one that posted under a new id (or was dropped), or one with a re-issued id.
-    // Then the pending ones other ledgers hold that the bank removed lately, which can come back.
+    // And the pending ones other ledgers hold that the bank removed lately, which can come back.
     const own = local.filter((t) => !t.frozen)
     const orphaned = own.filter((t) =>
       window
@@ -220,24 +221,35 @@ export function applyRemoteTransactions(
       // when the payee is worded differently (another service's ids, after an account moves to it:
       // Plaid's "Golden Noodle" is Wealthsimple's "Tst-Golden Noodle House"), the only one with that amount
       // within 3 days.
-      const unused = [...orphaned, ...returning].filter((p) => !used.has(p.id))
+      const key = payeeKeyOf(ctx, r.payee)
+      const unused = orphaned.filter((p) => !used.has(p.id))
       const sameAmount = unused.filter((p) => p.amount === r.amountMinor && Math.abs(daysBetween(p.date, r.date)) <= 3)
       const previous =
-        unused.find((p) => (p.status === 'pending' && !r.pending ? couldBePosted(p, r, payeeKeyOf(ctx, r.payee)) : sameTransaction(p, r, payeeKeyOf(ctx, r.payee)))) ??
+        unused.find((p) => (p.status === 'pending' && !r.pending ? couldBePosted(p, r, key) : sameTransaction(p, r, key))) ??
         (sameAmount.length === 1 ? sameAmount[0] : undefined)
       if (previous) {
         used.add(previous.id)
-        if (previous.deletedAt) restore(previous)
         write(previous, r)
         counted(previous.ledgerId, 'updated')
         continue
       }
       // 3. Adopt what you entered or imported, in whichever ledger holds it.
-      const mine = candidates.find((t) => !used.has(t.id) && sameTransaction(t, r, payeeKeyOf(ctx, r.payee)))
+      const mine = candidates.find((t) => !used.has(t.id) && sameTransaction(t, r, key))
       if (mine) {
         used.add(mine.id)
         write(mine, r)
         counted(mine.ledgerId, 'adopted')
+        continue
+      }
+      // A pending row another ledger holds that the bank removed lately, back (posted, or under a new
+      // id): only when nothing live is the bank's row, and only by its payee, never by the amount
+      // alone. It was removed in an earlier sync, so any later charge of that amount could share it.
+      const back = returning.find((p) => !used.has(p.id) && (!r.pending ? couldBePosted(p, r, key) : sameTransaction(p, r, key)))
+      if (back) {
+        used.add(back.id)
+        restore(back)
+        write(back, r)
+        counted(back.ledgerId, 'updated')
         continue
       }
       // 4. New, in the home.
