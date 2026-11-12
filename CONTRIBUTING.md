@@ -25,7 +25,7 @@ DATA_DIR=.demo-data pnpm seed:demo                   # 13 months of sample data 
 DATA_DIR=.demo-data API_PORT=8788 pnpm dev            # the app on that data, API on 8788
 ```
 
-`pnpm seed:demo` refuses a ledger that already has data (accounts, transactions, recurring items, reports or tags). `--force` saves a copy of the whole database in `backups/` first (`pre-seed-demo-<slug>-…`), then replaces all of those. `--ledger <slug>` picks another ledger. A relative `DATA_DIR` is from the repo root.
+`pnpm seed:demo` refuses a ledger that already has data (accounts, transactions, recurring items, reports or tags). `--force` saves a copy of the whole database in `backups/` first (`pre-seed-demo-<slug>-…`), then replaces all of those. It refuses a ledger that has a shared account even then: erase that ledger in the app first. `--ledger <slug>` picks another ledger. A relative `DATA_DIR` is from the repo root.
 
 With `API_PORT=8788`, the Vite dev server proxies `/api` there. If 5173 is taken too, set `PORT` for Vite.
 

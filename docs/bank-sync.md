@@ -59,3 +59,23 @@ After each sync and CSV import, the app also recognizes:
 These only change what's uncategorized or still waiting for your review, never a category you chose or accepted. To run them over all your existing transactions, use `POST /api/v1/ledgers/{ledger}/transactions/match` (add `?dryRun=true` to preview the counts). **Not a refund** and **Not a transfer** in a transaction's details undo a match, and it isn't made again.
 
 The access each connection gives the app, and your Plaid secret, are stored encrypted with `secret.key`, which backups leave out.
+
+## Shared accounts
+
+A credit card [shared between ledgers](features.md#shared-accounts) is still one account at the bank. It's linked, synced and switched in its home ledger, and the other ledgers that have it show **Managed in Personal** in its place. One sync covers the whole card, whichever ledger holds each transaction:
+
+- **New transactions land in the home,** categorized from the home's history, in the home's review queue. Move the ones that belong to another ledger.
+- **A transaction another ledger holds is updated where it is.** The bank's date, amount and pending status reach it there, and that ledger's payee, category, notes and tags stay.
+- **A pending charge you moved** to another ledger updates the same transaction there when it posts, also under a new id. Nothing new appears in the home. When the bank drops a pending charge and sends it again within 7 days, the removed one comes back in the ledger that had it. One a person deleted is never brought back.
+- **When the bank removes a transaction,** it's removed in the ledger that holds it. A transaction any ledger deleted stays deleted, and isn't added again in the home.
+- **The bank's balance is the whole account's.** Each ledger's balance is what it holds, and the ledger that carries the card's starting balance takes up any difference between the transactions and the bank.
+- **A payment split between ledgers** is the bank's transaction like any other. A new date or pending status is copied to its shares. A new amount stays with the ledger that holds the payment, and the payment says "The shares are more than the payment now" when that's so. If the bank removes the payment, its split is undone first.
+- **Fetch all history** works the same way. Nothing is added twice, in any ledger.
+- **After a ledger stopped sharing the card and kept its transactions** on an account of its own, the card still knows them. A sync never adds them to the card again, and never updates or removes them on the account they're on now, which isn't synced.
+- Each ledger a sync changed has it in its own **Activity**.
+
+**Switching the bank account** a shared card syncs from is allowed, in the home. **Review before switching** compares every ledger's transactions with the bank's and names the ledger beside each one another ledger holds ("Family", or "Family · Visa" for one on an account a ledger kept when it stopped sharing). Paired transactions take the bank's ids where they are, the bank's others are added in the home, and one you choose to remove is removed in its own ledger. A split payment can be paired but not removed until its split is undone, and a transaction on a kept account always stays.
+
+**CSV import** into a shared card is done in the home, and the rows land there. A row that's already a transaction in another ledger is a duplicate too: it's unticked, marked **Already in another ledger**, and skipped.
+
+What an API key limited to some ledgers can do with a shared account is in [Security](security.md).

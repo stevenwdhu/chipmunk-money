@@ -80,11 +80,17 @@ pnpm start       # one server for the app and the API on http://localhost:8787
 
 To use it from your phone on the same network, open `http://<your-computer's-ip>:8787`. The server listens on every interface by default. Set `HOST=127.0.0.1` to keep it to this machine. Installing it as an app needs HTTPS (or `localhost`), which [Tailscale Serve](security.md) gives you.
 
+## Updating
+
+Get the new version (`docker compose pull && docker compose up -d` with the prebuilt image, `git pull` and a new build otherwise) and start it. On its first start a new version brings the database up to date itself. Before it changes anything it saves a copy of the whole database in `backups/` as `pre-migrate-…`. If an update goes wrong, put that copy back (see [Backups](#backups)) and run the version you had before.
+
+**Updating to v0.3.0** from v0.2.3 or earlier is different: v0.3.0 keeps every ledger in one database and doesn't read the older data folder (`meta.db` and a file per ledger in `ledgers/`). See [CHANGELOG.md](../CHANGELOG.md) before you update, and keep a copy of the old data folder. Shared accounts need nothing from you: an account is in one ledger until you share it.
+
 ## Backups
 
 Everything is in one SQLite database, `chipmunk.db` in the data directory, with every ledger, the app settings and the bank connections. While the server runs, SQLite also keeps `chipmunk.db-wal` and `chipmunk.db-shm` beside it.
 
-- **Full backup (all ledgers)**, in App settings → Ledgers and in Ledger settings → Data, is a zip of the whole database (`chipmunk.db`) and a `manifest.json` that says how to restore it. There's no backup of one ledger: a backup is always every ledger. Copying `chipmunk.db` from a running server without its `-wal` file can lose the latest changes, so stop it or use the full backup.
+- **Full backup (all ledgers)**, in App settings → Ledgers and in Ledger settings → Data, is a zip of the whole database (`chipmunk.db`) and a `manifest.json` that says how to restore it. There's no backup of one ledger: a backup is always every ledger, with the accounts they share. Copying `chipmunk.db` from a running server without its `-wal` file can lose the latest changes, so stop it or use the full backup.
 - Before a migration, an erase, deleting a ledger or `pnpm seed:demo --force`, the server saves a copy of the whole database in `backups/` (`pre-migrate-…`, `pre-erase-<ledger>-…`, `pre-delete-<ledger>-…` and `pre-seed-demo-<ledger>-…`). Each is a `chipmunk.db` of its own, every ledger and the sealed bank sign-ins included. Nothing in `backups/` is ever deleted for you, so clear out old copies now and then.
 - **Restoring is done by hand,** and puts every ledger back to the copy. **Restore from backup** in Ledger settings → Data, and the welcome screen's **Restore a backup**, show these steps:
   1. Stop the server.

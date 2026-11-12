@@ -21,6 +21,16 @@ Anyone who can open the web page is treated as you. The header check stops other
 
 **API keys.** Give each script or agent its own key with the least access it needs. Only a hash is stored. A key limited to some ledgers can't touch anything app-wide (API keys, changing settings, bank connections, payees across ledgers, the full backup, which ledger the app opens). It only sees and links bank accounts already syncing into its ledgers. Ids are numbered across all ledgers, so such a key can tell from gaps in its ids roughly how much was added to the others, though it can't see any of it.
 
+**API keys and shared accounts.** A [shared account](features.md#shared-accounts) is in more than one ledger, so a key limited to some ledgers needs every ledger an operation can touch, and gets 403 otherwise:
+- **Both ledgers** to move a transaction from one to the other.
+- **The ledger that holds the payment and every ledger with a share** to split a card payment.
+- **The home and every ledger added or made the home** to share an account or change its home.
+- **Every ledger that has the account** to take a ledger out of it, to link or switch the bank account it syncs from, to list its transactions in all ledgers, and to delete, erase or archive a ledger that has it.
+
+A key limited to one of the ledgers still sees that ledger's own transactions and balance on the account, the whole account's total, and the names of the other ledgers that have it. It never sees their transactions, how many they hold or their balances, and an id another ledger holds is answered like one that doesn't exist. With two ledgers on the account, the total less its own balance is the other one's. In a ledger that isn't the home, nobody gets the account's bank link, starting balance or recorded balances.
+
+Sync is the exception. A key that can use the home can run **Sync now** and **Fetch all history**, and the sync updates the account's transactions in whichever ledger holds them, the ones the key can't see included. It only writes what the bank says: dates, amounts, pending status and removals.
+
 **Backups and `secret.key`.** Your data directory (`data/` from source, the `chipmunk-data` volume in Docker) holds `chipmunk.db`, the one database with every ledger in it. `secret.key` in it encrypts the access to your banks (SimpleFIN, Plaid and Wealthsimple), your Plaid secret, the ChatGPT sign-in and your AI keys. Backups leave `secret.key` out on purpose, so keep a copy of it somewhere safe and private, apart from the backups. Without `secret.key`, the app works but you have to enter those keys and connect your banks again. The safety copies in `backups/` are whole databases, every ledger and the sealed bank sign-ins included, so keep that folder as private as `chipmunk.db`. New installs create the data directory readable only by its owner (0700, files 0600).
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md).

@@ -56,6 +56,9 @@ How the tools work:
 - Each result has a readable summary and structured data.
 - Bulk tools accept `dryRun: true` to preview. `import_transactions` previews until you pass `confirm: true`.
 - Give each transaction for `add_transactions` an `externalId` (a bank's id, a receipt number), and retrying never adds it twice.
+- A credit card can be shared between ledgers (see [Shared accounts](features.md#shared-accounts)). `list_accounts` gives a shared account's balance in the ledger, the whole account's total, its home and the ledgers that have it. `list_account_transactions` lists its transactions in every ledger, `move_transactions` moves some to another ledger that has it, and `split_transaction` splits a card payment between them. `share_account` (*Full access*) sets which ledgers have it and which is its home, and what happens to a ledger's transactions when it's taken out. `import_transactions` says "already in another ledger" for a row another ledger has.
+- A key limited to some ledgers needs every ledger one of these calls touches: both for a move, every ledger with a share for a split, every ledger that has the account for the list. [Security](security.md) has the rules.
+- `archive_ledger` on a ledger that is a shared account's home archives nothing at first. It answers with `questions` (which ledger becomes the home), and you call it again with `answers`. When it answers `blockers`, it can't be archived.
 - When the API refuses something, the tool returns its message as an error, starting "Not allowed:" for a key without the access. `add_transactions` lists the rows it couldn't add in `failed`, and is an error only when none were added.
 
 Erasing or restoring data, deleting a ledger and managing API keys are left out on purpose: those stay in the app.

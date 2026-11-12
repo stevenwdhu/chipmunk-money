@@ -19,7 +19,7 @@
 
 Chipmunk is a personal finance app you host yourself, inspired by [Lunch Money](https://lunchmoney.app). It brings in your transactions from your banks or a CSV, suggests a category for each one from how you've filed things before, and shows where the money went: by month, by category, by payee. Bills, subscriptions and instalment plans are found for you, so you know what's coming.
 
-It runs as one small server, in Docker or with Node.js, on a home server, a NAS or the laptop you're reading this on. Each set of books is a single SQLite file you own. It works on your phone too, as an app you add to your home screen.
+It runs as one small server, in Docker or with Node.js, on a home server, a NAS or the laptop you're reading this on. Your books are a single SQLite file you own. It works on your phone too, as an app you add to your home screen.
 
 > [!WARNING]
 > There's no login yet. Anyone who can reach the port is treated as you, so keep it on your own machine, or put it behind something that signs people in, like [Tailscale Serve](https://tailscale.com/kb/1312/serve). [Security](docs/security.md) explains the options.
@@ -27,6 +27,7 @@ It runs as one small server, in Docker or with Node.js, on a home server, a NAS 
 ## Features
 
 - **Ledgers.** Separate books for "Personal" and "Family", each with its own accounts, categories and reports.
+- **Shared accounts.** One credit card in two ledgers: each keeps its own transactions and its part of the balance, and a card payment can be split between them. [More](docs/features.md#shared-accounts)
 - **Bank sync.** [SimpleFIN Bridge](https://www.simplefin.org/), [Plaid](https://plaid.com) or Wealthsimple, side by side, on a schedule you choose. Pending charges are replaced when they post, and refunds and card payments are recognized. [More](docs/bank-sync.md)
 - **Categories that learn.** Each category you pick teaches it. Tell it a payee is *always* Groceries and it never asks again. New payees can go to an AI of your choice, including one running on your own computer with [Ollama](https://ollama.com). [More](docs/ai.md)
 - **Recurring payments.** Subscriptions, bills and pay are found in your history. Instalment plans like Pay in 4 show what's left and when they end, and a plan's full price tells the app what its last payment will be when that's a different amount. You get a warning when a payment is missing or the price changed.
