@@ -8,15 +8,24 @@ import {
   TESTER,
 } from '../test/shared-accounts'
 import { ledgerRows } from '../test/world'
-import { balancesAt, deleteAccount, getAccount } from './accounts'
+import { balancesAt, deleteAccount, getAccount, setBalance } from './accounts'
 import { applyRemoteTransactions, type ApplyScope } from './bank/apply'
 import type { RemoteTransaction } from './bank/types'
 import type { AppContext } from './context'
 import { matchTransactions } from './matching'
 import { moveTransactions, sendAsDeleted } from './moves'
 import { eraseAll } from './setup'
-import { removeMember, setSharing, type SharingInput } from './sharing'
-import { GIVEN_PAYEE, leaveLedgerSplits, setSplit, undoSplit } from './splits'
+import { periodSummary } from './reports'
+import { changeHome, removeMember, setSharing, type SharingInput } from './sharing'
+import {
+  detachShare,
+  detachSplit,
+  dropShare,
+  GIVEN_PAYEE,
+  leaveLedgerSplits,
+  setSplit,
+  undoSplit,
+} from './splits'
 import { getTransaction, listAccountTransactions } from './transactions'
 
 /**
@@ -265,6 +274,42 @@ describe('moving part of a split', () => {
   })
 })
 
+/** Each way sharing can end, every ledger but the home taken out. */
+const endings: Array<[string, (w: ReturnType<typeof three>) => AppContext]> = [
+  [
+    'one at a time, home',
+    (w) => {
+      removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'home' })
+      w.check()
+      removeMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER, { rows: 'home' })
+      return w.personal
+    },
+  ],
+  [
+    'one at a time, keep',
+    (w) => {
+      removeMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER, { rows: 'keep' })
+      w.check()
+      removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'keep' })
+      return w.personal
+    },
+  ],
+  [
+    'both in one go, home and keep',
+    (w) => (
+      w.set(w.personal, { ledgers: ['personal'], rows: { family: 'home', trip: 'keep' } }),
+      w.personal
+    ),
+  ],
+  [
+    'Family made the home, Personal and Trip taken out',
+    (w) => (
+      w.set(w.personal, { ledgers: ['family'], home: 'family', rows: { personal: 'home', trip: 'keep' } }),
+      w.family
+    ),
+  ],
+]
+
 describe('stopping sharing with a ledger that takes part in splits', () => {
   it('with “home”: drops its share of the home’s payment, detaches the rest, then moves its rows home', () => {
     const w = three()
@@ -450,41 +495,6 @@ describe('stopping sharing with a ledger that takes part in splits', () => {
     ])
   })
 
-  /** Each way sharing can end, every ledger but the home taken out. */
-  const endings: Array<[string, (w: ReturnType<typeof three>) => AppContext]> = [
-    [
-      'one at a time, home',
-      (w) => {
-        removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'home' })
-        w.check()
-        removeMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER, { rows: 'home' })
-        return w.personal
-      },
-    ],
-    [
-      'one at a time, keep',
-      (w) => {
-        removeMember(w.personal, w.ctxOf, w.visa, w.trip.ledger.id, TESTER, { rows: 'keep' })
-        w.check()
-        removeMember(w.personal, w.ctxOf, w.visa, w.family.ledger.id, TESTER, { rows: 'keep' })
-        return w.personal
-      },
-    ],
-    [
-      'both in one go, home and keep',
-      (w) => (
-        w.set(w.personal, { ledgers: ['personal'], rows: { family: 'home', trip: 'keep' } }),
-        w.personal
-      ),
-    ],
-    [
-      'Family made the home, Personal and Trip taken out',
-      (w) => (
-        w.set(w.personal, { ledgers: ['family'], home: 'family', rows: { personal: 'home', trip: 'keep' } }),
-        w.family
-      ),
-    ],
-  ]
   it.each(endings)('leaves no split row once sharing ends (%s), and the account can be deleted', (_, end) => {
     const w = three()
     const home = end(w)
@@ -698,6 +708,191 @@ describe('when the bank changes a split payment', () => {
     })
     // Family −200 + 25 − 20. Personal −200 + 20.
     expect(w.check()).toEqual({ personal: -18_000, family: -19_500, trip: -10_000 })
+  })
+})
+
+describe('splits on an account with recorded balances', () => {
+  /**
+   * The three-payment fixture with Visa's balance recorded on Aug 31 (−$400: −500 + A) and on Sep 30
+   * (−$300: + B and C), which is what its rows come to on those days. Personal, the opening ledger,
+   * then has each recorded balance less what the others hold up to its day.
+   */
+  function recorded() {
+    const w = three()
+    setBalance(w.personal, w.visa, { date: '2026-08-31', balanceMinor: -40_000 })
+    setBalance(w.personal, w.visa, { date: '2026-09-30', balanceMinor: -30_000 })
+    expect(w.check()).toEqual({ personal: -14_500, family: -11_500, trip: -4_000 })
+    const before = w.history()
+    expect(before).toEqual(w.before)
+    /** August and September in each ledger: what it spent and got. */
+    const summaries = () =>
+      w.ledgers.map((c) => {
+        const s = periodSummary(c, '2026-08-01', '2026-09-30')
+        return { spent: s.spentMinor, income: s.incomeMinor }
+      })
+    return { ...w, before, summaries }
+  }
+
+  it('stop sharing with “home”: Trip’s part is as it was at every date, and Personal’s is its own and Family’s', () => {
+    const w = recorded()
+    w.set(w.personal, { ledgers: ['personal', 'trip'], rows: { family: 'home' } })
+    // Personal −145 − 115. (The $50 share of A it gave Family is its own again.)
+    expect(w.check()).toEqual({ personal: -26_000, trip: -4_000 })
+    const after = w.history()
+    expect(after.trip).toEqual(w.before.trip)
+    expect(after.personal).toEqual(w.before.personal!.map((p, i) => p + w.before.family![i]!))
+  })
+
+  it('stop sharing with “keep”: Trip’s part is as it was at every date, Personal’s but for the pending payment that came home, and no ledger’s spending changes', () => {
+    const w = recorded()
+    const summaries = w.summaries()
+    w.set(w.personal, { ledgers: ['personal', 'trip'], rows: { family: 'keep' } })
+    const own = w.splitOffs()[0]!
+    // Visa is the whole bank balance again, −300, recorded today: Personal takes Family's −115. Trip −40.
+    expect(w.check(own)).toEqual({ personal: -26_000, trip: -4_000 })
+    // The recorded balances lost what Family kept up to their days, so the past is as it was, but
+    // for C: pending with a bank id, it went home, and is Personal's from its date on.
+    const after = w.history()
+    expect(after.trip).toEqual(w.before.trip)
+    expect(after.personal).toEqual(w.before.personal!.map((p, i) => p + (DATES[i]! >= '2026-09-25' ? 4_000 : 0)))
+    expect(w.summaries()).toEqual(summaries)
+  })
+
+  it.each(endings)('leaves no split row once sharing ends (%s)', (_, end) => {
+    const w = recorded()
+    const home = end(w)
+    expect(home.accountWide.isShared(w.visa)).toBe(false)
+    expect(w.splitRows()).toEqual([])
+    w.check(...w.splitOffs())
+  })
+
+  /**
+   * Personal −200, Family −200 and Trip −100 in August, and a $100 payment on Aug 20 moved to
+   * Family and split: Family keeps $20, Trip gets $30 and Personal, the home, the other $50. Visa's
+   * balance is recorded on Aug 31 (−$400). Personal −200 + 50, Family −200 + 100 − 80, Trip −100 + 30.
+   */
+  function memberHeld() {
+    const w = world()
+    const { personal, family, trip } = w
+    w.spentIn(personal, '2026-08-10', -20_000)
+    w.spentIn(family, '2026-08-11', -20_000)
+    w.spentIn(trip, '2026-08-12', -10_000)
+    const paid = w.row(personal, '2026-08-20', 10_000, { payee: PAYEE, category: 'Credit card payment' })
+    w.move(personal, [paid], family)
+    w.split(family, paid, { family: 2_000, trip: 3_000 })
+    setBalance(personal, w.visa, { date: '2026-08-31', balanceMinor: -40_000 })
+    expect(w.check()).toEqual({ personal: -15_000, family: -18_000, trip: -7_000 })
+    /** The parts today, which come to −$400 whatever is done to the split. */
+    const parts = () => {
+      const now = w.check()
+      expect(Object.values(now).reduce((s, n) => s + n, 0)).toBe(-40_000)
+      return now
+    }
+    return { ...w, paid, before: w.history(), parts }
+  }
+
+  it('undoSplit: each share goes back to the ledger that holds the payment', () => {
+    const w = memberHeld()
+    undoSplit(w.family, w.ctxOf, w.paid, TESTER)
+    expect(w.parts()).toEqual({ personal: -20_000, family: -10_000, trip: -10_000 })
+  })
+
+  it('dropShare: one share goes back, and both do as an undo does', () => {
+    const w = memberHeld()
+    expect(dropShare(w.family, w.ctxOf, w.paid, w.trip.ledger.id, TESTER)).toEqual({ amountMinor: 3_000, last: false })
+    expect(w.parts()).toEqual({ personal: -15_000, family: -15_000, trip: -10_000 })
+    expect(dropShare(w.family, w.ctxOf, w.paid, w.personal.ledger.id, TESTER)).toEqual({ amountMinor: 5_000, last: true })
+    expect(w.parts()).toEqual({ personal: -20_000, family: -10_000, trip: -10_000 })
+    expect(w.splitRows()).toEqual([])
+  })
+
+  it('detachShare: no part changes at any date, for one share and for the last', () => {
+    const w = memberHeld()
+    expect(detachShare(w.family, w.ctxOf, w.paid, w.trip.ledger.id, TESTER)).toMatchObject({ amountMinor: 3_000, last: false })
+    expect(w.parts()).toEqual({ personal: -15_000, family: -18_000, trip: -7_000 })
+    expect(w.history()).toEqual(w.before)
+    expect(detachShare(w.family, w.ctxOf, w.paid, w.personal.ledger.id, TESTER)).toMatchObject({ amountMinor: 5_000, last: true })
+    expect(w.parts()).toEqual({ personal: -15_000, family: -18_000, trip: -7_000 })
+    expect(w.history()).toEqual(w.before)
+    expect(w.splitRows()).toEqual([])
+  })
+
+  it('detachSplit: no part changes at any date', () => {
+    const w = memberHeld()
+    expect(detachSplit(w.family, w.ctxOf, w.paid, TESTER)).toEqual({ detached: 3 })
+    expect(w.parts()).toEqual({ personal: -15_000, family: -18_000, trip: -7_000 })
+    expect(w.history()).toEqual(w.before)
+    expect(w.splitRows()).toEqual([])
+  })
+})
+
+describe('a split, then a home change', () => {
+  it('keeps every part through the change, the bank moving the payment, a new split from the old home, and the old home leaving, Trip’s history as it was throughout', () => {
+    const w = world()
+    const { personal, family, trip } = w
+    w.spentIn(personal, '2026-08-10', -20_000)
+    w.spentIn(family, '2026-08-11', -20_000)
+    w.spentIn(trip, '2026-08-12', -10_000)
+    /** Plaid's changes, applied in Visa's home. */
+    const bank = (home: AppContext, amountMinor: number) => {
+      const result = applyRemoteTransactions(home, w.ctxOf, w.visa, [remote('p1', '2026-08-20', amountMinor)], { removed: [], floor: null }, 'plaid')
+      for (const c of w.ledgers) matchTransactions(c)
+      return result
+    }
+    // The bank's $100 payment, in Personal, split: $50 to Family, $30 to Trip. Visa's balance on Aug 31 is recorded: −$400.
+    bank(personal, 10_000)
+    const paid = personal.accountWide.holder(w.visa, 'p1')!.id
+    w.split(personal, paid, { family: 5_000, trip: 3_000 })
+    setBalance(personal, w.visa, { date: '2026-08-31', balanceMinor: -40_000 })
+    // Personal −200 + 100 − 80. Family −200 + 50. Trip −100 + 30.
+    const parts = { personal: -18_000, family: -15_000, trip: -7_000 }
+    expect(w.check()).toEqual(parts)
+    const tripBefore = w.history().trip
+    const unchanged = () => expect(w.history().trip).toEqual(tripBefore)
+
+    // Family becomes the home. Personal still holds the payment, and is still the opening ledger.
+    changeHome(personal, w.ctxOf, w.visa, family.ledger.id, TESTER)
+    expect(family.accountWide.ledgers(w.visa).map((l) => [l.slug, l.isHome, l.isOpening])).toEqual([
+      ['family', true, false],
+      ['personal', false, true],
+      ['trip', false, false],
+    ])
+    expect(w.check()).toEqual(parts)
+    unchanged()
+
+    // The bank says $120, then $70: the row changes where it is, and the recorded balance pins the
+    // total at −$400, so Personal's part, which has the recorded balance less the others', stays too.
+    const up = bank(family, 12_000)
+    expect(up).toMatchObject({ added: 0, updated: 1 })
+    expect([...up.byLedger.keys()]).toEqual([personal.ledger.id])
+    expect(getTransaction(personal, paid)).toMatchObject({ amountMinor: 12_000, split: { part: 'payment', keptMinor: 4_000 } })
+    expect(w.check()).toEqual(parts)
+    unchanged()
+    expect(bank(family, 7_000)).toMatchObject({ added: 0, updated: 1 })
+    expect(getTransaction(personal, paid)).toMatchObject({ amountMinor: 7_000, split: { part: 'payment', keptMinor: -1_000 } })
+    expect(w.check()).toEqual(parts)
+    unchanged()
+
+    // Split again from the old home, which holds it: Personal keeps $10, Trip $30, and Family, the home now, the other $30.
+    expect(w.split(personal, paid, { personal: 1_000, trip: 3_000 })).toMatchObject({
+      keptMinor: 1_000,
+      shares: [
+        { ledger: familyRef, amountMinor: 3_000 },
+        { ledger: tripRef, amountMinor: 3_000 },
+      ],
+    })
+    // Family −200 + 30. Trip −100 + 30. Personal has the rest of −400.
+    expect(w.check()).toEqual({ family: -17_000, personal: -16_000, trip: -7_000 })
+    unchanged()
+
+    // The old home leaves and keeps its rows: the split ends, Family takes the opening balance, and Visa is −$400 still.
+    w.set(family, { ledgers: ['family', 'trip'], rows: { personal: 'keep' } })
+    const own = w.splitOffs()[0]!
+    expect(w.splitRows()).toEqual([])
+    expect(w.check(own)).toEqual({ family: -33_000, trip: -7_000 })
+    unchanged()
+    // Personal's own account: −200 + 70 − 60.
+    expect(getAccount(personal, own).balanceMinor).toBe(-19_000)
   })
 })
 

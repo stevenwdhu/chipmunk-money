@@ -78,6 +78,8 @@ interface SplittableRow extends Payment {
   deletedAt: string | null
   pairId: number | null
   linked: number
+  /** It's split already: this ledger has its given row. */
+  isSplit: number
 }
 
 export interface SplitInput {
@@ -316,20 +318,25 @@ export function splitsFor(ctx: AppContext, rows: Array<{ id: number; amount: num
  * split row itself, linked to nothing (a refund or a payback isn't a payment), and a transfer or in a
  * category left out of totals. Pending is fine. Otherwise 400 "Only a card payment can be split". An id
  * another ledger holds and one that doesn't exist get the same 400.
+ *
+ * A payment that's split already only has to be held here, live and on an account that's still
+ * shared: what it is may have changed since (its category to one that counts, "not a transfer", its
+ * withdrawal unpaired by matching or a move), and its split must still be changed, lowered or undone.
  */
 export function assertSplittable(ctx: AppContext, id: number): SplittableRow {
   const p = ctx.q.get<SplittableRow>(
     `SELECT t.id, t.account_id AS accountId, a.name AS accountName, t.amount_minor AS amount, t.date, t.datetime, t.status, t.payee, t.currency,
        t.category_id AS categoryId, coalesce(c.exclude_from_totals, 0) AS excluded, t.split_of AS splitOf, t.deleted_at AS deletedAt,
        t.transfer_pair_id AS pairId,
-       (EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_in_id = t.id) OR EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_out_id = t.id)) AS linked
+       (EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_in_id = t.id) OR EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_out_id = t.id)) AS linked,
+       EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id) AS isSplit
      FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
        LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.id = ?`,
     id,
   )
   if (!p) badRequest(`There’s no transaction ${id} in ${ctx.ledger.name} to split.`)
-  const payment = p.amount > 0 && !p.deletedAt && p.splitOf === null && !p.linked && (p.pairId !== null || !!p.excluded)
+  const payment = p.isSplit ? !p.deletedAt : p.amount > 0 && !p.deletedAt && p.splitOf === null && !p.linked && (p.pairId !== null || !!p.excluded)
   if (!payment || !ctx.accountWide.isShared(p.accountId)) badRequest('Only a card payment can be split.')
   return p
 }
@@ -439,7 +446,7 @@ function wantedShares(ctx: AppContext, payment: Payment, ledgers: AccountLedger[
  * Splits a payment this ledger holds between the ledgers that share its account, or changes or
  * undoes its split (an empty list), in one transaction. `shares` is the form's: see SplitInput and
  * the module's comment for how the home's and the holder's amounts follow from it. The payment must
- * be one that can be split (assertSplittable). A caller limited to some ledgers (`usable`, the
+ * be one that can be split, or be split already (assertSplittable). A caller limited to some ledgers (`usable`, the
  * switch's value) must be allowed in this one and in every ledger that has a share, before or after.
  *
  * Through each ledger's own context: share rows no longer wanted are deleted, the others updated or

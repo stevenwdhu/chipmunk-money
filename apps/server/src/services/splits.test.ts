@@ -330,6 +330,50 @@ describe('what can be split, and the shares', () => {
     expect(w.everything(personal, w.family, w.trip)).toEqual(before)
   })
 
+  it('changes, lowers and undoes the split of a payment that’s no longer a card payment, and still splits no other one', () => {
+    const w = world({ shareWith: ['family', 'trip'] })
+    const { personal, family, trip } = w
+    w.spentIn(personal, '2026-09-10', -20_000)
+    w.spentIn(family, '2026-09-11', -20_000)
+    w.spentIn(trip, '2026-09-12', -10_000)
+    const paid = w.payment(personal, '2026-09-20', 10_000)
+    w.split(personal, paid, { family: 8_000 })
+    // Its category may change to one that counts: it's no card payment any more, and never split it couldn't be split now.
+    const groceries = categoryId(personal, 'Groceries')
+    expect(updateTransaction(personal, paid, transactionUpdateSchema.parse({ categoryId: groceries }))).toMatchObject({ categoryId: groceries, split: { keptMinor: 2_000 } })
+    const other = w.row(personal, '2026-09-21', 5_000, { payee: PAYEE, category: 'Groceries' })
+    refused(() => w.split(personal, other, { family: 1_000 }), 400, 'Only a card payment can be split.')
+    // Personal −200 + 100 − 80. Family −200 + 80. Trip −100. (And the $50 that isn't split, in Personal.)
+    expect(w.check()).toEqual({ personal: -13_000, family: -12_000, trip: -10_000 })
+
+    // Lowered, changed, raised, with a ledger added and one taken out.
+    expect(w.split(personal, paid, { family: 5_000 })).toMatchObject({ keptMinor: 5_000, shares: [{ ledger: { slug: 'family' }, amountMinor: 5_000 }] })
+    expect(w.check()).toEqual({ personal: -10_000, family: -15_000, trip: -10_000 })
+    expect(w.split(personal, paid, { family: 8_000, trip: 1_000 })).toMatchObject({ keptMinor: 1_000 })
+    expect(w.check()).toEqual({ personal: -14_000, family: -12_000, trip: -9_000 })
+    expect(w.split(personal, paid, { trip: 1_000 }, { dryRun: true })).toMatchObject({ keptMinor: 9_000 })
+    expect(w.split(personal, paid, { trip: 1_000 })).toMatchObject({ keptMinor: 9_000 })
+    expect(w.check()).toEqual({ personal: -6_000, family: -20_000, trip: -9_000 })
+    // What Personal gave is still filed as it was, left out of totals. Only the payment counts, as its category says.
+    expect(w.splitRows().map((r) => [r.ledger, r.amount])).toEqual([
+      ['personal', -1_000],
+      ['trip', 1_000],
+    ])
+    expect(periodSummary(trip, '2026-09-01', '2026-09-30')).toMatchObject({ spentMinor: 10_000, incomeMinor: 0 })
+
+    // Its amount can go down to its shares, and no lower until the split is.
+    refused(() => updateTransaction(personal, paid, transactionUpdateSchema.parse({ amountMinor: 900 })), 409, 'Its shares come to $10.00. Lower the split first.')
+    w.split(personal, paid, { trip: 500 })
+    expect(updateTransaction(personal, paid, transactionUpdateSchema.parse({ amountMinor: 900 }))).toMatchObject({ amountMinor: 900, split: { keptMinor: 400 } })
+
+    // Undone with an empty list: an ordinary row again, which can't be split as it is.
+    expect(w.split(personal, paid, {})).toMatchObject({ keptMinor: 900, shares: [], transaction: { split: null } })
+    expect(w.splitRows()).toEqual([])
+    // Personal −200 + 9 + 50. The others have only what they spent.
+    expect(w.check()).toEqual({ personal: -14_100, family: -20_000, trip: -10_000 })
+    refused(() => w.split(personal, paid, { family: 100 }), 400, 'Only a card payment can be split.')
+  })
+
   it('needs a category for card payments in every ledger that gets a new row, the holder’s for a payment without one', () => {
     const w = world({ shareWith: ['family', 'trip'] })
     const { personal, family, trip } = w
