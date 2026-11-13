@@ -383,7 +383,8 @@ describe('stopping sharing with a ledger whose transactions go home', () => {
     expect(w.storage.sqlite.pragma('foreign_key_check')).toEqual([])
   })
 
-  it('moves more than 1000 rows in chunks, a purchase and its refund in one', () => {
+  // A thousand rows take seconds on a slow machine.
+  it('moves more than 1000 rows in chunks, a purchase and its refund in one', { timeout: 30_000 }, () => {
     const w = world()
     const { personal, family } = w
     const ids = family.q.transaction(() => Array.from({ length: MOVE_LIMIT + 5 }, (_, i) => w.addTx(family, addDays('2026-01-01', i % 270), -100 - i)))

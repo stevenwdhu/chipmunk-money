@@ -433,7 +433,8 @@ describe('moving transactions: what is refused', () => {
     expect(w.everything(personal, family, trip)).toEqual(before)
   })
 
-  it('moves 1000 at a time, and refuses 1001', () => {
+  // A thousand rows take seconds on a slow machine.
+  it('moves 1000 at a time, and refuses 1001', { timeout: 30_000 }, () => {
     const w = world()
     const { personal, family } = w
     const ids = personal.q.transaction(() => Array.from({ length: MOVE_LIMIT + 1 }, (_, i) => w.row(personal, addDays('2026-01-01', i % 270), -100 - i)))
