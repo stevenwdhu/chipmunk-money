@@ -2,7 +2,7 @@
 
 What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
 
-## Unreleased
+## v0.3.1 (2026-11-14)
 
 ### Added
 
