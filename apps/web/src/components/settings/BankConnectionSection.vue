@@ -27,9 +27,11 @@ function untilText(iso: string | null) {
   if (!iso) return null
   const ms = Date.parse(iso) - Date.now()
   if (ms <= 60_000) return 'soon'
-  const h = Math.floor(ms / 3_600_000)
-  const min = Math.round((ms % 3_600_000) / 60_000)
-  return h ? `in ${h} h ${min} min` : `in ${min} min`
+  // Rounded once, so 59.6 minutes past the hour is the next hour, never "60 min".
+  const total = Math.round(ms / 60_000)
+  const h = Math.floor(total / 60)
+  const min = total % 60
+  return h ? (min ? `in ${h} h ${min} min` : `in ${h} h`) : `in ${min} min`
 }
 /** Every connection with accounts syncs, linked or not: its transactions are kept for linking later. */
 const hasAccounts = () => props.connection.accounts.length > 0
