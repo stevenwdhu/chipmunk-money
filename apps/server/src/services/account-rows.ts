@@ -271,11 +271,11 @@ const FROZEN = '(t.account_id <> @accountId)'
 
 /**
  * A shared account's place for each row in its all-ledgers list, as one string (the register's,
- * transactions.ts): its date; then, that day, money in without a time of day, then ones with a time
- * in time order, then money out without one (none for a credit card, which keeps the order they
- * were added); then the order they were added.
+ * transactions.ts): its date; then, that day, the ones without a time of day that come first (money
+ * in on a bank account, money out on a credit card), then ones with a time in time order, then the
+ * rest without one; then the order they were added.
  */
-const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN t.amount_minor < 0 AND a.type <> 'credit' THEN 2 ELSE 0 END
+const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END
   || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
 
 /** The module's one unscoped call: every read in READS runs through it. */

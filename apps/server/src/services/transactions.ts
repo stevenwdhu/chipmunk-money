@@ -80,18 +80,19 @@ interface TxRow {
 }
 
 /**
- * Money out not on a credit card: within a day, without a time of day, it's taken to come after money
- * in, so a balance doesn't dip below zero because the pay came in after the bills. (A credit card keeps
- * the order they were added.)
+ * What's taken to come last in a day, without a time of day. On a bank account that's money out, so a
+ * balance doesn't dip below zero because the pay came in after the bills. On a credit card it's money
+ * in: a refund or a payment comes after the spending it pays back.
  */
-const OUT = `(t.amount_minor < 0 AND t.account_id NOT IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND type = 'credit'))`
+const LATE = `(CASE WHEN t.account_id IN (SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND type = 'credit') THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END)`
 
 /**
  * A transaction's place in the list, oldest first, as one string (and the paging cursor): its date; then,
- * that day, money in without a time of day, then ones with a time in time order, then money out without
- * one (see OUT); then the order they were added.
+ * that day, the ones without a time of day that come first (money in on a bank account, money out on a
+ * credit card), then ones with a time in time order, then the rest without one (see LATE); then the
+ * order they were added.
  */
-const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN ${OUT} THEN 2 ELSE 0 END || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
+const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN ${LATE} THEN 2 ELSE 0 END || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
 
 /**
  * A transaction row with its transfer's other side's origin, which says whether the two are kept in step,

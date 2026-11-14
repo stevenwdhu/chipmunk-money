@@ -184,11 +184,23 @@ describe('transactions', () => {
       ['Payroll', 300_000],
     ])
 
-    // A credit card keeps the order they were added: a refund after its charge stays after it.
-    const card = makeAccount(ctx, 'Visa', 'credit')
-    await createTransaction(ctx, tx({ accountId: card, date: '2026-09-20', amountMinor: -15_000, payee: 'Gas' }), { useAi: false })
-    await createTransaction(ctx, tx({ accountId: card, date: '2026-09-20', amountMinor: 15_000, payee: 'Gas refund' }), { useAi: false })
-    expect(listTransactions(ctx, { limit: 50, accountId: card }).items.map((t) => t.payee)).toEqual(['Gas refund', 'Gas'])
+    // A credit card the other way round: a day's spending before the refunds and payments that pay it
+    // back, whatever order they were added in.
+    const card = makeAccount(ctx, 'Visa', 'credit', 0)
+    const charge = (amountMinor: number, payee: string) => createTransaction(ctx, tx({ accountId: card, date: '2026-09-20', amountMinor, payee }), { useAi: false })
+    await charge(1_000, 'Brewery refund')
+    await charge(-4_939, 'Brewery')
+    await charge(-15_000, 'Gas')
+    await charge(15_000, 'Gas refund')
+    expect(listTransactions(ctx, { limit: 50, accountId: card }).items.map((t) => [t.payee, t.balanceAfterMinor])).toEqual([
+      ['Gas refund', -3_939],
+      ['Brewery refund', -18_939],
+      ['Gas', -19_939],
+      ['Brewery', -4_939],
+    ])
+    const cardPage1 = listTransactions(ctx, { limit: 2, accountId: card })
+    const cardPage2 = listTransactions(ctx, { limit: 2, accountId: card, cursor: cardPage1.nextCursor! })
+    expect(cardPage2.items.map((t) => t.payee)).toEqual(['Gas', 'Brewery'])
   })
 
   it('shows a running balance for one account, like a statement', async () => {
