@@ -367,6 +367,7 @@ App-wide settings: time zone and AI providers.
 |---|---|---|---|
 | GET | `/settings` | Get app settings. | read |
 | PATCH | `/settings` | Update app settings. | admin |
+| POST | `/settings/ai/swap` | Make the fallback AI provider the primary one. | admin |
 | POST | `/settings/ai/test` | Test an AI provider. | admin |
 | GET | `/settings/ai/chatgpt` | Get the ChatGPT sign-in. | admin |
 | POST | `/settings/ai/chatgpt/sign-in` | Start signing in with ChatGPT. | admin |

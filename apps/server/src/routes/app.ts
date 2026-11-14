@@ -69,7 +69,7 @@ import * as cats from '../services/categories'
 import * as names from '../services/payee-names'
 import * as tidy from '../services/payee-tidy'
 import { chatgptModels, chatgptStatus, finishChatgptSignIn, signOutChatgpt, startChatgptSignIn } from '../services/chatgpt'
-import { publicSettings, today, updateSettings } from '../services/settings'
+import { publicSettings, swapAiProviders, today, updateSettings } from '../services/settings'
 import { env } from '../env'
 import * as setup from '../services/setup'
 import { fullBackup, type Storage } from '../storage'
@@ -259,6 +259,21 @@ export function appRoutes(storage: Storage, bank: BankService) {
     (c, { body }) => {
       requireAllLedgers(c.var.actor)
       updateSettings(meta, body)
+      return publicSettings(meta, storage.now)
+    },
+  )
+  r.post(
+    '/settings/ai/swap',
+    {
+      ...set,
+      scope: 'admin',
+      summary: 'Make the fallback AI provider the primary one',
+      description: 'The fallback provider becomes the primary one and the primary one the fallback, each with its saved API key. 409 when there’s no fallback, or when either is set by the server’s environment variables.',
+      response: settingsSchema,
+    },
+    (c) => {
+      requireAllLedgers(c.var.actor)
+      swapAiProviders(meta)
       return publicSettings(meta, storage.now)
     },
   )

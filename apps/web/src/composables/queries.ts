@@ -196,6 +196,15 @@ export function useSettings() {
   return useQuery({ queryKey: keys.settings, queryFn: () => api.get<Settings>('/settings'), staleTime: 60_000 })
 }
 
+/** The fallback AI provider becomes the primary one, and the primary the fallback, keys and all. */
+export function useSwapAiProviders() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<Settings>('/settings/ai/swap'),
+    onSuccess: (data) => qc.setQueryData(keys.settings, data),
+  })
+}
+
 export function useUpdateSettings() {
   const qc = useQueryClient()
   return useMutation({

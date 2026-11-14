@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm'
+import { HTTPException } from 'hono/http-exception'
 import {
   AI_KINDS,
   DEFAULT_SYNC_HOURS,
@@ -274,6 +275,21 @@ function originOf(url: string | null): string | null {
   } catch {
     return url
   }
+}
+
+/**
+ * The fallback provider becomes the primary one and the primary the fallback, each with its saved key.
+ * Not for a provider set by the server's environment variables, which this can't change.
+ */
+export function swapAiProviders(meta: MetaStore) {
+  if (envAiConfig('primary') || envAiConfig('fallback')) {
+    throw new HTTPException(409, { message: 'A provider set by the server’s AI_PRIMARY_* or AI_FALLBACK_* environment variables can’t change places here. Change them in .env and restart the server.' })
+  }
+  const primary = getAppSetting<StoredAiConfig | null>(meta, 'ai.primary', null)
+  const fallback = getAppSetting<StoredAiConfig | null>(meta, 'ai.fallback', null)
+  if (!fallback) throw new HTTPException(409, { message: 'There’s no fallback provider to make primary.' })
+  setAppSetting(meta, 'ai.primary', fallback)
+  setAppSetting(meta, 'ai.fallback', primary)
 }
 
 export function updateSettings(meta: MetaStore, input: SettingsUpdate) {

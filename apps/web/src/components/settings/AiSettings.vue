@@ -123,7 +123,7 @@ async function retryAll() {
     </Card>
 
     <AiProviderForm which="primary" :config="ai?.primary ?? null" :fallback="ai?.fallback ?? null" />
-    <AiProviderForm which="fallback" :config="ai?.fallback ?? null" />
+    <AiProviderForm which="fallback" :config="ai?.fallback ?? null" :primary="ai?.primary ?? null" />
 
     <Card class="gap-4">
       <CardHeader>

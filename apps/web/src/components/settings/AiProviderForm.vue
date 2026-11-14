@@ -9,12 +9,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useChatgpt, useUpdateSettings } from '@/composables/queries'
+import { useChatgpt, useSwapAiProviders, useUpdateSettings } from '@/composables/queries'
 import { api, errorMessage } from '@/lib/api'
 
-/** `fallback` (on the primary's form): the fallback provider, which goes too when the primary is set to None. */
-const props = defineProps<{ which: 'primary' | 'fallback'; config: AiProviderPublic | null; fallback?: AiProviderPublic | null }>()
+/**
+ * `fallback` (on the primary's form): the fallback provider, which goes too when the primary is set to None.
+ * `primary` (on the fallback's form): the primary provider, which becomes the fallback on Make primary.
+ */
+const props = defineProps<{ which: 'primary' | 'fallback'; config: AiProviderPublic | null; fallback?: AiProviderPublic | null; primary?: AiProviderPublic | null }>()
 const update = useUpdateSettings()
+const swap = useSwapAiProviders()
 
 /** 'none': no provider. For the primary that turns AI off (and the fallback with it). */
 const kind = ref<AiKind | 'none'>('anthropic')
@@ -248,6 +252,28 @@ async function clear() {
   }
 }
 
+/** On the fallback's form: why it can't be made primary now, or null when it can. */
+const cantSwap = computed(() =>
+  !props.config || off.value
+    ? 'Choose a fallback provider first.'
+    : changed.value
+      ? 'Save your changes first.'
+      : props.primary?.source === 'env'
+        ? 'The primary provider is set by the server’s environment variables, so it can’t change places here.'
+        : null,
+)
+async function makePrimary() {
+  // Named before: once they've changed places, this form shows the other one.
+  const label = aiProviderInfo(props.config!.kind).label
+  try {
+    await swap.mutateAsync()
+    toast.success(`${label} is the primary provider now`)
+    testResult.value = null
+  } catch (err) {
+    toast.error(errorMessage(err))
+  }
+}
+
 async function test() {
   if (changed.value && !(await save())) return
   testing.value = true
@@ -388,6 +414,12 @@ async function test() {
           <Button v-if="config && !off" type="button" variant="outline" :disabled="testing || update.isPending.value" @click="test">
             <Loader2 v-if="testing" class="animate-spin" />{{ changed ? 'Save and test' : 'Test connection' }}
           </Button>
+          <!-- A disabled button shows no title, so the span carries why. -->
+          <span v-if="which === 'fallback'" :title="cantSwap ?? undefined">
+            <Button type="button" variant="outline" :disabled="!!cantSwap || swap.isPending.value || update.isPending.value" @click="makePrimary">
+              <Loader2 v-if="swap.isPending.value" class="animate-spin" />Make primary
+            </Button>
+          </span>
         </div>
       </form>
       <div v-if="fromEnv" class="mt-3">

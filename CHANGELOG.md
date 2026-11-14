@@ -2,6 +2,17 @@
 
 What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
 
+## Unreleased
+
+### Added
+
+- **Make primary** on the fallback AI provider in App settings → AI: the fallback becomes the primary provider and the primary the fallback, each with its saved API key. It's off while there's no fallback, or while the form has changes not saved yet.
+
+### Fixed
+
+- On a credit card, a day's spending now comes before the refunds and payments made the same day, so a refund shows after the charge it pays back and the running balance reads in that order. A bank account keeps money in first, so the pay comes before the bills.
+- The time to the next bank sync no longer reads "1 h 60 min": it rounds to the next hour.
+
 ## v0.3.0 (2026-11-13)
 
 ### Breaking
