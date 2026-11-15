@@ -18,6 +18,7 @@ import {
   type PlaidEnvironment,
   type PlaidPublic,
   type Settings,
+  type TransactionColumn,
   type SettingsUpdate,
 } from '@chipmunk/shared'
 import { appSettings as metaSettings, bankConnections } from '../db/schema'
@@ -249,7 +250,7 @@ export function publicSettings(meta: MetaStore, now: () => Date): Settings {
     today: today({ meta, now }),
     baseCurrency: 'CAD',
     firstDayOfWeek: getAppSetting<0 | 1>(meta, 'firstDayOfWeek', 0),
-    transactionColumns: normalizeColumns(getAppSetting<string[] | null>(meta, 'transactionColumns', null)),
+    transactionColumns: listedColumns(getAppSetting<string[] | null>(meta, 'transactionColumns', null)),
     // Columns that are gone (Name) drop out.
     transactionColumnWidths: Object.fromEntries(
       Object.entries(getAppSetting<Settings['transactionColumnWidths']>(meta, 'transactionColumnWidths', {})).filter(([c]) =>
@@ -281,6 +282,16 @@ function originOf(url: string | null): string | null {
  * The fallback provider becomes the primary one and the primary the fallback, each with its saved key.
  * Not for a provider set by the server's environment variables, which this can't change.
  */
+/**
+ * The saved column order as the web reads it, with columns added since. Ledger only once an order
+ * that has it was saved: a page from before Ledger draws every column it's sent and doesn't know that
+ * one, and the web puts it in its place itself (normalizeColumns).
+ */
+function listedColumns(saved: string[] | null): TransactionColumn[] {
+  const order = normalizeColumns(saved)
+  return saved?.includes('ledger') ? order : order.filter((c) => c !== 'ledger')
+}
+
 export function swapAiProviders(meta: MetaStore) {
   if (envAiConfig('primary') || envAiConfig('fallback')) {
     throw new HTTPException(409, { message: 'A provider set by the server’s AI_PRIMARY_* or AI_FALLBACK_* environment variables can’t change places here. Change them in .env and restart the server.' })
@@ -297,7 +308,14 @@ export function updateSettings(meta: MetaStore, input: SettingsUpdate) {
   if (input.firstDayOfWeek !== undefined) setAppSetting(meta, 'firstDayOfWeek', input.firstDayOfWeek)
   // Saved in full (columns left out at the end), so a column added later can find its place.
   if (input.transactionColumns !== undefined) {
-    setAppSetting(meta, 'transactionColumns', input.transactionColumns && [...new Set([...input.transactionColumns, ...TRANSACTION_COLUMNS])])
+    setAppSetting(
+      meta,
+      'transactionColumns',
+      // Ledger only when it was sent (see listedColumns).
+      input.transactionColumns && [
+        ...new Set([...input.transactionColumns, ...TRANSACTION_COLUMNS.filter((c) => c !== 'ledger' || input.transactionColumns!.includes('ledger'))]),
+      ],
+    )
   }
   if (input.transactionColumnWidths !== undefined) setAppSetting(meta, 'transactionColumnWidths', input.transactionColumnWidths)
   if (input.sidebarWidth !== undefined) setAppSetting(meta, 'sidebarWidth', input.sidebarWidth)
