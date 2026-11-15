@@ -224,26 +224,27 @@ describe('API keys and scopes', () => {
   it('remembers the transactions column order for the whole app', async () => {
     const { call, storage } = setup()
     const columns = async () => (await call('GET', '/settings')).body.transactionColumns
-    expect(await columns()).toEqual(['date', 'payee', 'notes', 'category', 'account', 'amount', 'balance'])
+    expect(await columns()).toEqual(['date', 'payee', 'notes', 'ledger', 'category', 'account', 'amount', 'balance'])
     // Columns left out keep their default order at the end.
     expect((await call('PATCH', '/settings', { transactionColumns: ['amount', 'date', 'notes'] })).body.transactionColumns).toEqual([
       'amount',
       'date',
       'notes',
       'payee',
+      'ledger',
       'category',
       'account',
       'balance',
     ])
-    expect(await columns()).toEqual(['amount', 'date', 'notes', 'payee', 'category', 'account', 'balance'])
+    expect(await columns()).toEqual(['amount', 'date', 'notes', 'payee', 'ledger', 'category', 'account', 'balance'])
     // A column added since an order was saved goes after the one before it by default, and one that's
     // gone since (Name) drops out.
     setAppSetting(storage.app, 'transactionColumns', ['amount', 'date', 'payee', 'name', 'category', 'account', 'balance'])
-    expect(await columns()).toEqual(['amount', 'date', 'payee', 'notes', 'category', 'account', 'balance'])
+    expect(await columns()).toEqual(['amount', 'date', 'payee', 'notes', 'ledger', 'category', 'account', 'balance'])
     expect((await call('PATCH', '/settings', { transactionColumns: ['date', 'date'] })).status).toBe(400)
     expect((await call('PATCH', '/settings', { transactionColumns: ['running-total'] })).status).toBe(400)
     await call('PATCH', '/settings', { transactionColumns: null })
-    expect(await columns()).toEqual(['date', 'payee', 'notes', 'category', 'account', 'amount', 'balance'])
+    expect(await columns()).toEqual(['date', 'payee', 'notes', 'ledger', 'category', 'account', 'amount', 'balance'])
 
     // Widths too: only the ones you set, within limits. A gone column's drops out.
     setAppSetting(storage.app, 'transactionColumnWidths', { name: 200, payee: 300 })

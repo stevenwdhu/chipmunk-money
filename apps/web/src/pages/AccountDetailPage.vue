@@ -10,7 +10,6 @@ import LineChart from '@/components/charts/LineChart.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import MoneyText from '@/components/MoneyText.vue'
-import AllLedgersTable from '@/components/sharing/AllLedgersTable.vue'
 import ShareAccountDialog from '@/components/sharing/ShareAccountDialog.vue'
 import TransactionFilterBar from '@/components/TransactionFilterBar.vue'
 import TransactionTable from '@/components/TransactionTable.vue'
@@ -27,6 +26,7 @@ import {
   useAccountHistory,
   useAccountMutations,
   useAccounts,
+  useAccountTransactions,
   useBankMutations,
   useLedgers,
   useSettings,
@@ -72,6 +72,8 @@ const allLedgers = computed({
   get: () => !!sharing.value && f.q('ledgers') === 'all',
   set: (v) => f.setQuery({ ledgers: v ? 'all' : undefined }),
 })
+/** Every ledger's rows, for the same table. */
+const everyLedger = useAccountTransactions(id, {}, { enabled: allLedgers })
 const emptyTitle = computed(() => (f.activeCount.value ? 'Nothing matches these filters.' : 'No transactions in this account'))
 const emptyDescription = computed(() =>
   f.activeCount.value
@@ -258,7 +260,9 @@ async function removeSnapshot(snapshotId: number) {
           <p class="text-sm text-muted-foreground">
             What every ledger has on {{ account.name }}, with the whole account’s balance after each. Another ledger’s transaction can be moved here to edit it.
           </p>
-          <AllLedgersTable :account="account" />
+          <!-- The server's reason, as it says it (a key that can't see every ledger that has the account, say). -->
+          <Card v-if="everyLedger.error.value"><EmptyState :title="errorMessage(everyLedger.error.value)" /></Card>
+          <TransactionTable v-else :list="everyLedger" :all-ledgers-of="account" empty-title="No transactions in this account" />
         </template>
         <template v-else>
           <TransactionFilterBar :filters="f" />

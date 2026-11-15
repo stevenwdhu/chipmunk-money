@@ -39,7 +39,7 @@ Nothing already recorded moves and no balance changes. The other ledger gets the
 
 - **Accounts** shows the card with a **Shared** mark and this ledger's balance on it, with the whole account's under it ("of $300.00"). In a ledger that isn't the home it says **Managed in Personal** where the sync status would be.
 - **The account's page** shows "Owed in Family", and under it the whole account: "$300.00 owed on the whole account · Home: Personal". In the home that line ends "Shared with Family".
-- **Its transactions** have a **This ledger / All ledgers** switch. *This ledger* is what this ledger holds. *All ledgers* is every ledger's, with a Ledger column and the whole account's balance after each one, so it reads like the bank's statement. Another ledger's transaction is read-only there ("In Family. Move it here to edit it."), and opening it shows its details with **Move to…**.
+- **Its transactions** have a **This ledger / All ledgers** switch. *This ledger* is what this ledger holds. *All ledgers* is every ledger's, in the same table as every other list, with a Ledger column and the whole account's balance after each one, so it reads like the bank's statement. Its columns move and resize like the rest, the Ledger column too, and keep the order and widths you set. Another ledger's transaction is read-only there ("In Family. Move it here to edit it."), and opening it shows its details with **Move to…**.
 - Everything else (Transactions, the review queue, reports, recurring items, net worth) counts only what this ledger holds.
 
 ### Moving transactions between ledgers

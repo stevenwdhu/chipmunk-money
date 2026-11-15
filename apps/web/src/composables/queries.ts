@@ -118,6 +118,7 @@ import type {
 } from '@chipmunk/shared'
 import { api } from '@/lib/api'
 import { currentLedger, lapi, ledgerPath } from '@/lib/ledger'
+import { toListRow, type ListRow } from '@/lib/sharing'
 
 /** Query keys. Ledger data is keyed by the ledger's slug so caches for different ledgers never mix. */
 const lk = (...parts: string[]) => ['l', currentLedger.value, ...parts]
@@ -477,8 +478,8 @@ export function useSplitTransaction() {
 
 /**
  * A shared account's transactions in every ledger that has it, newest first, a page at a time
- * (`rows`), each with the ledger that holds it and the account's total after it. Under the
- * transactions key, so it refreshes with them.
+ * (`rows`, as the transactions list reads them), each with the ledger that holds it and the
+ * account's total after it. Under the transactions key, so it refreshes with them.
  */
 export function useAccountTransactions(
   accountId: MaybeRefOrGetter<number>,
@@ -495,7 +496,8 @@ export function useAccountTransactions(
     placeholderData: keepPreviousData,
     enabled: computed(() => toValue(opts.enabled) ?? true),
   })
-  return { ...q, rows: computed(() => q.data.value?.pages.flatMap((p) => p.items) ?? []) }
+  const rows = computed<ListRow[]>(() => (q.data.value?.pages.flatMap((p) => p.items) ?? []).map((row) => toListRow(row, toValue(accountId))))
+  return { ...q, rows, kept: computed(() => new Set<number>()) }
 }
 
 // Categories & tags -----------------------------------------------------------

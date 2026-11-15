@@ -1,4 +1,4 @@
-import { statementBalance, type Account, type MoveResult, type Transaction, type TransactionSplitShare } from '@chipmunk/shared'
+import { statementBalance, type Account, type AccountTransaction, type MoveResult, type Transaction, type TransactionListItem, type TransactionSplitShare } from '@chipmunk/shared'
 import { money } from './format'
 
 type LedgerRef = { slug: string; name: string }
@@ -161,4 +161,59 @@ export function foldGiven<T extends Pick<Transaction, 'id' | 'accountId' | 'date
     for (let i = from; i <= to; i++) shift.set(all[i]!.id, (shift.get(all[i]!.id) ?? 0) + by)
   }
   return { items: all.filter((t) => !paymentOf.has(t.id)), under, paymentOf, shift }
+}
+
+/**
+ * A row of a transactions list. `across`: it's a row of a shared account's All ledgers list, as that
+ * list has it, with the ledger that holds it and its category by name.
+ */
+export type ListRow = TransactionListItem & { across?: AccountTransaction }
+
+/**
+ * A row of a shared account's All ledgers list as a row the transactions list reads. That list sends
+ * less than a ledger's own: what it leaves out is empty here (no category id, tags or links), and a
+ * row this ledger holds is asked for in full when it's opened.
+ */
+export function toListRow(row: AccountTransaction, accountId: number): ListRow {
+  return {
+    id: row.id,
+    accountId,
+    date: row.date,
+    datetime: row.datetime,
+    amountMinor: row.amountMinor,
+    currency: row.currency,
+    payee: row.payee,
+    payeeKey: '',
+    payeeName: row.payeeName,
+    payeeNameRule: null,
+    name: row.name,
+    categoryId: null,
+    categorySource: null,
+    categoryConfidence: null,
+    needsReview: false,
+    notes: row.notes,
+    recurringItemId: null,
+    transferPairId: null,
+    transferMatched: false,
+    links: [],
+    bankCategory: null,
+    status: row.status,
+    origin: row.origin,
+    externalId: null,
+    correctedAt: null,
+    tags: [],
+    split: row.split && { part: 'payment', ...row.split },
+    createdAt: '',
+    updatedAt: '',
+    balanceAfterMinor: row.balanceAfterMinor,
+    across: row,
+  }
+}
+
+/** Another ledger's row in the All ledgers list: why it's read-only there. */
+export const heldElsewhere = (row: AccountTransaction) => `In ${row.ledger.name}. Move it here to edit it.`
+
+/** A split payment's shares in the All ledgers list: each ledger's, and what the ledger that holds it keeps. */
+export function sharesAcross(row: AccountTransaction) {
+  return row.split ? [...row.split.shares.map((s) => ({ name: s.ledger.name, minor: s.amountMinor })), { name: `${row.ledger.name} keeps`, minor: row.split.keptMinor }] : []
 }

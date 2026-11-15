@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, useTemplateRef, watch, type ComponentPublicInstance } from 'vue'
+import { computed, nextTick, ref, useTemplateRef, watch, type ComponentPublicInstance, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useElementSize, useIntersectionObserver } from '@vueuse/core'
 import { toast } from 'vue-sonner'
@@ -11,23 +11,28 @@ import {
   recurringLabel,
   statementBalance,
   TRANSACTION_COLUMNS,
+  type Account,
+  type AccountTransaction,
   type Transaction,
   type TransactionColumn,
-  type TransactionListItem as Item,
 } from '@chipmunk/shared'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import FilterOutOfReport from '@/components/FilterOutOfReport.vue'
+import LedgerMark from '@/components/ledger/LedgerMark.vue'
 import LinkBadge from '@/components/LinkBadge.vue'
 import MoneyText from '@/components/MoneyText.vue'
 import CategoryBadge from '@/components/CategoryBadge.vue'
 import PayeeChoicePopover from '@/components/PayeeChoicePopover.vue'
 import PaybackDialog from '@/components/PaybackDialog.vue'
+import AccountRowDetails from '@/components/sharing/AccountRowDetails.vue'
 import MoveToMenu from '@/components/sharing/MoveToMenu.vue'
 import TransactionList from '@/components/TransactionList.vue'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -43,16 +48,29 @@ import {
   useUpdateSettings,
   type useTransactions,
 } from '@/composables/queries'
+import { useIsDesktop } from '@/composables/useBreakpoint'
 import { useColumnOrder } from '@/composables/useColumnOrder'
 import { useColumnWidths } from '@/composables/useColumnWidths'
 import { jumpToTransaction } from '@/composables/useGoToTransaction'
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { shortDate } from '@/lib/format'
-import { currentLedger } from '@/lib/ledger'
+import { currentLedger, lapi } from '@/lib/ledger'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
-import { commonLedgers, foldGiven, MOVE_SPLIT, MOVE_SPLIT_SELECTED, sharedNote, sharesFor, SHARES_OVER, splitTitle } from '@/lib/sharing'
+import {
+  commonLedgers,
+  foldGiven,
+  heldElsewhere,
+  MOVE_SPLIT,
+  MOVE_SPLIT_SELECTED,
+  sharedNote,
+  sharesAcross,
+  sharesFor,
+  SHARES_OVER,
+  splitTitle,
+  type ListRow as Item,
+} from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 import { useUiStore } from '@/stores/ui'
 
@@ -60,11 +78,22 @@ import { useUiStore } from '@/stores/ui'
  * A list of transactions: a table with columns you can move and resize on larger screens, a list
  * grouped by day on phones, selection with bulk changes, and more loading as you scroll. The
  * Transactions page and each account's page share it, so they look and work the same.
+ *
+ * With `allLedgersOf` it's a shared account's All ledgers list, like the bank's statement: every
+ * ledger's rows, each with the ledger that holds it (the Ledger column) and the whole account's
+ * balance after it. A row this ledger holds opens in the editor. Another ledger's is read-only, and
+ * can be moved (here, to edit it). The rows a split adds aren't listed: a split payment shows its shares.
  */
 const props = defineProps<{
-  list: ReturnType<typeof useTransactions>
+  /** The rows, a page at a time: what useTransactions gives, or useAccountTransactions for All ledgers. */
+  list: Pick<ReturnType<typeof useTransactions>, 'kept' | 'hasNextPage' | 'isFetchingNextPage' | 'isFetching' | 'isSuccess' | 'isPending'> & {
+    rows: Readonly<Ref<Item[]>>
+    fetchNextPage: () => unknown
+  }
   /** Every row is the same account (its own page), so there's no Account column. */
   hideAccount?: boolean
+  /** The shared account whose rows in every ledger these are. */
+  allLedgersOf?: Account
   emptyTitle: string
   emptyDescription?: string
 }>()
@@ -76,6 +105,8 @@ const { byId: categories } = useCategories()
 const recurring = useRecurring()
 const itemLabels = computed(() => new Map((recurring.data.value ?? []).map((i) => [i.id, recurringLabel(i)])))
 const m = useTransactionMutations()
+/** One account's rows: its own page, or its All ledgers list. */
+const oneAccount = computed(() => props.hideAccount || !!props.allLedgersOf)
 
 const all = computed<Item[]>(() => props.list.rows.value)
 /**
@@ -109,12 +140,14 @@ const overdrawn = (tx: Item) => !accounts.value.get(tx.accountId)?.isLiability &
 /**
  * Desktop table columns: drag a header to move one, or its right edge to resize it. The rightmost
  * column fills the rest of the row. When the columns don't fit, Name, Account and then Notes step
- * out and show under the payee instead.
+ * out and show under the payee instead. Ledger is a column of the All ledgers list only: it keeps
+ * its place and width for there, and takes no room anywhere else.
  */
 const COLUMNS: Record<TransactionColumn, { label: string; width: number }> = {
   date: { label: 'Date', width: 112 },
   payee: { label: 'Payee', width: 240 },
   notes: { label: 'Notes', width: 200 },
+  ledger: { label: 'Ledger', width: 160 },
   category: { label: 'Category', width: 192 },
   account: { label: 'Account', width: 160 },
   amount: { label: 'Amount', width: 128 },
@@ -144,7 +177,9 @@ const widths = useColumnWidths(
 )
 const { width: tableWidth } = useElementSize(tableCard)
 const visibleColumns = computed<TransactionColumn[]>(() => {
-  let cols: TransactionColumn[] = columns.order.value.filter((c) => (c !== 'balance' || hasBalances.value) && (c !== 'account' || !props.hideAccount))
+  let cols: TransactionColumn[] = columns.order.value.filter(
+    (c) => (c !== 'balance' || hasBalances.value) && (c !== 'account' || !oneAccount.value) && (c !== 'ledger' || !!props.allLedgersOf),
+  )
   for (const optional of OPTIONAL_COLUMNS) {
     if (FIXED_WIDTH + cols.reduce((n, c) => n + widths.width(c), 0) <= tableWidth.value) break
     cols = cols.filter((c) => c !== optional)
@@ -220,7 +255,7 @@ const days = computed(() => {
     }
     // A given row under its payment still counts in the day's total.
     if (listed.has(t.id)) g.items.push(t)
-    if (!t.transferPairId || props.hideAccount) g.total += t.amountMinor
+    if (!t.transferPairId || oneAccount.value) g.total += t.amountMinor
   }
   return groups
 })
@@ -344,6 +379,8 @@ const moveRefused = computed(() => {
   const several = new Set(of.map((a) => a!.id)).size > 1
   return several && !moveLedgers.value.some((l) => l.slug !== currentLedger.value) ? 'Their accounts aren’t shared with the same ledger, so they can’t move together.' : null
 })
+/** In the All ledgers list, the ledgers that hold the selected rows: a move takes rows out of one ledger. */
+const holders = computed(() => [...new Set(selectedItems.value.map((t) => t.across?.ledger.slug))])
 /** A split payment, and the rows of its split, stay where they are until the split is undone. */
 const moveBlocked = computed(() => (selectedItems.value.some((t) => t.split) ? (selectedItems.value.length === 1 ? MOVE_SPLIT : MOVE_SPLIT_SELECTED) : null))
 const payback = ref<{ tx: Transaction; together: Transaction[]; preselect: Transaction[] } | null>(null)
@@ -362,6 +399,23 @@ function markPayback() {
   } else if (outs.length === 1) payback.value = { tx: outs[0]!, together: [], preselect: [] }
   else return void toast.error('Also select the money in that pays them back.')
   paybackOpen.value = true
+}
+
+// The All ledgers list: its rows say less than a ledger's own, and another ledger's is only looked at.
+const isDesktop = useIsDesktop()
+const ledgerOf = (slug: string) => ledgers.all.value.find((l) => l.slug === slug)
+const elsewhere = (tx: Item) => !!tx.across && !tx.across.here
+/** Another ledger's row, opened to look at. */
+const viewing = ref<AccountTransaction | null>(null)
+const viewOpen = computed({ get: () => !!viewing.value, set: (v) => !v && (viewing.value = null) })
+async function open(tx: Transaction & Pick<Item, 'across'>) {
+  if (!tx.across) return ui.openEdit(tx)
+  if (!tx.across.here) return void (viewing.value = tx.across)
+  try {
+    ui.openEdit(await lapi.get<Transaction>(`/transactions/${tx.id}`))
+  } catch (err) {
+    toast.error(errorMessage(err))
+  }
 }
 
 async function setCategory(tx: Transaction, id: number | null) {
@@ -389,36 +443,53 @@ async function accept(tx: Transaction) {
     <!-- Bulk bar -->
     <div v-if="selected.size" class="sticky top-16 z-10 hidden flex-wrap items-center gap-2 rounded-lg border bg-background p-2 shadow-sm md:flex">
       <span class="px-2 text-sm font-medium">{{ selected.size }} selected</span>
-      <CategoryPicker v-model="bulkCategory" size="sm" class="w-48" placeholder="Set category…" />
-      <Button size="sm" variant="outline" :disabled="m.bulk.isPending.value" @click="bulk('category')">Apply</Button>
-      <Popover>
-        <PopoverTrigger as-child><Button size="sm" variant="outline"><Tag />Add tag</Button></PopoverTrigger>
-        <PopoverContent class="w-56" align="start">
-          <form class="flex gap-2" @submit.prevent="bulkTag && bulk('tag')">
-            <Input v-model="bulkTag" placeholder="trip-japan" aria-label="Tag name" />
-            <Button size="sm" type="submit">Add</Button>
-          </form>
-        </PopoverContent>
-      </Popover>
-      <Button size="sm" variant="outline" @click="bulk('accept')"><Check />Accept suggestions</Button>
-      <Button
-        v-if="aiEnabled"
-        size="sm"
-        variant="outline"
-        :disabled="aiRunning || m.askAiAgain.isPending.value"
-        title="AI picks each one’s category again. A different pick is marked to review."
-        @click="askAiAgain"
-      >
-        <Sparkles class="text-ai" />Ask AI again
-      </Button>
-      <Button size="sm" variant="outline" @click="markPayback"><HandCoins />Mark as payback</Button>
-      <FilterOutOfReport :transactions="items.filter((t) => selected.has(t.id))" variant="button" @done="selected = new Set()" />
-      <!-- On a shared account: to another ledger that has it. -->
-      <span v-if="moveRefused" class="text-sm text-muted-foreground">{{ moveRefused }}</span>
-      <MoveToMenu v-else v-slot="{ busy }" :ids="[...selected]" :ledgers="moveLedgers" :blocked="moveBlocked" @moved="selected = new Set()">
-        <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
-      </MoveToMenu>
-      <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" @click="bulk('delete')"><Trash2 />Delete</Button>
+      <!-- All ledgers: rows move out of the one ledger that holds them. -->
+      <template v-if="allLedgersOf">
+        <MoveToMenu
+          v-if="holders.length === 1"
+          v-slot="{ busy }"
+          :ids="[...selected]"
+          :ledgers="allLedgersOf.sharing?.ledgers ?? []"
+          :from="holders[0]"
+          :blocked="moveBlocked"
+          @moved="selected = new Set()"
+        >
+          <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
+        </MoveToMenu>
+        <span v-else class="text-sm text-muted-foreground">Select rows from one ledger to move them.</span>
+      </template>
+      <template v-else>
+        <CategoryPicker v-model="bulkCategory" size="sm" class="w-48" placeholder="Set category…" />
+        <Button size="sm" variant="outline" :disabled="m.bulk.isPending.value" @click="bulk('category')">Apply</Button>
+        <Popover>
+          <PopoverTrigger as-child><Button size="sm" variant="outline"><Tag />Add tag</Button></PopoverTrigger>
+          <PopoverContent class="w-56" align="start">
+            <form class="flex gap-2" @submit.prevent="bulkTag && bulk('tag')">
+              <Input v-model="bulkTag" placeholder="trip-japan" aria-label="Tag name" />
+              <Button size="sm" type="submit">Add</Button>
+            </form>
+          </PopoverContent>
+        </Popover>
+        <Button size="sm" variant="outline" @click="bulk('accept')"><Check />Accept suggestions</Button>
+        <Button
+          v-if="aiEnabled"
+          size="sm"
+          variant="outline"
+          :disabled="aiRunning || m.askAiAgain.isPending.value"
+          title="AI picks each one’s category again. A different pick is marked to review."
+          @click="askAiAgain"
+        >
+          <Sparkles class="text-ai" />Ask AI again
+        </Button>
+        <Button size="sm" variant="outline" @click="markPayback"><HandCoins />Mark as payback</Button>
+        <FilterOutOfReport :transactions="items.filter((t) => selected.has(t.id))" variant="button" @done="selected = new Set()" />
+        <!-- On a shared account: to another ledger that has it. -->
+        <span v-if="moveRefused" class="text-sm text-muted-foreground">{{ moveRefused }}</span>
+        <MoveToMenu v-else v-slot="{ busy }" :ids="[...selected]" :ledgers="moveLedgers" :blocked="moveBlocked" @moved="selected = new Set()">
+          <Button size="sm" variant="outline" :disabled="busy"><ArrowRightFromLine />Move to…</Button>
+        </MoveToMenu>
+        <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" @click="bulk('delete')"><Trash2 />Delete</Button>
+      </template>
       <Button size="sm" variant="ghost" class="ml-auto" @click="selected = new Set()">Cancel</Button>
     </div>
 
@@ -468,10 +539,16 @@ async function accept(tx: Transaction) {
             v-for="tx in items"
             :key="tx.id"
             :data-tx-id="tx.id"
-            :class="cn('cursor-pointer scroll-mt-32 scroll-mb-4', kept.has(tx.id) && 'opacity-60', ui.editorOpen && ui.editing?.id === tx.id && 'bg-muted shadow-[inset_3px_0_0_var(--primary)]')"
-            :title="kept.has(tx.id) ? KEPT_TITLE : undefined"
+            :class="
+              cn(
+                'cursor-pointer scroll-mt-32 scroll-mb-4',
+                kept.has(tx.id) && 'opacity-60',
+                ui.editorOpen && ui.editing?.id === tx.id && !elsewhere(tx) && 'bg-muted shadow-[inset_3px_0_0_var(--primary)]',
+              )
+            "
+            :title="elsewhere(tx) ? heldElsewhere(tx.across!) : kept.has(tx.id) ? KEPT_TITLE : undefined"
             :data-state="selected.has(tx.id) ? 'selected' : undefined"
-            @click="ui.openEdit(tx)"
+            @click="open(tx)"
           >
             <TableCell class="pl-4" @click.stop @click.capture="noteShift" @mousedown="keepTextUnselected">
               <Checkbox :model-value="selected.has(tx.id)" :aria-label="`Select ${titleOf(tx)}`" @update:model-value="(v) => toggle(tx.id, !!v)" />
@@ -483,22 +560,28 @@ async function accept(tx: Transaction) {
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span :class="cn('truncate font-medium', tx.split?.part === 'given' && 'text-muted-foreground')">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
                   <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split</span>
+                  <span v-if="tx.across && tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
                 </div>
+                <!-- All ledgers: a split payment's shares, each ledger's. -->
+                <div v-if="tx.across?.split" class="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                  <span v-for="s in sharesAcross(tx.across)" :key="s.name" class="whitespace-nowrap">{{ s.name }} <MoneyText :amount="s.minor" :colored="false" /></span>
+                  <span v-if="tx.across.split.keptMinor < 0" class="text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
+                </div>
                 <!-- A split payment: what it gave the other ledgers, under it. The amount only when its given row is folded here, so the totals have it. -->
-                <div v-if="tx.split?.part === 'payment'" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <div v-else-if="tx.split?.part === 'payment'" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                   <span class="truncate">{{ sharesFor(tx.split.shares).text }}</span>
                   <MoneyText v-if="folded.under.has(tx.id)" :amount="-sharesFor(tx.split.shares).minor" :colored="false" />
                   <span v-if="tx.split.keptMinor < 0" class="shrink-0 text-amber-700 dark:text-amber-400">{{ SHARES_OVER }}</span>
                 </div>
                 <!-- Under it: its payee as sent, when it shows as something else. Without an Account or Notes column (a narrow table), those too. -->
                 <div
-                  v-if="tx.tags.length || sentPayeeUnder(tx) || (!hideAccount && !shows('account')) || (tx.notes && !shows('notes'))"
+                  v-if="tx.tags.length || sentPayeeUnder(tx) || (!oneAccount && !shows('account')) || (tx.notes && !shows('notes'))"
                   class="mt-0.5 flex min-w-0 items-center gap-1.5"
                 >
                   <span v-if="sentPayeeUnder(tx)" class="min-w-0 shrink truncate text-xs text-muted-foreground" :title="sentPayeeUnder(tx)!">{{ sentPayeeUnder(tx) }}</span>
-                  <span v-if="!hideAccount && !shows('account')" class="shrink-0 text-xs text-muted-foreground">{{ accounts.get(tx.accountId)?.name }}</span>
+                  <span v-if="!oneAccount && !shows('account')" class="shrink-0 text-xs text-muted-foreground">{{ accounts.get(tx.accountId)?.name }}</span>
                   <span v-for="t in tx.tags" :key="t.id" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">#{{ t.name }}</span>
                   <span v-if="tx.notes && !shows('notes')" class="truncate text-xs text-foreground/80" :title="tx.notes">{{ tx.notes }}</span>
                 </div>
@@ -506,6 +589,14 @@ async function accept(tx: Transaction) {
               <TableCell v-else-if="col === 'notes'" :style="columns.cellStyle(col)" class="max-w-0 truncate text-sm text-muted-foreground" :title="tx.notes ?? undefined">
                 {{ tx.notes }}
               </TableCell>
+              <TableCell v-else-if="col === 'ledger'" :style="columns.cellStyle(col)" class="max-w-0">
+                <span v-if="tx.across" :class="cn('flex min-w-0 items-center gap-1.5', !tx.across.here && 'text-muted-foreground')">
+                  <LedgerMark :ledger="ledgerOf(tx.across.ledger.slug)" size="sm" />
+                  <span class="truncate">{{ tx.across.ledger.name }}</span>
+                </span>
+              </TableCell>
+              <!-- All ledgers: its category in the ledger that holds it, by name. It's changed in the editor. -->
+              <TableCell v-else-if="col === 'category' && tx.across" :style="columns.cellStyle(col)" class="max-w-0 truncate text-muted-foreground">{{ tx.across.category }}</TableCell>
               <TableCell v-else-if="col === 'category'" :style="columns.cellStyle(col)" class="max-w-0" @click.stop>
                 <span v-if="tx.transferPairId" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                   <ArrowLeftRight class="size-3.5" />{{ categories.get(tx.categoryId ?? -1)?.name ?? 'Transfer' }}
@@ -561,10 +652,10 @@ async function accept(tx: Transaction) {
             :items="day.items"
             :faded="kept"
             :show-date="false"
-            :show-account="!hideAccount"
+            :show-account="!oneAccount"
             :balance-of="balanceOf"
             :under="foldedUnder"
-            @open="ui.openEdit"
+            @open="open"
             @accept="accept"
           />
         </section>
@@ -579,6 +670,32 @@ async function accept(tx: Transaction) {
       <Button v-else-if="list.hasNextPage.value" variant="ghost" size="sm" @click="list.fetchNextPage()">Load more</Button>
     </div>
     <PaybackDialog v-if="payback" v-model:open="paybackOpen" :tx="payback.tx" :together="payback.together" :preselect="payback.preselect" @linked="selected = new Set()" />
+
+    <!-- All ledgers, another ledger's row: a dialog on a computer, a sheet from the bottom on a phone. -->
+    <template v-if="allLedgersOf">
+      <Dialog v-if="isDesktop" v-model:open="viewOpen">
+        <DialogContent v-if="viewing" class="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{{ viewing.name ?? viewing.payeeName }}</DialogTitle>
+            <DialogDescription>{{ heldElsewhere(viewing) }}</DialogDescription>
+          </DialogHeader>
+          <AccountRowDetails :account="allLedgersOf" :row="viewing" @moved="viewing = null" />
+        </DialogContent>
+      </Dialog>
+      <Drawer v-else v-model:open="viewOpen">
+        <DrawerContent class="max-h-[92svh]">
+          <template v-if="viewing">
+            <DrawerHeader class="pb-3 text-left">
+              <DrawerTitle>{{ viewing.name ?? viewing.payeeName }}</DrawerTitle>
+              <DrawerDescription>{{ heldElsewhere(viewing) }}</DrawerDescription>
+            </DrawerHeader>
+            <div class="overflow-y-auto px-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+              <AccountRowDetails :account="allLedgersOf" :row="viewing" @moved="viewing = null" />
+            </div>
+          </template>
+        </DrawerContent>
+      </Drawer>
+    </template>
   </div>
 </template>
 

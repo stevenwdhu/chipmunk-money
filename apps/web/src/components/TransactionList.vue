@@ -1,8 +1,8 @@
-<script setup lang="ts" generic="T extends Transaction">
+<script setup lang="ts" generic="T extends Transaction & Pick<ListRow, 'across'>">
 import { computed } from 'vue'
 import type { Transaction } from '@chipmunk/shared'
 import TransactionListItem from '@/components/TransactionListItem.vue'
-import { foldGiven } from '@/lib/sharing'
+import { foldGiven, type ListRow } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
@@ -10,7 +10,8 @@ import { cn } from '@/lib/utils'
  * list has Date · Payee · Category · Account · Amount, each as wide as its longest entry, with the
  * payee taking the rest (and the first to be cut short). In a narrow one, each row shows the
  * category under the payee, then date and account. What a split payment gave the other ledgers shows
- * under the payment when both are listed, not as a row of its own.
+ * under the payment when both are listed, not as a row of its own. A row of a shared account's All
+ * ledgers list says the ledger that holds it where the category would be.
  */
 const props = withDefaults(
   defineProps<{

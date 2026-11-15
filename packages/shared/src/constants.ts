@@ -45,7 +45,8 @@ export const PAYEE_NAME_MATCHES = ['is', 'starts', 'contains'] as const
 
 /** Columns of the transactions table, in their default order. */
 /** `balance` (the running balance) shows only for one account's transactions, with no other filter. */
-export const TRANSACTION_COLUMNS = ['date', 'payee', 'notes', 'category', 'account', 'amount', 'balance'] as const
+/** `ledger` (the ledger that holds each one) shows only in a shared account's All ledgers list. */
+export const TRANSACTION_COLUMNS = ['date', 'payee', 'notes', 'ledger', 'category', 'account', 'amount', 'balance'] as const
 export type TransactionColumn = (typeof TRANSACTION_COLUMNS)[number]
 
 /** Limits for a column width you set by dragging (px). */
