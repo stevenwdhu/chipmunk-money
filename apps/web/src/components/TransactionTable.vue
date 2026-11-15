@@ -8,6 +8,7 @@ import {
   COLUMN_WIDTH_RANGE,
   formatDateLong,
   formatMoney,
+  normalizeColumns,
   recurringLabel,
   statementBalance,
   TRANSACTION_COLUMNS,
@@ -186,9 +187,12 @@ const visibleColumns = computed<TransactionColumn[]>(() => {
   }
   return cols
 })
+// A newer server can list a column this page doesn't have yet (the page updates only when you
+// accept the reload), so the saved order keeps only the ones it can draw.
+const savedOrder = computed(() => settings.data.value && normalizeColumns(settings.data.value.transactionColumns))
 const columns = useColumnOrder(TRANSACTION_COLUMNS, {
   table: tableCard,
-  saved: () => settings.data.value?.transactionColumns,
+  saved: savedOrder,
   save: (next) => saveSetting({ transactionColumns: next }, 'column order'),
   visible: visibleColumns,
 })

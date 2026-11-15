@@ -7,7 +7,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 ### Changed
 
 - Notes is an ordinary field in the transaction form, always there, in place of the "Add a note" link.
-- The All ledgers list on a shared account's page is the same table as every other list, so its columns can be moved and resized like the rest. The Ledger column is one of them, and shows only there.
+- The All ledgers list on a shared account's page is the same table as every other list, so its columns can be moved and resized like the rest. The Ledger column is one of them, and shows only there. After upgrading, accept the reload on any page left open: until then its transactions table doesn't show on a computer.
 
 ### Fixed
 
