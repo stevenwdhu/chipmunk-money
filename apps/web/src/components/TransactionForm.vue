@@ -174,7 +174,6 @@ const date = ref('')
 const time = ref('')
 const tags = ref<string[]>([])
 const notes = ref('')
-const showNotes = ref(false)
 const showBankData = ref(false)
 const errors = ref<Record<string, string>>({})
 
@@ -205,7 +204,6 @@ function reset(keep = false) {
     time.value = tx.datetime?.slice(11, 16) ?? ''
     tags.value = tx.tags.map((t) => t.name)
     notes.value = tx.notes ?? ''
-    showNotes.value = !!tx.notes
     categoryTouched.value = !tx.needsReview
     suggestion.value = tx.needsReview && tx.categoryId
       ? { categoryId: tx.categoryId, source: tx.categorySource === 'ai' ? 'ai' : 'history', confidence: tx.categoryConfidence ?? 0, reason: '' }
@@ -225,7 +223,6 @@ function reset(keep = false) {
     categoryId.value = d.categoryId ?? null
     tags.value = []
     notes.value = ''
-    showNotes.value = false
     categoryTouched.value = d.categoryId !== undefined && d.categoryId !== null
     suggestion.value = null
   }
@@ -610,7 +607,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
         <FieldLabel
           html-for="tx-time"
           optional
-          hint="When it happened, if you know: a day’s transactions are listed in time order. Without a time, money in counts as first thing that day and money out as last."
+          hint="When it happened, if you know: a day’s transactions are listed in time order. Without a time, money in counts as first thing that day and money out as last, the other way round on a credit card."
           >Time</FieldLabel
         >
         <Input id="tx-time" v-model="time" type="time" :disabled="!!split" />
@@ -622,13 +619,10 @@ const kinds: Array<{ value: Kind; label: string }> = [
       <TagInput id="tx-tags" v-model="tags" placeholder="e.g. trip-japan, reimbursable" />
     </div>
 
-    <div v-if="showNotes" class="grid gap-1.5">
+    <div class="grid gap-1.5">
       <Label for="tx-notes">Notes</Label>
       <Textarea id="tx-notes" v-model="notes" rows="2" placeholder="Anything to remember" />
     </div>
-    <button v-else type="button" class="self-start text-sm text-muted-foreground underline-offset-4 hover:underline" @click="showNotes = true">
-      Add a note
-    </button>
     <RefundPicker v-if="canBeRefund && kind === 'income'" :tx="editing!" @linked="linkedRefund" />
     <button
       v-if="(canBeRefund && kind === 'income') || (canBePaidBack && kind === 'expense')"

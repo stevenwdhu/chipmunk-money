@@ -2,6 +2,16 @@
 
 What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
 
+## Unreleased
+
+### Changed
+
+- Notes is an ordinary field in the transaction form, always there, in place of the "Add a note" link.
+
+### Fixed
+
+- The icon on an iPhone or iPad home screen shows the whole C and acorn once, in place of the top half twice. To see it, remove Chipmunk from the home screen and add it again: iOS keeps the icon it saved.
+
 ## v0.3.1 (2026-11-14)
 
 ### Added
