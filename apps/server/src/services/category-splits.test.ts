@@ -4,6 +4,7 @@ import { createApp } from '../app'
 import { fakeBridge, fakeTx, TOKEN, type FakeCard } from '../test/fake-bridge'
 import { categoryId, makeAccount, testContext, testLedger, testStorage } from '../test/helpers'
 import { expectNoCrossLedgerReferences, sharedWorld, TESTER } from '../test/shared-accounts'
+import { applySwitch } from './bank/switching'
 import { deleteCatalogCategory, mergeCatalogCategory } from './catalog-edit'
 import { joinSharedList, leaveSharedList } from './catalog'
 import { deleteCategory, deleteGroup, mergeCategory, setCategoryEnabled } from './categories'
@@ -568,6 +569,46 @@ describe('splitting a transaction into categories', () => {
     expect(getTransaction(ctx, walmart).categoryId).toBe(groceries)
   })
 
+  it('gives a payee its count back when a category merged, or a switch to another service, undoes a split', () => {
+    const ctx = testContext()
+    const account = makeAccount(ctx, 'Chequing')
+    leaveSharedList(ctx)
+    const [groceries, dineOut] = [categoryId(ctx, 'Groceries'), categoryId(ctx, 'Dine out')]
+    const count = (payee: string) =>
+      ctx.q.pluck<number>('SELECT count FROM payee_category_stats WHERE ledger_id = @ledger AND payee_key = ? AND category_id = ?', payee, groceries) ?? 0
+    const twice = (payee: string) =>
+      [1, 2].map(() => {
+        const id = add(ctx, account, '2026-09-10', -10_000, payee)
+        updateTransaction(ctx, id, { categoryId: groceries })
+        return id
+      })
+    const split = (id: number) =>
+      setParts(ctx, id, [
+        { categoryId: groceries, amountMinor: -6_000 },
+        { categoryId: dineOut, amountMinor: -4_000 },
+      ])
+    // Two Metro charges in Groceries by hand, one split: the other service has it at $5, which undoes the split.
+    const [metro] = twice('Metro')
+    split(metro!)
+    expect(count('metro')).toBe(1)
+    applySwitch(ctx, () => ctx, account, 'plaid', [{ remoteId: 'm1', date: '2026-09-10', amountMinor: -500, payee: 'Metro', description: 'Metro', pending: false }], {
+      bankAccountId: 'other',
+      from: '2026-09-01',
+      version: 'v',
+      pairs: [{ transactionId: metro!, remoteId: 'm1', keepAmount: false }],
+      skip: [],
+      remove: [],
+    })
+    expect([getTransaction(ctx, metro!).amountMinor, parts(ctx, metro!), categoryOf(ctx, metro!), count('metro')]).toEqual([-500, null, ['Groceries', 'user', false], 2])
+
+    // Two Loblaws charges, one split: Dine out merged into Groceries leaves it one part, so it's Groceries as yours again.
+    const [loblaws] = twice('Loblaws')
+    split(loblaws!)
+    expect(count('loblaws')).toBe(1)
+    mergeCategory(ctx, dineOut, groceries)
+    expect([parts(ctx, loblaws!), categoryOf(ctx, loblaws!), count('loblaws')]).toEqual([null, ['Groceries', 'user', false], 2])
+  })
+
   it('goes with a deleted transaction and comes back with it', () => {
     const { ctx, id, three } = costco()
     three()
@@ -795,5 +836,35 @@ describe('splitting into categories over HTTP', () => {
     expect(categoryOf(w.personal, id)).toEqual(['Groceries', 'user', false])
     // The sync's own categorizing left it alone throughout.
     expect(spent(w.personal)).toEqual({ Groceries: 1_000 })
+  })
+
+  it('gives a payee its count back when the bank’s amount undoes a split, and carries it to the payee’s new wording', async () => {
+    const card: FakeCard = {
+      balance: '-200.00',
+      transactions: [fakeTx('b1', '2026-09-28', '-100.00', 'Loblaws', { pending: true }), fakeTx('b2', '2026-09-27', '-100.00', 'Loblaws')],
+    }
+    const w = setup(card)
+    const visa = makeAccount(w.personal, 'Visa', 'credit')
+    const conn = await w.call('POST', '/bank/connections', { setupToken: TOKEN })
+    const bankAccountId = (conn.body.accounts as Json[]).find((a) => a.remoteId === 'visa').id as string
+    expect((await w.call('PUT', `/ledgers/personal/accounts/${visa}/bank`, { bankAccountId })).status).toBe(200)
+    const sync = async () => expect((await w.call('POST', `/bank/connections/${conn.body.id}/sync`)).body).toMatchObject({ ok: true })
+    await sync()
+    const groceries = categoryId(w.personal, 'Groceries')
+    const count = (payee: string) =>
+      w.personal.q.pluck<number>('SELECT count FROM payee_category_stats WHERE ledger_id = @ledger AND payee_key = ? AND category_id = ?', payee, groceries) ?? 0
+    const [first, second] = ['b1', 'b2'].map((b) => w.personal.q.pluck<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND external_id = ?', b)!)
+    for (const id of [first!, second!]) updateTransaction(w.personal, id, { categoryId: groceries })
+    setParts(w.personal, first!, [
+      { categoryId: groceries, amountMinor: -6_000 },
+      { categoryId: categoryId(w.personal, 'Dine out'), amountMinor: -4_000 },
+    ])
+    expect(count('loblaws')).toBe(1)
+    // It posts at $5, worded another way: the split is undone, and its count goes to the new wording.
+    card.transactions = [fakeTx('b1', '2026-09-28', '-5.00', 'Fortinos'), card.transactions[1]!]
+    await sync()
+    expect(getTransaction(w.personal, first!)).toMatchObject({ amountMinor: -500, payee: 'Fortinos', parts: null })
+    expect(categoryOf(w.personal, first!)).toEqual(['Groceries', 'user', false])
+    expect([count('loblaws'), count('fortinos')]).toEqual([1, 1])
   })
 })

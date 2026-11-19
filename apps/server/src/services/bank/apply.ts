@@ -4,6 +4,7 @@ import type { BankRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
 import type { ActivityActor } from '../activity'
 import { paidOff, recalculateRecurring } from '../recurring'
+import { isSplitIntoCategories, learnOwn } from '../category-splits'
 import { followBankPayee } from '../payee-names'
 import { payeeKeyOf } from '../payee-namer'
 import { followPayment, splitLedgers, undoSplit } from '../splits'
@@ -189,7 +190,10 @@ export function applyRemoteTransactions(
   const write = (row: LocalRow, r: RemoteTransaction) => {
     const at = holder(row)
     const values = { id: row.id, date: r.date, datetime: r.datetime ?? null, amount: r.amountMinor, status: r.pending ? 'pending' : 'cleared', externalId: r.remoteId, ...bank(r) }
+    const wasSplit = isSplitIntoCategories(at, row.id)
     one(at.q.run(updateFromBank, values), 'update', row.id)
+    // An amount that undid its split into categories: the category it keeps is yours, and its payee learns it again.
+    if (wasSplit && !isSplitIntoCategories(at, row.id)) learnOwn(at, row.id, 1)
     followBankPayee(at, row, r.payee)
     if (row.splitPayment) following.set(row.id, row)
   }

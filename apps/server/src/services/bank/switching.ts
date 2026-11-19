@@ -5,6 +5,7 @@ import type { z } from 'zod'
 import { badRequest } from '../../lib/http'
 import { historySuggestion } from '../categorize'
 import type { SwitchRow } from '../account-rows'
+import { isSplitIntoCategories, learnOwn } from '../category-splits'
 import type { AppContext, CtxOf } from '../context'
 import { deleteTransaction, insertTransaction } from '../transactions'
 import { followBankPayee } from '../payee-names'
@@ -232,6 +233,7 @@ export function applySwitch(
         result.matched++
         continue
       }
+      const wasSplit = isSplitIntoCategories(at, l.id)
       const changed = at.q.run(updateFromBank, {
         id: l.id,
         externalId: r.remoteId,
@@ -245,6 +247,8 @@ export function applySwitch(
         now,
       })
       one(changed, 'update', l.id)
+      // An amount that undid its split into categories: the category it keeps is yours, and its payee learns it again.
+      if (wasSplit && !isSplitIntoCategories(at, l.id)) learnOwn(at, l.id, 1)
       // Its payee is the new service's now.
       followBankPayee(at, l, r.payee)
       // A split payment's split rows follow it.

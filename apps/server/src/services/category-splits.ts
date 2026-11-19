@@ -176,7 +176,11 @@ function ledgerParts(ctx: AppContext, ids?: number[]): Map<number, Array<Transac
  */
 export function settleParts(ctx: AppContext) {
   ctx.q.transaction(() => {
-    for (const [id, parts] of ledgerParts(ctx)) savePartsOf(ctx, id, parts)
+    for (const [id, parts] of ledgerParts(ctx)) {
+      savePartsOf(ctx, id, parts)
+      // Undone with one part left: that category is yours, and its payee learns it again.
+      if (!isSplitIntoCategories(ctx, id)) learnOwn(ctx, id, 1)
+    }
   })
 }
 
