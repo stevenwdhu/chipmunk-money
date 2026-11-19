@@ -95,6 +95,48 @@ describe('pending transactions on top', () => {
     }
   })
 
+  it('keeps the running balance right under pending ones when a range of dates leaves rows out between them', async () => {
+    const { ctx, acc } = await register()
+    // Oct 2 to Oct 4 leaves out Echo (pending, counted above Bravo) and Delta, posted on Oct 5 and listed between Bravo and Foxtrot.
+    const expected = [
+      ['Bravo', 101_650],
+      ['Foxtrot', 103_950],
+      ['Charlie', 104_000],
+    ]
+    for (const limit of [1, 2, 50]) {
+      const { all } = paged((cursor) => listTransactions(ctx, transactionQuerySchema.parse({ accountId: acc, from: '2026-10-02', to: '2026-10-04', limit, cursor })))
+      expect(all.map((t) => [t.payee, t.balanceAfterMinor]), `${limit} at a time`).toEqual(expected)
+    }
+    // Oct 3 to Oct 6 leaves out Bravo, a pending one older than the range, between Echo and Delta.
+    const later = listTransactions(ctx, transactionQuerySchema.parse({ accountId: acc, from: '2026-10-03', to: '2026-10-06', limit: 50 }))
+    expect(later.items.map((t) => [t.payee, t.balanceAfterMinor])).toEqual([
+      ['Echo', 100_950],
+      ['Delta', 103_650],
+      ['Foxtrot', 103_950],
+      ['Charlie', 104_000],
+    ])
+  })
+
+  it('keeps a shared account’s running balance right under pending ones when a range of dates leaves rows out', () => {
+    const w = sharedWorld({ now: NOW })
+    const pending = (ctx: AppContext, id: number) => ctx.q.run("UPDATE transactions SET status = 'pending' WHERE ledger_id = @ledger AND id = ?", id)
+    w.addTx(w.personal, '2026-09-28', -1000, { payee: 'Alpha' })
+    pending(w.personal, w.addTx(w.personal, '2026-09-30', -400, { payee: 'Bravo' }))
+    w.addTx(w.family, '2026-09-29', -2000, { payee: 'Charlie' })
+    pending(w.family, w.addTx(w.family, '2026-09-27', -600, { payee: 'Delta' }))
+    w.addTx(w.family, '2026-10-02', -50, { payee: 'Echo' })
+    // $40.50 owed in all. Sep 28 to Sep 30 leaves out Delta (pending, older) and Echo (posted, newer), both between Bravo and Charlie.
+    const expected = [
+      ['Bravo', -4050],
+      ['Charlie', -3000],
+      ['Alpha', -1000],
+    ]
+    for (const limit of [1, 2, 50]) {
+      const { all } = paged((cursor) => listAccountTransactions(w.personal, w.visa, { from: '2026-09-28', to: '2026-09-30', limit, cursor }, null))
+      expect(all.map((t) => [t.payee, t.balanceAfterMinor]), `${limit} at a time`).toEqual(expected)
+    }
+  })
+
   it('lists and pages a ledger without pending ones as before, with the cursors it had', async () => {
     const ctx = testContext({ now: NOW })
     const acc = makeAccount(ctx, 'Chequing', 'chequing', 100_000)

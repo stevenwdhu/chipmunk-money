@@ -1037,6 +1037,27 @@ describe('a payment added to an item by its recurringItemId', () => {
     expect(updateRecurring(ctx, other.id, { name: 'Phone' }).occurrences).toBe(1)
     expect(paid.map((t) => getTransaction(ctx, t.id).recurringItemId)).toEqual([item.id, null, other.id])
   })
+
+  it('gives back a payment from before your history when the one added for it is taken off or moved', async () => {
+    for (const how of ['taken off', 'moved'] as const) {
+      const ctx = testContext({ now: '2026-11-10T18:00:00Z' })
+      const acc = makeAccount(ctx, 'Visa', 'credit')
+      for (const d of ['2026-08-15', '2026-09-15', '2026-10-15']) await pay(ctx, acc, 'AFFIRM', -10_000, d)
+      const plan = createRecurring(
+        ctx,
+        recurringCreateSchema.parse({ payee: 'AFFIRM', expectedAmountMinor: -10_000, cadence: 'monthly', anchorDate: '2026-08-15', totalPayments: 8, accountId: acc }),
+      )
+      // 3 here and 2 from before your history: 5 of 8.
+      expect(updateRecurring(ctx, plan.id, { paidPayments: 5 })).toMatchObject({ paidPayments: 5, remainingPayments: 3 })
+      const other = createRecurring(ctx, recurringCreateSchema.parse({ payee: 'BELL', expectedAmountMinor: -9000, cadence: 'monthly', anchorDate: '2026-08-05', accountId: acc }))
+      // An earlier one is one of the 2 from before: still 5.
+      const early = await pay(ctx, acc, 'AFFIRM', -10_000, '2026-07-15')
+      updateTransaction(ctx, early.id, { recurringItemId: plan.id })
+      expect(getRecurring(ctx, plan.id)).toMatchObject({ paidPayments: 5, remainingPayments: 3 })
+      updateTransaction(ctx, early.id, { recurringItemId: how === 'moved' ? other.id : null })
+      expect(getRecurring(ctx, plan.id), how).toMatchObject({ paidPayments: 5, remainingPayments: 3 })
+    }
+  })
 })
 
 describe('recurring items in two ledgers', () => {

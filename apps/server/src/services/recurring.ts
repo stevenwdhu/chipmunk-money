@@ -682,7 +682,7 @@ export function itemsOf(ctx: AppContext, payeeKey: string, status: 'active' | 'e
  * Added payments taken off (or deleted) that were among a plan's payments from before your history:
  * they count as paid before again.
  */
-function giveBackPaidBefore(ctx: AppContext, itemId: number, txIds: number[]) {
+export function giveBackPaidBefore(ctx: AppContext, itemId: number, txIds: number[]) {
   const n = ctx.q.pluck<number>(
     `SELECT count(*) FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')} AND one_off = ${FROM_BEFORE} AND transaction_id IN (SELECT value FROM json_each(@txs))`,
     { item: itemId, txs: JSON.stringify(txIds) },

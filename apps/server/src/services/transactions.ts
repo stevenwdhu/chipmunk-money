@@ -35,7 +35,7 @@ import type { AppContext } from './context'
 import { payeeKeyOf, payeeNamerFor } from './payee-namer'
 import { linksFor } from './links'
 import { isPersonTransfer, releaseLinks } from './matching'
-import { addPayment, cadenceInfo, getRecurring, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
+import { addPayment, cadenceInfo, getRecurring, giveBackPaidBefore, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
 import { checkSplitEdit, refuseSplitDelete, splitPartOf, splitsFor, type SplitEdit } from './splits'
 
 type CreateInput = z.output<typeof transactionCreateSchema>
@@ -544,9 +544,8 @@ export function listAccountTransactions(
   if (q.cursor && !CURSOR.test(q.cursor)) badRequest('Invalid cursor')
   const rows = ctx.accountWide.accountTransactions(accountId, { from: q.from, to: q.to, cursor: q.cursor, limit: limit + 1 })
   const page = rows.slice(0, limit)
-  const first = page[0]
-  // The account's total less everything listed above the first row (newer, later the same day, or pending), in every ledger.
-  let after = first ? currentParts(ctx, accountId).totalMinor - ctx.accountWide.sumAfter(accountId, first.sortKey) : 0
+  const total = page.length ? currentParts(ctx, accountId).totalMinor : 0
+  let after = 0
   const named = payeeNamerFor(ctx)
   // The split payments' shares, by payment: the holder's given row is all of them.
   const splits = new Map<number, SplitShare[]>()
@@ -558,7 +557,10 @@ export function listAccountTransactions(
     const shares = list.filter((s) => s.ledgerId !== s.holder.ledgerId).map((s) => ({ ledger: { slug: s.slug, name: s.name }, amountMinor: s.amountMinor }))
     return { keptMinor: r.amountMinor + given, shares }
   }
-  const items = page.map((r) => {
+  const items = page.map((r, i) => {
+    // The account's total less everything listed above the row (newer, later the same day, or pending), in every ledger: for the
+    // first row, and for the first posted one under the pending ones, where a range of dates leaves rows out.
+    if (i === 0 || (page[i - 1]!.status === 'pending' && r.status !== 'pending')) after = total - ctx.accountWide.sumAfter(accountId, r.sortKey)
     const balanceAfterMinor = after
     after -= r.amountMinor
     return {
@@ -604,14 +606,17 @@ function runningBalances(ctx: AppContext, q: QueryInput, page: TxRow[]): number[
   if (!q.accountId || !first || q.categoryId || q.tagId || q.recurringItemId || q.needsReview || q.labelId || q.q || !isEmptyFilter(q.filter) || q.filteredOut || q.side) return null
   const account = getAccount(ctx, q.accountId)
   if (accountTypeInfo(account.type).revalued) return null
-  // Everything listed above the first row: newer, later the same day, or pending (see SORT_KEY).
-  const later = ctx.q.pluck<number>(
-    `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.ledger_id = @ledger AND t.account_id = ? AND t.deleted_at IS NULL AND ${SORT_KEY} > ?`,
-    q.accountId,
-    first.sort_key,
-  )!
-  let after = account.balanceMinor - later
-  return page.map((r) => {
+  // Everything listed above a row: newer, later the same day, or pending (see SORT_KEY).
+  const later = (r: TxRow) =>
+    ctx.q.pluck<number>(
+      `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.ledger_id = @ledger AND t.account_id = ? AND t.deleted_at IS NULL AND ${SORT_KEY} > ?`,
+      q.accountId,
+      r.sort_key,
+    )!
+  let after = 0
+  return page.map((r, i) => {
+    // Worked out for the first row, and for the first posted one under the pending ones, where a range of dates leaves rows out.
+    if (i === 0 || (page[i - 1]!.status === 'pending' && r.status !== 'pending')) after = account.balanceMinor - later(r)
     const balance = after
     after -= r.amount_minor
     return balance
@@ -955,6 +960,7 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
     if (input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id) {
       if (row.recurring_item_id) {
         ctx.q.run('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', row.recurring_item_id, id)
+        giveBackPaidBefore(ctx, row.recurring_item_id, [id])
         ctx.q.run(
           'DELETE FROM recurring_payment_dues WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
           id,
