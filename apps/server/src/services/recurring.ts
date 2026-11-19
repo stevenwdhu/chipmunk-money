@@ -630,7 +630,7 @@ export function receiveItem(
   item: CarriedItem,
   here: { categoryId: number | null; accountId: number | null; txIds: number[]; left: number; leftMinor: number },
 ): number {
-  const { paid_before, full_price_minor, expected_amount_minor } = item.settings as { paid_before: number; full_price_minor: number | null; expected_amount_minor: number }
+  const { paid_before, full_price_minor } = item.settings as { paid_before: number; full_price_minor: number | null }
   const stayed = item.plan ? here.left : 0
   const id = Number(
     ctx.q.run(
@@ -643,7 +643,6 @@ export function receiveItem(
         category: here.categoryId,
         account: here.accountId,
         paid_before: paid_before + stayed,
-        full_price_minor: full_price_minor === null || !stayed ? full_price_minor : full_price_minor - (here.leftMinor - stayed * expected_amount_minor),
       },
     ).lastInsertRowid,
   )
@@ -653,6 +652,15 @@ export function receiveItem(
   for (const d of item.dues) ctx.q.run('INSERT INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)', id, d.txId, d.dueDate, d.oneOff)
   for (const txId of item.notPayments) ctx.q.run('INSERT INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', id, txId)
   recalculateRecurring(ctx, id)
+  // What stayed behind counts as paid at the plan's amount as it's shown here (it follows the latest
+  // payment), so what those payments really were over or under it comes off the full price.
+  if (stayed && full_price_minor !== null) {
+    const over = here.leftMinor - stayed * getRecurring(ctx, id).expectedAmountMinor
+    if (over) {
+      ctx.q.run('UPDATE recurring_items SET full_price_minor = ? WHERE ledger_id = @ledger AND id = ?', full_price_minor - over, id)
+      recalculateRecurring(ctx, id)
+    }
+  }
   return id
 }
 

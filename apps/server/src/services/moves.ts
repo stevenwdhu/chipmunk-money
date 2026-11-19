@@ -373,6 +373,12 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     }
     for (const id of new Set(carried.map((l) => l.moneyIn))) settleLinkedCategory(toCtx, id)
     const tagsCreated = moveTags(toCtx, tags)
+    // What `to` has for each item's payees (its other payees too), read before any item is made there:
+    // items that come together are judged against what the ledger had, not against each other.
+    const theirItems = (i: { carried: { payeeKey: string; payees: Array<{ payeeKey: string }> } }, status: 'active' | 'ended') => [
+      ...new Map([i.carried.payeeKey, ...i.carried.payees.map((p) => p.payeeKey)].flatMap((key) => itemsOf(toCtx, key, status)).map((o) => [o.id, o])).values(),
+    ]
+    const had = new Map([...going.values()].map((i) => [i.itemId, { active: theirItems(i, 'active'), ended: theirItems(i, 'ended') }]))
     const recurringItems = [...going.values()].map((i) => {
       // `to`'s own active items for the payee take the payments when they take them all and keep every
       // payment they had (an item has one payment for a due date), and neither side is a plan, whose count
@@ -380,18 +386,18 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
       // other's payments. With no active one, an active item that comes tries the newest one `to` ended (the
       // one a move left behind, when the payments come back), active again if it takes them, and else the
       // item is made there.
-      const active = itemsOf(toCtx, i.carried.payeeKey)
-      const own = active.length || !i.carried.active ? active : itemsOf(toCtx, i.carried.payeeKey, 'ended').filter((o) => !o.plan).slice(-1)
+      const { active, ended } = had.get(i.itemId)!
+      const own = active.length || !i.carried.active ? active : ended.filter((o) => !o.plan).slice(-1)
       const theirs = () => toCtx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IN (SELECT value FROM json_each(?))', json(own.map((o) => o.id)))
       let joined = own.length > 0 && ![i.carried, ...own].some((o) => o.plan)
       try {
         if (joined) {
           toCtx.q.transaction(() => {
-            const had = theirs()
+            const theirsBefore = theirs()
             if (!active.length) toCtx.q.run(`UPDATE recurring_items SET status = 'active' WHERE ledger_id = @ledger AND ${THESE}`, json(own.map((o) => o.id)))
             for (const o of own) recalculateRecurring(toCtx, o.id, { followAmount: true })
             const have = new Set(theirs())
-            if (![...had, ...i.payments].every((id) => have.has(id))) throw ROLL_BACK
+            if (![...theirsBefore, ...i.payments].every((id) => have.has(id))) throw ROLL_BACK
           })
         }
       } catch (err) {
@@ -409,6 +415,15 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
           left: i.left,
           leftMinor: i.leftMinor,
         })
+        // The item works its payments out again where it's made. One that only held with a payment that
+        // stays behind (its amount the step between two others) would come off it, so nothing moves.
+        const loose = toCtx.q.pluck<number>(
+          `SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IS NULL AND ${THESE}`,
+          json(i.payments),
+        )
+        if (loose) {
+          badRequest(`Not every payment of ${i.item} stays its payment without the ones that can’t move. Widen its price variation, then move them.`)
+        }
       }
       return { itemId: i.itemId, item: i.item, payments: i.payments.length, left: i.left, joined }
     })

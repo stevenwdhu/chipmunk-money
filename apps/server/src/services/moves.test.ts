@@ -737,6 +737,84 @@ describe('moving transactions: a recurring item goes with its payments', () => {
     w.check()
   })
 
+  it('keeps the amount remaining right when the payment that stayed behind is the latest, which the plan’s amount follows', async () => {
+    const w = world()
+    const { personal, family } = w
+    const chequing = makeAccount(personal, 'Chequing', 'chequing', 0, 'TD')
+    // 4 payments for $202.00 in all: $50.00 twice on the card, then $52.00 on an account that stays.
+    const item = createRecurring(
+      personal,
+      recurringCreateSchema.parse({ payee: 'KLARNA', expectedAmountMinor: -5000, cadence: 'monthly', anchorDate: '2026-07-05', totalPayments: 4, fullPriceMinor: -20200 }),
+    )
+    const pay = async (date: string, accountId: number, amountMinor: number) =>
+      (await createTransaction(personal, transactionCreateSchema.parse({ accountId, date, amountMinor, payee: 'KLARNA' }), { useAi: false })).id
+    const pays = [await pay('2026-07-05', w.visa, -5000), await pay('2026-08-05', w.visa, -5000)]
+    await pay('2026-09-05', chequing, -5200)
+    expect(getRecurring(personal, item.id)).toMatchObject({ paidPayments: 3, remainingPayments: 1, remainingAmountMinor: -5000 })
+
+    expect(w.move(personal, [pays[0]!], family)).toMatchObject({ moved: 2, recurringItems: [{ payments: 2, left: 1, joined: false }] })
+    // $202.00 less $50.00, $50.00 and the $52.00 that stayed.
+    expect(listRecurring(family)[0]).toMatchObject({ totalPayments: 4, paidPayments: 3, remainingPayments: 1, remainingAmountMinor: -5000 })
+    w.check()
+  })
+
+  it('moves nothing when a payment would come off the item without one that stays behind', async () => {
+    const w = world()
+    const { personal } = w
+    const chequing = makeAccount(personal, 'Chequing', 'chequing', 0, 'TD')
+    // The price went up in two steps of 5%, and the step between is on an account that stays.
+    const item = createRecurring(
+      personal,
+      recurringCreateSchema.parse({ payee: 'HYDRO', expectedAmountMinor: -1000, cadence: 'monthly', anchorDate: '2026-07-03', amountTolerancePct: 5 }),
+    )
+    const pay = async (date: string, accountId: number, amountMinor: number) =>
+      (await createTransaction(personal, transactionCreateSchema.parse({ accountId, date, amountMinor, payee: 'HYDRO' }), { useAi: false })).id
+    const july = await pay('2026-07-03', w.visa, -1000)
+    await pay('2026-08-03', chequing, -1050)
+    const sept = await pay('2026-09-03', w.visa, -1100)
+    expect(getRecurring(personal, item.id)).toMatchObject({ occurrences: 3 })
+
+    refusedWhole(w, [sept], 'Not every payment of HYDRO stays its payment without the ones that can’t move. Widen its price variation, then move them.')
+    expect(getTransaction(personal, july).recurringItemId).toBe(item.id)
+  })
+
+  it('counts the other ledger’s item for one of the item’s other payees too', async () => {
+    const w = world()
+    const { personal, family } = w
+    // Family's own NETFLIX, with payments on the same days as the ones that would come.
+    createRecurring(family, recurringCreateSchema.parse({ payee: 'NETFLIX', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-07-03' }))
+    for (const month of ['07', '08']) {
+      await createTransaction(family, transactionCreateSchema.parse({ accountId: w.visa, date: `2026-${month}-03`, amountMinor: -1599, payee: 'NETFLIX' }), { useAi: false })
+    }
+    // Personal's is NETFLIX.COM, which NETFLIX also pays.
+    const theirs = await subscription(w, 'NETFLIX.COM', -1599, '03')
+    updateRecurring(personal, theirs.item.id, { otherPayees: ['NETFLIX'] })
+
+    refusedWhole(w, [theirs.pays[0]!], noFit('NETFLIX.COM'))
+    expect(listRecurring(family)).toHaveLength(1)
+  })
+
+  it('takes two items of one payee together to a ledger that has none', async () => {
+    const w = world()
+    const { personal, family } = w
+    const icloud = await subscription(w, 'APPLE', -399, '03', { name: 'iCloud' })
+    const music = await subscription(w, 'APPLE', -1099, '10', { name: 'Music' })
+
+    expect(w.move(personal, [icloud.pays[0]!, music.pays[0]!], family)).toMatchObject({
+      moved: 6,
+      recurringItems: [
+        { item: 'iCloud', payments: 3, left: 0, joined: false },
+        { item: 'Music', payments: 3, left: 0, joined: false },
+      ],
+    })
+    expect(listRecurring(personal)).toEqual([])
+    expect(listRecurring(family).map((r) => [r.name, r.occurrences, r.nextDueDate])).toEqual([
+      ['iCloud', 3, '2026-10-03'],
+      ['Music', 3, '2026-10-10'],
+    ])
+    w.check()
+  })
+
   it('takes two items and plain rows in one move, and counts an item’s other payments against the limit', async () => {
     const w = world()
     const { personal, family } = w
