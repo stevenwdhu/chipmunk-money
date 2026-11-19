@@ -336,6 +336,14 @@ describe('POST /transactions/move', () => {
     expect(await w.move(w.personal, [w.p1], 'personal')).toMatchObject({ status: 400, message: 'They’re in Personal already.' })
     expect(await w.move(w.personal, [w.p1], 'nope')).toMatchObject({ status: 400, message: 'There’s no ledger “nope”.' })
     expect((await w.move(w.personal, [], 'family')).status).toBe(400)
+
+    // A recurring item's payment, where Family's own item for the payee has one for the same due date: the dry run says so first.
+    for (const c of [w.personal, w.family]) createRecurring(c, recurringCreateSchema.parse({ payee: 'Netflix', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-09-01' }))
+    const pay = await w.spend(w.personal, '2026-09-01', -1599, 'Netflix')
+    await w.spend(w.family, '2026-09-01', -1599, 'Netflix')
+    const noFit = { status: 400, message: 'Family already has a recurring item for Netflix that these payments don’t fit. End or change one of the two items, then move them.' }
+    expect(await w.unchanged(() => w.move(w.personal, [pay, w.p1], 'family', { dryRun: true }))).toMatchObject(noFit)
+    expect(await w.unchanged(() => w.move(w.personal, [pay, w.p1], 'family'))).toMatchObject(noFit)
     expect((await w.move(w.personal, [w.p1], 'family', { headers: await w.key('read') })).status).toBe(403)
   })
 

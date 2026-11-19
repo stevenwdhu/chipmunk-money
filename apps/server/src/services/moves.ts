@@ -20,7 +20,7 @@ import { transferCategoryId, unpairTransfer } from './transactions'
  * a new transaction: what the old ledger said about it (its links, transfer pair, tags and
  * category) is carried over where it fits there and let go where it doesn't, and the new ledger's
  * own matching and categorizing run on it. A recurring item goes with its payments: moving one of
- * them moves them all, and the item, and they stay its payments there, not worked out again. There's no undo: moving it back is another move, which works
+ * them moves them all, and the item. There's no undo: moving it back is another move, which works
  * it all out again. A ledger giving up an account sends its deleted rows on it away as they are,
  * still deleted (sendAsDeleted). And a new transaction on a shared account goes from the home to
  * the one ledger whose recurring item it's a payment of (routeToItems).
@@ -69,7 +69,8 @@ export interface MoveResult {
    * The recurring items that went with their payments: `payments` of each moved (the picked ones
    * and the rest of them), `left` couldn't (the item stays with those, ended), and `joined` says
    * they're all payments of an item `to` already had for the payee (active, or ended and active again),
-   * not of this one made there.
+   * not of this one made there. One never comes to be beside an active item `to` has for the payee:
+   * that move is refused.
    */
   recurringItems: Array<{ itemId: number; item: string; payments: number; left: number; joined: boolean }>
   /** Tags `to` didn't have, added for the moved rows. */
@@ -190,10 +191,10 @@ function categoryThere(to: AppContext, categoryId: number | null, name: string |
 /**
  * The picked rows with the rest of their recurring items' payments: a recurring item goes with any
  * of its payments, so the others that can move come along (live, on an account `to` has, not part of
- * a split). The ones that can't are counted (`left`): the item stays with those. A 400 when that
- * makes more than MOVE_LIMIT.
+ * a split). The ones that can't are counted (`left`, and `leftMinor` their amounts): the item stays
+ * with those. A 400 when that makes more than MOVE_LIMIT.
  */
-function withItems(from: AppContext, to: AppContext, picked: number[]): { ids: number[]; items: Array<{ itemId: number; item: string; left: number }> } {
+function withItems(from: AppContext, to: AppContext, picked: number[]): { ids: number[]; items: Array<{ itemId: number; item: string; left: number; leftMinor: number }> } {
   const found = from.q.all<{ itemId: number; item: string }>(
     `SELECT DISTINCT r.id AS itemId, coalesce(r.title, r.name) AS item FROM transactions t JOIN recurring_items r ON r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.${THESE} AND t.deleted_at IS NULL ORDER BY r.id`,
@@ -202,8 +203,8 @@ function withItems(from: AppContext, to: AppContext, picked: number[]): { ids: n
   const ids = new Set(picked)
   const shared = new Map<number, boolean>()
   const items = found.map((i) => {
-    const payments = from.q.all<{ id: number; accountId: number; split: number }>(
-      `SELECT t.id, t.account_id AS accountId, ${SPLIT} AS split FROM transactions t
+    const payments = from.q.all<{ id: number; accountId: number; amount: number; split: number }>(
+      `SELECT t.id, t.account_id AS accountId, t.amount_minor AS amount, ${SPLIT} AS split FROM transactions t
        WHERE t.ledger_id = @ledger AND t.recurring_item_id = ? AND t.deleted_at IS NULL AND t.bank_id_only = 0 ORDER BY t.id`,
       i.itemId,
     )
@@ -211,7 +212,8 @@ function withItems(from: AppContext, to: AppContext, picked: number[]): { ids: n
       if (!shared.has(p.accountId)) shared.set(p.accountId, from.accountWide.ledgers(p.accountId).some((l) => l.ledgerId === to.ledger.id))
       if (!p.split && shared.get(p.accountId)) ids.add(p.id)
     }
-    return { ...i, left: payments.filter((p) => !ids.has(p.id)).length }
+    const left = payments.filter((p) => !ids.has(p.id))
+    return { ...i, left: left.length, leftMinor: left.reduce((s, p) => s + p.amount, 0) }
   })
   if (ids.size > MOVE_LIMIT) {
     badRequest(`With the other payments of ${items.map((i) => i.item).join(', ')} that’s ${ids.size} transactions. Move at most ${MOVE_LIMIT} at a time.`)
@@ -280,9 +282,10 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
  * 8. One UPDATE changes their ledger (moveRows, through ctx.accountWide).
  * 9. In `to`: the carried links and the tags, then the items that came: the payments are those of
  *    its own active item for the payee (or, with none active, the one it ended) when it has one that
- *    takes them all and gives up none of its own, and neither is a plan, else the item is made there
- *    as it was (receiveItem), its category by the rule of step 5 without the history. Then its matching (from the earliest moved date) and its recurring items,
- *    each moved row as a new one. In `from`: an item with no payment left is gone, one that kept some
+ *    takes them all and gives up none of its own, and neither is a plan. Else, with an active item
+ *    for the payee there, nothing moves (a 400), and with none the item is made there as it was
+ *    (receiveItem), its category by the rule of step 5 without the history. Then its matching (from
+ *    the earliest moved date) and its recurring items, each moved row as a new one. In `from`: an item with no payment left is gone, one that kept some
  *    (they couldn't move) works them out again and is ended, and one that only let go (`plain`)
  *    works them out again.
  * 10. Activity in both ledgers.
@@ -371,22 +374,22 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     for (const id of new Set(carried.map((l) => l.moneyIn))) settleLinkedCategory(toCtx, id)
     const tagsCreated = moveTags(toCtx, tags)
     const recurringItems = [...going.values()].map((i) => {
-      // `to`'s own items for the payee take the payments when they take them all and keep every payment
-      // they had (an item has one payment for a due date). Otherwise that's undone, and the item is made there.
-      // With no active one, an active item that comes tries the newest one `to` ended (the one a move left
-      // behind, when the payments come back), active again if it takes them. A plan never joins or is
-      // joined: its count of payments would be wrong.
+      // `to`'s own active items for the payee take the payments when they take them all and keep every
+      // payment they had (an item has one payment for a due date), and neither side is a plan, whose count
+      // of payments would be wrong. Otherwise nothing moves: two active items for one payee would take each
+      // other's payments. With no active one, an active item that comes tries the newest one `to` ended (the
+      // one a move left behind, when the payments come back), active again if it takes them, and else the
+      // item is made there.
       const active = itemsOf(toCtx, i.carried.payeeKey)
-      const ended = active.length || !i.carried.active ? [] : itemsOf(toCtx, i.carried.payeeKey, 'ended').filter((o) => !o.plan).slice(-1)
-      const own = [...active, ...ended].map((o) => o.id)
-      const theirs = () => toCtx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IN (SELECT value FROM json_each(?))', json(own))
-      let joined = own.length > 0 && !i.carried.plan && !active.some((o) => o.plan)
+      const own = active.length || !i.carried.active ? active : itemsOf(toCtx, i.carried.payeeKey, 'ended').filter((o) => !o.plan).slice(-1)
+      const theirs = () => toCtx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IN (SELECT value FROM json_each(?))', json(own.map((o) => o.id)))
+      let joined = own.length > 0 && ![i.carried, ...own].some((o) => o.plan)
       try {
         if (joined) {
           toCtx.q.transaction(() => {
             const had = theirs()
-            for (const o of ended) toCtx.q.run("UPDATE recurring_items SET status = 'active' WHERE ledger_id = @ledger AND id = ?", o.id)
-            for (const id of own) recalculateRecurring(toCtx, id, { followAmount: true })
+            if (!active.length) toCtx.q.run(`UPDATE recurring_items SET status = 'active' WHERE ledger_id = @ledger AND ${THESE}`, json(own.map((o) => o.id)))
+            for (const o of own) recalculateRecurring(toCtx, o.id, { followAmount: true })
             const have = new Set(theirs())
             if (![...had, ...i.payments].every((id) => have.has(id))) throw ROLL_BACK
           })
@@ -395,16 +398,18 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
         if (err !== ROLL_BACK) throw err
         joined = false
       }
+      if (!joined && active.length) {
+        badRequest(`${toCtx.ledger.name} already has a recurring item for ${i.carried.payee} that these payments don’t fit. End or change one of the two items, then move them.`)
+      }
       if (!joined) {
         receiveItem(toCtx, i.carried, {
           categoryId: categoryThere(toCtx, i.carried.categoryId, itemCategories.get(i.itemId) ?? null)?.id ?? null,
           accountId: toCtx.q.pluck<number>('SELECT id FROM ledger_accounts WHERE ledger_id = @ledger AND id = ?', i.carried.accountId) ?? null,
           txIds: i.payments,
           left: i.left,
+          leftMinor: i.leftMinor,
         })
       }
-      const loose = toCtx.q.column<number>(`SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IS NULL AND ${THESE}`, json(i.payments))
-      if (loose.length) throw new Error(`The move left payments of ${i.item} on no recurring item in ${to}: ${loose.join(', ')}`)
       return { itemId: i.itemId, item: i.item, payments: i.payments.length, left: i.left, joined }
     })
     const earliest = rows.reduce((d, r) => (r.date < d ? r.date : d), rows[0]!.date)

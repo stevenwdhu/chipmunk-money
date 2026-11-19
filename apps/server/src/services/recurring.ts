@@ -567,6 +567,7 @@ export interface CarriedItem {
   id: number
   /** Its name, or its payee when it has none. */
   label: string
+  payee: string
   payeeKey: string
   categoryId: number | null
   accountId: number | null
@@ -595,6 +596,7 @@ export function itemToCarry(ctx: AppContext, itemId: number, txIds: number[]): C
   return {
     id,
     label: title ?? settings.name,
+    payee: settings.name,
     payeeKey: settings.payee_key,
     categoryId: category_id,
     accountId: account_id,
@@ -619,20 +621,30 @@ export function itemToCarry(ctx: AppContext, itemId: number, txIds: number[]): C
  * Makes a carried item in the ledger its payments moved to, as it was: its settings, with the
  * category and account the caller found for it here, its other payees and price changes, the
  * payments (`txIds`, now this ledger's) linked to it with their due dates, and its not-payments
- * among the moved rows. A plan's payments that stayed where it was (`left` of them) count as paid
- * before here. The payments were worked out in the ledger they left, so they aren't worked out
- * again: each is the item's as it is, and one without a due date of its own gets the one it's for,
- * so that working out this item or another of the payee later leaves it where it is. They take the
- * item's category, and a plan they pay off is ended. Returns its id here.
+ * among the moved rows. A plan's payments that stayed where it was (`left` of them, `leftMinor` in
+ * all) count as paid before here, at its amount: what they were over or under it comes off its full
+ * price. Then it works out its payments as any item does. Returns its id here.
  */
-export function receiveItem(ctx: AppContext, item: CarriedItem, here: { categoryId: number | null; accountId: number | null; txIds: number[]; left: number }): number {
+export function receiveItem(
+  ctx: AppContext,
+  item: CarriedItem,
+  here: { categoryId: number | null; accountId: number | null; txIds: number[]; left: number; leftMinor: number },
+): number {
+  const { paid_before, full_price_minor, expected_amount_minor } = item.settings as { paid_before: number; full_price_minor: number | null; expected_amount_minor: number }
+  const stayed = item.plan ? here.left : 0
   const id = Number(
     ctx.q.run(
       `INSERT INTO recurring_items (ledger_id, name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
          cadence, anchor_date, next_due_date, status, origin, detection_score, second_day, total_payments, paid_before, full_price_minor)
        VALUES (@ledger, @name, @title, @payee_key, @category, @account, @expected_amount_minor, @amount_tolerance_pct,
          @cadence, @anchor_date, @next_due_date, @status, @origin, @detection_score, @second_day, @total_payments, @paid_before, @full_price_minor)`,
-      { ...item.settings, category: here.categoryId, account: here.accountId, paid_before: Number(item.settings.paid_before) + (item.plan ? here.left : 0) },
+      {
+        ...item.settings,
+        category: here.categoryId,
+        account: here.accountId,
+        paid_before: paid_before + stayed,
+        full_price_minor: full_price_minor === null || !stayed ? full_price_minor : full_price_minor - (here.leftMinor - stayed * expected_amount_minor),
+      },
     ).lastInsertRowid,
   )
   for (const p of item.payees) ctx.q.run('INSERT INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)', id, p.payeeKey, p.name)
@@ -640,16 +652,7 @@ export function receiveItem(ctx: AppContext, item: CarriedItem, here: { category
   for (const txId of here.txIds) linkTo(ctx, id, txId)
   for (const d of item.dues) ctx.q.run('INSERT INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)', id, d.txId, d.dueDate, d.oneOff)
   for (const txId of item.notPayments) ctx.q.run('INSERT INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', id, txId)
-  const schedule = ctx.q.get<Scheduled & { nextDueDate: string }>(
-    'SELECT cadence, anchor_date AS anchorDate, second_day AS secondDay, next_due_date AS nextDueDate FROM recurring_items WHERE ledger_id = @ledger AND id = @id',
-    { id },
-  )!
-  const window = matchWindow(schedule.cadence)
-  for (const t of ctx.q.all<{ id: number; date: string }>(`SELECT t.id, t.date ${LINKED_WITH_DUES} AND d.transaction_id IS NULL`, { item: id })) {
-    ctx.q.run('INSERT INTO recurring_payment_dues (item_id, transaction_id, due_date) VALUES (?, ?, ?)', id, t.id, duesCovering(schedule, t.date, t.date, window).at(-1)!)
-  }
-  applyItemCategory(ctx, id)
-  settleInstalments(ctx, id)
+  recalculateRecurring(ctx, id)
   return id
 }
 

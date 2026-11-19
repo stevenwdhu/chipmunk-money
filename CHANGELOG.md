@@ -10,7 +10,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 
 ### Changed
 
-- Moving a payment of a recurring item to another ledger now moves all the item's payments, and the item itself, where it used to take the one payment off the item. The app says what goes along and asks first. When the other ledger already has an active item for the payee that can take them all and keep its own payments, the payments become that item's. A payment that can't move stays, and the item stays with it, ended. `POST /transactions/move` and the MCP tool `move_transactions` report it in `recurringItems`, and `moved` counts every payment that went.
+- Moving a payment of a recurring item to another ledger now moves all the item's payments, and the item itself, where it used to take the one payment off the item. The app says what goes along and asks first. When the other ledger already has an active item for the payee that can take them all and keep its own payments, the payments become that item's. When its item can't, or either one is an instalment plan, nothing moves and the app says to end or change one of the two items first. A payment that can't move stays, and the item stays with it, ended. `POST /transactions/move` and the MCP tool `move_transactions` report it in `recurringItems`, and `moved` counts every payment that went.
 
 ## v0.3.2 (2026-11-15)
 

@@ -804,7 +804,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'write',
     title: 'Move transactions to another ledger',
     description:
-      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A recurring item goes with its payments: moving one payment of a recurring item moves all its payments that can move, and the item (`recurringItems`), so `moved` can be more than you asked for. Tell the user before you move one. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go and what would go along first.',
+      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A recurring item goes with its payments: moving one payment of a recurring item moves all its payments that can move, and the item (`recurringItems`), so `moved` can be more than you asked for. Tell the user before you move one. When the other ledger has an active recurring item for the payee that these payments don’t fit, nothing moves, and the error says to end or change one of the two items first. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go and what would go along first.',
     input: z.object({
       ledger,
       ids: z.array(z.number().int()).min(1).max(1000).describe('Transactions this ledger holds, on accounts shared with `to`.'),
@@ -827,7 +827,7 @@ export const TOOLS: ToolDef[] = [
             item: z.string(),
             payments: z.number().describe('Its payments that moved: the ones asked for and the rest of them.'),
             left: z.number().describe('Its payments that couldn’t move. With any, the item also stays where it was, with those, and is ended there.'),
-            joined: z.boolean().describe('They’re payments of an item the other ledger already had for the payee: an active one, or one it ended, which is active again. Otherwise the item is there as it was.'),
+            joined: z.boolean().describe('They’re payments of an item the other ledger already had for the payee: an active one, or one it ended, which is active again. Otherwise it had no active one, and the item is there as it was.'),
           }),
         )
         .describe('The recurring items that went with their payments.'),
