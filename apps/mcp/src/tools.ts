@@ -827,7 +827,7 @@ export const TOOLS: ToolDef[] = [
             item: z.string(),
             payments: z.number().describe('Its payments that moved: the ones asked for and the rest of them.'),
             left: z.number().describe('Its payments that couldn’t move. With any, the item also stays where it was, with those, and is ended there.'),
-            joined: z.boolean().describe('They’re payments of an active item the other ledger already had for the payee. Otherwise the item is there as it was.'),
+            joined: z.boolean().describe('They’re payments of an item the other ledger already had for the payee: an active one, or one it ended, which is active again. Otherwise the item is there as it was.'),
           }),
         )
         .describe('The recurring items that went with their payments.'),

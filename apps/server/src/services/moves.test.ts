@@ -506,7 +506,9 @@ describe('moving transactions: a recurring item goes with its payments', () => {
       categoryId: categoryId(family, 'Software & media'),
       occurrences: 4,
     })
-    expect(dues(family, theirs[0]!.id)).toEqual([{ id: extra, due: '2026-08-03', oneOff: 1 }])
+    // The extra one's due date, and each of the others now has the one it's for.
+    const carried = [...['07', '08', '09'].map((month, n) => ({ id: pays[n], due: `2026-${month}-03`, oneOff: 0 })), { id: extra, due: '2026-08-03', oneOff: 1 }]
+    expect(dues(family, theirs[0]!.id)).toEqual(carried)
     for (const id of [...pays, extra]) {
       expect(getTransaction(family, id)).toMatchObject({ recurringItemId: theirs[0]!.id, categoryId: categoryId(family, 'Software & media'), categorySource: 'recurring' })
     }
@@ -524,7 +526,7 @@ describe('moving transactions: a recurring item goes with its payments', () => {
     const mine = listRecurring(personal)
     expect(mine).toHaveLength(1)
     expect(mine[0]).toMatchObject({ name: 'Netflix', nextDueDate: '2026-10-03', anchorDate: '2026-07-03', occurrences: 4, categoryId: subs, accountId: w.visa, amountTolerancePct: 15 })
-    expect(dues(personal, mine[0]!.id)).toEqual([{ id: extra, due: '2026-08-03', oneOff: 1 }])
+    expect(dues(personal, mine[0]!.id)).toEqual(carried)
     expect(w.check().parts).toEqual(before.parts)
   })
 
@@ -612,6 +614,111 @@ describe('moving transactions: a recurring item goes with its payments', () => {
     const theirs = listRecurring(family)
     expect(theirs).toHaveLength(1)
     expect(theirs[0]).toMatchObject({ payee: 'GYM', occurrences: 2, nextDueDate: '2026-10-05', accountId: null })
+    w.check()
+
+    // Back again: the item Personal kept, ended, takes them and is active again. No second one, and Family has none.
+    expect(w.move(family, [pays[0]!], personal)).toMatchObject({ moved: 2, recurringItems: [{ item: 'GYM', payments: 2, left: 0, joined: true }] })
+    expect(listRecurring(family)).toEqual([])
+    expect(listRecurring(personal).map((r) => r.id)).toEqual([item.id])
+    expect(getRecurring(personal, item.id)).toMatchObject({ status: 'active', occurrences: 3, nextDueDate: '2026-10-05' })
+    w.check()
+  })
+
+  it('leaves an ended item ended when it wouldn’t take every payment that comes, and makes the item beside it', async () => {
+    const w = world()
+    const { personal, family } = w
+    const { pays } = await subscription(w, 'GYM', -4000, '05')
+    const ended = createRecurring(family, recurringCreateSchema.parse({ payee: 'GYM', expectedAmountMinor: -9000, cadence: 'monthly', anchorDate: '2026-07-05' }))
+    updateRecurring(family, ended.id, { status: 'ended' })
+
+    expect(w.move(personal, [pays[0]!], family)).toMatchObject({ moved: 3, recurringItems: [{ payments: 3, left: 0, joined: false }] })
+    expect(getRecurring(family, ended.id)).toMatchObject({ status: 'ended', occurrences: 0 })
+    const came = listRecurring(family).find((r) => r.id !== ended.id)!
+    expect(came).toMatchObject({ status: 'active', occurrences: 3 })
+    w.check()
+  })
+
+  it('keeps every payment on the item that came when the other ledger’s own is closer in amount to one of them', async () => {
+    const w = world()
+    const { personal, family } = w
+    const utilities = categoryId(family, 'Software & media')
+    // $15.99, $16.50, $17.00: Personal's item follows them.
+    const item = createRecurring(
+      personal,
+      recurringCreateSchema.parse({ payee: 'HYDRO', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-07-03', amountTolerancePct: 10 }),
+    )
+    const pays: number[] = []
+    for (const [month, amountMinor] of [['07', -1599], ['08', -1650], ['09', -1700]] as const) {
+      pays.push((await createTransaction(personal, transactionCreateSchema.parse({ accountId: w.visa, date: `2026-${month}-03`, amountMinor, payee: 'HYDRO' }), { useAi: false })).id)
+    }
+    expect(getRecurring(personal, item.id)).toMatchObject({ occurrences: 3 })
+    // Family's own, at July's amount, allows 5%: September's isn't its payment.
+    const theirs = createRecurring(
+      family,
+      recurringCreateSchema.parse({ payee: 'HYDRO', name: 'Cottage', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-07-20', categoryId: utilities }),
+    )
+    const own = (await createTransaction(family, transactionCreateSchema.parse({ accountId: w.visa, date: '2026-07-20', amountMinor: -1599, payee: 'HYDRO' }), { useAi: false })).id
+    expect(getTransaction(family, own)).toMatchObject({ recurringItemId: theirs.id, categoryId: utilities })
+
+    expect(w.move(personal, [pays[2]!], family)).toMatchObject({ moved: 3, recurringItems: [{ itemId: item.id, payments: 3, left: 0, joined: false }] })
+    const came = listRecurring(family).find((r) => r.id !== theirs.id)!
+    const settled = () => {
+      for (const id of pays) expect(getTransaction(family, id).recurringItemId).toBe(came.id)
+      expect(getTransaction(family, own)).toMatchObject({ recurringItemId: theirs.id, categoryId: utilities })
+    }
+    settled()
+    expect(came).toMatchObject({ occurrences: 3, nextDueDate: '2026-10-03' })
+    // Each has the due date it's for, so working either item out again leaves them where they are.
+    expect(dues(family, came.id)).toEqual([
+      { id: pays[0], due: '2026-07-03', oneOff: 0 },
+      { id: pays[1], due: '2026-08-03', oneOff: 0 },
+      { id: pays[2], due: '2026-09-03', oneOff: 0 },
+    ])
+    updateRecurring(family, theirs.id, { amountTolerancePct: 8 })
+    settled()
+    updateRecurring(family, came.id, { amountTolerancePct: 9 })
+    settled()
+    w.check()
+  })
+
+  it('never joins an instalment plan and a plain item: the item is made beside it', async () => {
+    const w = world()
+    const { personal, family } = w
+    // A 6 × $50.00 plan comes to a ledger with a plain monthly item for the payee.
+    const plan = await subscription(w, 'KLARNA', -5000, '05', { totalPayments: 6 })
+    const plain = createRecurring(family, recurringCreateSchema.parse({ payee: 'KLARNA', expectedAmountMinor: -5000, cadence: 'monthly', anchorDate: '2026-07-05' }))
+    expect(w.move(personal, [plan.pays[0]!], family)).toMatchObject({ moved: 3, recurringItems: [{ itemId: plan.item.id, payments: 3, left: 0, joined: false }] })
+    expect(getRecurring(family, plain.id)).toMatchObject({ occurrences: 0, totalPayments: null })
+    const came = listRecurring(family).find((r) => r.id !== plain.id)!
+    expect(came).toMatchObject({ totalPayments: 6, paidPayments: 3, remainingPayments: 3, occurrences: 3 })
+    w.check()
+
+    // A plain item's payments come to a ledger with a plan with room for them.
+    const sub = await subscription(w, 'AFFIRM', -2500, '07')
+    const theirs = createRecurring(
+      family,
+      recurringCreateSchema.parse({ payee: 'AFFIRM', expectedAmountMinor: -2500, cadence: 'monthly', anchorDate: '2026-07-07', totalPayments: 6 }),
+    )
+    expect(w.move(personal, [sub.pays[0]!], family)).toMatchObject({ moved: 3, recurringItems: [{ itemId: sub.item.id, payments: 3, left: 0, joined: false }] })
+    expect(getRecurring(family, theirs.id)).toMatchObject({ paidPayments: 0, remainingPayments: 6 })
+    expect(listRecurring(family).find((r) => r.payee === 'AFFIRM' && r.id !== theirs.id)).toMatchObject({ totalPayments: null, occurrences: 3 })
+    w.check()
+  })
+
+  it('counts a plan’s payments that stayed behind as paid on the plan that came', async () => {
+    const w = world()
+    const { personal, family } = w
+    const chequing = makeAccount(personal, 'Chequing', 'chequing', 0, 'TD')
+    const item = createRecurring(personal, recurringCreateSchema.parse({ payee: 'KLARNA', expectedAmountMinor: -5000, cadence: 'monthly', anchorDate: '2026-07-05', totalPayments: 4 }))
+    const pay = async (date: string, accountId: number) =>
+      (await createTransaction(personal, transactionCreateSchema.parse({ accountId, date, amountMinor: -5000, payee: 'KLARNA' }), { useAi: false })).id
+    await pay('2026-07-05', chequing)
+    const pays = [await pay('2026-08-05', w.visa), await pay('2026-09-05', w.visa)]
+    expect(getRecurring(personal, item.id)).toMatchObject({ paidPayments: 3, remainingPayments: 1 })
+
+    expect(w.move(personal, [pays[0]!], family)).toMatchObject({ moved: 2, recurringItems: [{ payments: 2, left: 1, joined: false }] })
+    expect(listRecurring(family)).toHaveLength(1)
+    expect(listRecurring(family)[0]).toMatchObject({ totalPayments: 4, occurrences: 2, paidPayments: 3, remainingPayments: 1, nextDueDate: '2026-10-05' })
     w.check()
   })
 
