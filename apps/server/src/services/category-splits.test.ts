@@ -13,12 +13,13 @@ import { categorizeUncategorized } from './import'
 import { setLinks } from './links'
 import { matchTransactions } from './matching'
 import { moveTransactions, sendAsDeleted } from './moves'
+import { followBankPayee } from './payee-names'
 import { setPayeeChoice } from './payees'
 import { addPayment, createRecurring, getRecurring } from './recurring'
 import { byCategory, exportRows, monthSummary, periodSummary, purchases, tagTotals, topPayees, trend } from './reports'
 import { setSplit } from './splits'
 import { monthToDate } from './totals'
-import { bulkUpdate, createTransaction, deleteTransaction, getTransaction, insertTransaction, listTransactions, restoreTransaction, updateTransaction } from './transactions'
+import { bulkUpdate, createTransaction, deleteTransaction, getTransaction, insertTransaction, listAccountTransactions, listTransactions, restoreTransaction, updateTransaction } from './transactions'
 
 type Json = any // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -420,6 +421,12 @@ describe('splitting a transaction into categories', () => {
       { categoryId: categoryId(w.personal, 'Household supplies'), amountMinor: -1_840, note: 'bags' },
       { categoryId: categoryId(w.personal, 'Dine out'), amountMinor: -1_950 },
     ])
+    // The account's list of every ledger says it's split, and no more of it.
+    add(w.family, w.visa, '2026-08-09', -500, 'Cafe', 'Dine out')
+    expect(listAccountTransactions(w.family, w.visa, {}, null).items.map((r) => [r.payee, r.category, r.splitByCategory])).toEqual([
+      ['Costco', 'Groceries', true],
+      ['Cafe', 'Dine out', false],
+    ])
     const moved = moveTransactions(w.personal, w.ctxOf, { ids: [id], to: w.family.ledger.id }, TESTER)
     expect(moved.moved).toBe(1)
     expect(parts(w.family, id)).toEqual([
@@ -512,6 +519,55 @@ describe('splitting a transaction into categories', () => {
     expect(categoryOf(ctx, back)).toEqual(['Groceries', 'linked', false])
   })
 
+  it('keeps what a payee learned right: nothing from a split, and its own category again once the split is undone', () => {
+    const ctx = testContext()
+    const account = makeAccount(ctx, 'Chequing')
+    const [groceries, dineOut] = [categoryId(ctx, 'Groceries'), categoryId(ctx, 'Dine out')]
+    const count = (payee: string, category = groceries) =>
+      ctx.q.pluck<number>('SELECT count FROM payee_category_stats WHERE ledger_id = @ledger AND payee_key = ? AND category_id = ?', payee, category) ?? 0
+    const byHand = (payee: string) => {
+      const id = add(ctx, account, '2026-09-10', -10_000, payee)
+      updateTransaction(ctx, id, { categoryId: groceries })
+      return id
+    }
+    const two = (a: number, b: number) => [
+      { categoryId: groceries, amountMinor: a, note: null },
+      { categoryId: dineOut, amountMinor: b, note: null },
+    ]
+    // Two Loblaws charges in Groceries by hand. Split, the first no longer counts.
+    const [first] = [byHand('Loblaws'), byHand('Loblaws')]
+    expect(count('loblaws')).toBe(2)
+    setParts(ctx, first, two(-6_000, -4_000))
+    expect(count('loblaws')).toBe(1)
+    // Its amount and parts changed in one go, by more than its largest part: nothing more is taken away.
+    updateTransaction(ctx, first, { amountMinor: -3_000, parts: two(-2_000, -1_000) })
+    expect([parts(ctx, first)?.length, count('loblaws')]).toEqual([2, 1])
+    // Undone with an empty list, it keeps Groceries as yours, and that counts again.
+    setParts(ctx, first, [])
+    expect([categoryOf(ctx, first), count('loblaws')]).toEqual([['Groceries', 'user', false], 2])
+    setParts(ctx, first, two(-2_000, -1_000))
+    updateTransaction(ctx, first, { parts: [] })
+    expect(count('loblaws')).toBe(2)
+    // And undone by an amount its largest part can't follow.
+    setParts(ctx, first, two(-2_000, -1_000))
+    expect(count('loblaws')).toBe(1)
+    updateTransaction(ctx, first, { amountMinor: -500 })
+    expect([parts(ctx, first), count('loblaws')]).toEqual([null, 2])
+    // So another category for it takes one count from Groceries, and the other charge keeps its own.
+    updateTransaction(ctx, first, { categoryId: dineOut })
+    expect([count('loblaws'), count('loblaws', dineOut)]).toEqual([1, 1])
+
+    // Split and given another payee in one go: the payee it had forgets it, and the new one's own stays.
+    const [costco, walmart] = [byHand('Costco'), byHand('Walmart')]
+    updateTransaction(ctx, costco, { payee: 'Walmart', parts: two(-6_000, -4_000) })
+    expect([count('costco'), count('walmart')]).toEqual([0, 1])
+    // When the bank words its payee another way, nothing is carried over for a split.
+    followBankPayee(ctx, { id: costco, payee: 'Walmart', payeeKey: 'walmart', origin: 'sync' }, 'Corner Bistro')
+    expect(getTransaction(ctx, costco).payee).toBe('Corner Bistro')
+    expect([count('walmart'), count('corner bistro')]).toEqual([1, 0])
+    expect(getTransaction(ctx, walmart).categoryId).toBe(groceries)
+  })
+
   it('goes with a deleted transaction and comes back with it', () => {
     const { ctx, id, three } = costco()
     three()
@@ -537,6 +593,18 @@ describe('splitting a transaction into categories', () => {
     ])
     // The rows add up to what the transactions come to.
     expect(exportRows(ctx).reduce((n, r) => n + Number(r.amountMinor), 0)).toBe(-10_500)
+    // A refund of $50.01 that follows it has a row for each part it comes off, so the rows by category are the report's.
+    const refund = add(ctx, account, '2026-09-12', 5_001, 'Costco')
+    setLinks(ctx, refund, [{ transactionId: id, amountMinor: 5_001, kind: 'refund' }])
+    expect(exportRows(ctx, '2026-09-12', '2026-09-12').map((r) => [r.payee, r.amountMinor, r.category])).toEqual([
+      ['Costco', 3_106, 'Groceries'],
+      ['Costco', 975, 'Dine out'],
+      ['Costco', 920, 'Household supplies'],
+    ])
+    const byName: Record<string, number> = {}
+    for (const r of exportRows(ctx)) byName[String(r.category)] = (byName[String(r.category)] ?? 0) - Number(r.amountMinor)
+    expect(byName).toEqual(spent(ctx))
+    expect(byName).toEqual({ Groceries: 6_210 - 3_106, 'Dine out': 1_950 + 500 - 975, 'Household supplies': 1_840 - 920 })
   })
 
   it('refuses what can’t be split, and parts that don’t hold, in plain words', async () => {
@@ -605,6 +673,18 @@ describe('splitting a transaction into categories', () => {
     expect(() => setParts(w.family, share!, two(1))).toThrow(refused)
     // Another ledger's transaction isn't found.
     expect(() => setParts(w.family, paid!, two(1))).toThrow('Transaction not found')
+    // The other way round: money onto the card that's split into categories isn't split between ledgers too.
+    const other = add(w.personal, w.visa, '2026-09-21', 10_000, 'Payment - thank you')
+    setParts(w.personal, other, [
+      { categoryId: categoryId(w.personal, 'Credit card payment'), amountMinor: 6_000 },
+      { categoryId: categoryId(w.personal, 'Groceries'), amountMinor: 4_000 },
+    ])
+    const give = () => setSplit(w.personal, w.ctxOf, other, { shares: [{ ledger: 'family', amountMinor: 4_000 }] }, { actor: TESTER, usable: null })
+    expect(give).toThrow('It’s split into categories. Undo that split to split it between ledgers.')
+    expect(getTransaction(w.personal, other)).toMatchObject({ split: null, parts: [{ amountMinor: 6_000 }, { amountMinor: 4_000 }] })
+    setParts(w.personal, other, [])
+    give()
+    expect(getTransaction(w.personal, other).split).toMatchObject({ part: 'payment' })
   })
 })
 

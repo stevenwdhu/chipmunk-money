@@ -1859,7 +1859,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'Export transactions as CSV',
       description:
-        'A transaction split into categories has a row for each part, with the part’s amount and category (and its note, when it has one), so a spreadsheet sums by category. With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: transfers and what’s left out of totals stay in.',
+        'A transaction split into categories has a row for each part, with the part’s amount and category (and its note, when it has one), so a spreadsheet sums by category. So does a refund or payback that has the category of a split purchase: a row for each part it comes off. With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: each whole, and transfers and what’s left out of totals stay in.',
       query: z.object({ from: isoDate.optional(), to: isoDate.optional() }).extend(filterQuery.shape),
       file: { contentType: 'text/csv', description: 'date, account, payee, amount, currency, category, group, notes, status, tags' },
     },

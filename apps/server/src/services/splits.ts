@@ -80,6 +80,8 @@ interface SplittableRow extends Payment {
   linked: number
   /** It's split already: this ledger has its given row. */
   isSplit: number
+  /** It's split into categories (category-splits.ts), the other split. */
+  byCategory: number
 }
 
 export interface SplitInput {
@@ -322,7 +324,8 @@ export function splitsFor(ctx: AppContext, rows: Array<{ id: number; amount: num
  * The payment, if it can be split: money onto a shared account, held here, not deleted and not a
  * split row itself, linked to nothing (a refund or a payback isn't a payment), and a transfer or in a
  * category left out of totals. Pending is fine. Otherwise 400 "Only a card payment can be split". An id
- * another ledger holds and one that doesn't exist get the same 400.
+ * another ledger holds and one that doesn't exist get the same 400. One split into categories isn't
+ * split between ledgers too: 409.
  *
  * A payment that's split already only has to be held here, live and on an account that's still
  * shared: what it is may have changed since (its category to one that counts, "not a transfer", its
@@ -334,7 +337,8 @@ export function assertSplittable(ctx: AppContext, id: number): SplittableRow {
        t.category_id AS categoryId, coalesce(c.exclude_from_totals, 0) AS excluded, t.split_of AS splitOf, t.deleted_at AS deletedAt,
        t.transfer_pair_id AS pairId,
        (EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_in_id = t.id) OR EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_out_id = t.id)) AS linked,
-       EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id) AS isSplit
+       EXISTS (SELECT 1 FROM transactions g WHERE g.ledger_id = t.ledger_id AND g.split_of = t.id) AS isSplit,
+       EXISTS (SELECT 1 FROM transaction_parts sp WHERE sp.transaction_id = t.id) AS byCategory
      FROM transactions t JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
        LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.id = ?`,
@@ -343,6 +347,7 @@ export function assertSplittable(ctx: AppContext, id: number): SplittableRow {
   if (!p) badRequest(`There’s no transaction ${id} in ${ctx.ledger.name} to split.`)
   const payment = p.isSplit ? !p.deletedAt : p.amount > 0 && !p.deletedAt && p.splitOf === null && !p.linked && (p.pairId !== null || !!p.excluded)
   if (!payment || !ctx.accountWide.isShared(p.accountId)) badRequest('Only a card payment can be split.')
+  if (p.byCategory && !p.isSplit) throw new HTTPException(409, { message: 'It’s split into categories. Undo that split to split it between ledgers.' })
   return p
 }
 

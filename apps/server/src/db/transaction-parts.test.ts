@@ -96,7 +96,7 @@ describe('transaction_lines', () => {
   it('shares a refund linked in full between the parts, to the cent', () => {
     const w = world()
     split(w)
-    // $10.01 of $100: 6.2162 → 6.22, 1.8418 → 1.84, and the last part takes the rest, 1.95.
+    // $10.01 of $100: 6.2162 → 6.22, 1.8418 → 1.84 and 1.9520 → 1.95.
     const refund = w.tx('A', w.a.account, '2026-08-06', 1001)
     w.link('refund', refund, w.a.purchase, 1001)
     expect(w.lines(refund, w.a.purchase)).toEqual([
@@ -107,6 +107,21 @@ describe('transaction_lines', () => {
     // Linked in full, it has no line of its own.
     expect(w.lines(refund)).toEqual([])
     expect(w.sqlite.prepare('SELECT sum(amount_minor) FROM transaction_lines WHERE id = ?').pluck().get(refund)).toBe(1001)
+  })
+
+  it('rounds no share to the other sign, nor more than a cent from exact', () => {
+    const w = world()
+    w.run('DELETE FROM transaction_links WHERE money_out_id = ?', w.a.purchase)
+    // Four parts of $25, and 2 cents back: half a cent each. Two parts take a cent, and none gives one.
+    for (let sort = 0; sort < 4; sort++) w.part(w.a.purchase, sort, null, -2500)
+    const refund = w.tx('A', w.a.account, '2026-08-06', 2)
+    w.link('refund', refund, w.a.purchase, 2)
+    expect(w.lines(refund, w.a.purchase).map(([amount]) => amount)).toEqual([1, 1, 0, 0])
+    // Six parts of 1 cent of money in, 3 cents of it paying back a bill: three parts give a cent.
+    const moneyIn = w.tx('A', w.a.savings, '2026-08-21', 6)
+    for (let sort = 0; sort < 6; sort++) w.part(moneyIn, sort, null, 1)
+    w.link('payback', moneyIn, w.a.payment, 3)
+    expect(w.lines(moneyIn).map(([amount]) => amount)).toEqual([1, 1, 1, 0, 0, 0])
   })
 
   it('shares a refund linked in part, and a payback on the bill’s date', () => {

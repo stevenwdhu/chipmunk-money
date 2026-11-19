@@ -22,18 +22,17 @@ CREATE INDEX `transaction_parts_category` ON `transaction_parts` (`category_id`)
 -- What reports add up, as before for a transaction with no parts: its own line, and a line for
 -- each link in its bill's category. A transaction with parts has a line for each part in place of
 -- its own, in the part's category, and a link to a bill with parts has a line for each of the
--- bill's parts. What's linked is shared between the parts by their amounts, to the cent: each
--- part's share is rounded, and the last part (by sort) takes what's left, so the shares add up to
--- the linked amount.
+-- bill's parts. What's linked is shared between the parts by their amounts, to the cent: a part's
+-- share is what the parts up to it (by sort) take, rounded, less what the parts before it take,
+-- rounded. So the shares add up to the linked amount, each within a cent of its exact share and
+-- none of the other sign.
 DROP VIEW `transaction_lines`;
 --> statement-breakpoint
 CREATE VIEW `transaction_lines` AS
 SELECT t.`ledger_id`, t.`id`, t.`account_id`, t.`date`,
   CASE WHEN p.`transaction_id` IS NULL THEN t.`amount_minor` - t.`linked_minor`
-    ELSE p.`amount_minor` - CASE WHEN EXISTS (SELECT 1 FROM `transaction_parts` n WHERE n.`transaction_id` = p.`transaction_id` AND n.`sort` > p.`sort`)
-      THEN CAST(round(t.`linked_minor` * 1.0 * p.`amount_minor` / t.`amount_minor`) AS INTEGER)
-      ELSE t.`linked_minor` - (SELECT coalesce(sum(CAST(round(t.`linked_minor` * 1.0 * o.`amount_minor` / t.`amount_minor`) AS INTEGER)), 0)
-        FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` < p.`sort`) END END AS `amount_minor`,
+    ELSE p.`amount_minor` - (CAST(round(t.`linked_minor` * 1.0 * (SELECT sum(o.`amount_minor`) FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` <= p.`sort`) / t.`amount_minor`) AS INTEGER)
+      - CAST(round(t.`linked_minor` * 1.0 * (SELECT coalesce(sum(o.`amount_minor`), 0) FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` < p.`sort`) / t.`amount_minor`) AS INTEGER)) END AS `amount_minor`,
   CASE WHEN p.`transaction_id` IS NULL THEN t.`category_id` ELSE p.`category_id` END AS `category_id`,
   t.`payee_key`, t.`deleted_at`, t.`transfer_pair_id`, t.`id` AS `owner_id`, NULL AS `link_kind`
 FROM `transactions` t LEFT JOIN `transaction_parts` p ON p.`transaction_id` = t.`id`
@@ -41,10 +40,8 @@ WHERE t.`linked_minor` = 0 OR t.`amount_minor` != t.`linked_minor`
 UNION ALL
 SELECT t.`ledger_id`, t.`id`, t.`account_id`, CASE l.`kind` WHEN 'payback' THEN b.`date` ELSE t.`date` END,
   CASE WHEN p.`transaction_id` IS NULL THEN l.`amount_minor`
-    ELSE CASE WHEN EXISTS (SELECT 1 FROM `transaction_parts` n WHERE n.`transaction_id` = p.`transaction_id` AND n.`sort` > p.`sort`)
-      THEN CAST(round(l.`amount_minor` * 1.0 * p.`amount_minor` / b.`amount_minor`) AS INTEGER)
-      ELSE l.`amount_minor` - (SELECT coalesce(sum(CAST(round(l.`amount_minor` * 1.0 * o.`amount_minor` / b.`amount_minor`) AS INTEGER)), 0)
-        FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` < p.`sort`) END END,
+    ELSE (CAST(round(l.`amount_minor` * 1.0 * (SELECT sum(o.`amount_minor`) FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` <= p.`sort`) / b.`amount_minor`) AS INTEGER)
+      - CAST(round(l.`amount_minor` * 1.0 * (SELECT coalesce(sum(o.`amount_minor`), 0) FROM `transaction_parts` o WHERE o.`transaction_id` = p.`transaction_id` AND o.`sort` < p.`sort`) / b.`amount_minor`) AS INTEGER)) END,
   CASE WHEN p.`transaction_id` IS NULL THEN b.`category_id` ELSE p.`category_id` END,
   t.`payee_key`, t.`deleted_at`, t.`transfer_pair_id`, l.`money_out_id`, l.`kind`
 FROM `transaction_links` l JOIN `transactions` t ON t.`id` = l.`money_in_id` JOIN `transactions` b ON b.`id` = l.`money_out_id`

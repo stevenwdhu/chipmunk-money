@@ -516,7 +516,7 @@ describe('GET /accounts/:id/transactions', () => {
       expect(items[2]).toMatchObject({ payee: 'Daycare', category: 'Groceries' })
       // Names only: no ids of the other ledger's categories or tags.
       expect(Object.keys(items[2]).sort()).toEqual(
-        ['amountMinor', 'balanceAfterMinor', 'category', 'currency', 'date', 'datetime', 'here', 'id', 'ledger', 'name', 'notes', 'origin', 'payee', 'payeeName', 'split', 'status'].sort(),
+        ['amountMinor', 'balanceAfterMinor', 'category', 'currency', 'date', 'datetime', 'here', 'id', 'ledger', 'name', 'notes', 'origin', 'payee', 'payeeName', 'split', 'splitByCategory', 'status'].sort(),
       )
       expect(res.body.nextCursor).toBeNull()
     }

@@ -123,26 +123,35 @@ function savePartsOf(ctx: AppContext, id: number, given: TransactionPart[]) {
 
 /**
  * Saves the parts checkParts returned. None: the split is undone, and the transaction keeps its
- * category. A transaction split for the first time no longer teaches its payee the category you
- * gave it.
+ * category. What its payee learned is the caller's to keep right (setParts, updateTransaction).
  */
 export function saveParts(ctx: AppContext, id: number, parts: TransactionPart[]) {
-  ctx.q.transaction(() => {
-    if (parts.length && !isSplitIntoCategories(ctx, id)) {
-      const was = ctx.q.get<{ payeeKey: string; amount: number; categoryId: number | null; source: string | null; pairId: number | null }>(
-        `SELECT payee_key AS payeeKey, amount_minor AS amount, category_id AS categoryId, category_source AS source, transfer_pair_id AS pairId
-         FROM transactions WHERE ledger_id = @ledger AND id = ?`,
-        id,
-      )
-      if (was?.source === 'user' && !was.pairId) learn(ctx, was.payeeKey, was.amount, was.categoryId, -1)
-    }
-    savePartsOf(ctx, id, parts)
-  })
+  ctx.q.transaction(() => savePartsOf(ctx, id, parts))
+}
+
+/**
+ * The category you gave a transaction counts for its payee again (or with -1, no longer): a split
+ * teaches its payee nothing, so it's taken away when the transaction is split, and given back when
+ * the split is undone and it keeps the category as yours.
+ */
+export function learnOwn(ctx: AppContext, id: number, delta: 1 | -1) {
+  const t = ctx.q.get<{ payeeKey: string; amount: number; categoryId: number | null; source: string | null; pairId: number | null }>(
+    `SELECT payee_key AS payeeKey, amount_minor AS amount, category_id AS categoryId, category_source AS source, transfer_pair_id AS pairId
+     FROM transactions WHERE ledger_id = @ledger AND id = ?`,
+    id,
+  )
+  if (t?.source === 'user' && !t.pairId) learn(ctx, t.payeeKey, t.amount, t.categoryId, delta)
 }
 
 /** Splits a transaction into categories (PUT /transactions/{id}/parts), or undoes the split with an empty list. */
 export function setParts(ctx: AppContext, id: number, input: Parameters<typeof checkParts>[2]) {
-  saveParts(ctx, id, checkParts(ctx, id, input))
+  const parts = checkParts(ctx, id, input)
+  ctx.q.transaction(() => {
+    const wasSplit = isSplitIntoCategories(ctx, id)
+    if (parts.length && !wasSplit) learnOwn(ctx, id, -1)
+    savePartsOf(ctx, id, parts)
+    if (!parts.length && wasSplit) learnOwn(ctx, id, 1)
+  })
 }
 
 /** The ledger's parts (or these transactions'), by transaction, each with its category's name. */

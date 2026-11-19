@@ -217,7 +217,8 @@ export interface SplitShare {
 
 /**
  * A row of a shared account as the all-ledgers list shows it, in whichever ledger holds it: its
- * category by name only, and no ids of what it's linked to there. For listAccountTransactions only.
+ * category by name only (and whether it's split into categories, not how), and no ids of what it's
+ * linked to there. For listAccountTransactions only.
  */
 export interface AccountTransactionRow {
   id: number
@@ -232,6 +233,8 @@ export interface AccountTransactionRow {
   /** Its own name, or its recurring item's when it's a payment of one with a name. */
   name: string | null
   category: string | null
+  /** It's split into categories there: `category` is its largest part's. */
+  splitByCategory: number
   notes: string | null
   status: 'cleared' | 'pending'
   origin: 'manual' | 'import' | 'sync'
@@ -620,7 +623,8 @@ const READS = {
     return db.all<AccountTransactionRow>(
       `SELECT t.id, t.ledger_id AS ledgerId, l.slug AS ledgerSlug, l.name AS ledgerName, t.date, t.datetime, t.amount_minor AS amountMinor,
          t.currency, t.payee, coalesce((SELECT r.title FROM recurring_items r WHERE r.id = t.recurring_item_id AND r.ledger_id = t.ledger_id), t.name) AS name,
-         (SELECT c.name FROM categories c WHERE c.id = t.category_id) AS category, t.notes, t.status, t.origin, ${SORT_KEY} AS sortKey
+         (SELECT c.name FROM categories c WHERE c.id = t.category_id) AS category,
+         EXISTS (SELECT 1 FROM transaction_parts sp WHERE sp.transaction_id = t.id) AS splitByCategory, t.notes, t.status, t.origin, ${SORT_KEY} AS sortKey
        FROM transactions t JOIN accounts a ON a.id = t.account_id JOIN ledgers l ON l.id = t.ledger_id
        WHERE t.account_id = @accountId AND t.deleted_at IS NULL AND ${NOT_SPLIT}
          AND (@from IS NULL OR t.date >= @from) AND (@to IS NULL OR t.date <= @to) AND (@cursor IS NULL OR ${SORT_KEY} < @cursor)

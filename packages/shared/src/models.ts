@@ -556,6 +556,7 @@ export const accountTransactionSchema = z
     payeeName: z.string().describe('What its payee is called: by your payee name rules, or AI tidying, or as sent.'),
     name: z.string().nullable().describe('What it is: its recurring item’s name when it’s a payment of one that has a name, otherwise its own.'),
     category: z.string().nullable().describe('Its category’s name in the ledger that holds it. Null when it has none.'),
+    splitByCategory: z.boolean().describe('It’s split into categories in the ledger that holds it: `category` is its largest part’s, and the transaction there has the parts.'),
     notes: z.string().nullable(),
     status: z.enum(['cleared', 'pending']),
     origin: z.enum(['manual', 'import', 'sync']),

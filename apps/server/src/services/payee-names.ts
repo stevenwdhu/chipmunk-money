@@ -19,6 +19,7 @@ import { payeeNameRules } from '../db/schema'
 import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { directionOf, learn } from './categorize'
+import { isSplitIntoCategories } from './category-splits'
 import type { AppContext, MetaStore } from './context'
 import { carryPayeeRefs } from './custom-reports'
 import { aiTidyOn, forgetPayeeNamer, loadNameRules, payeeNamerFor, tidiedNames } from './payee-namer'
@@ -317,7 +318,8 @@ function carryPayeeOver(ctx: AppContext, id: number, from: string, to: string, p
      FROM transactions WHERE ledger_id = @ledger AND id = ?`,
     id,
   )!
-  if (t.source === 'user' && t.categoryId) {
+  // A split into categories has its largest part's category: nothing learned it, and nothing does.
+  if (t.source === 'user' && t.categoryId && !isSplitIntoCategories(ctx, id)) {
     learn(ctx, from, t.amount, t.categoryId, -1)
     learn(ctx, to, t.amount, t.categoryId)
   }

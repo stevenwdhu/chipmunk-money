@@ -27,7 +27,7 @@ import type { AccountTransactionRow, SplitShare } from './account-rows'
 import { currentParts, getAccount } from './accounts'
 import { diff } from './activity'
 import { listScope, positional, textLike } from './filters'
-import { checkParts, isSplitIntoCategories, partsFor, saveParts, setParts } from './category-splits'
+import { checkParts, isSplitIntoCategories, learnOwn, partsFor, saveParts, setParts } from './category-splits'
 import { learn, suggestCategory, type SuggestionResult } from './categorize'
 import { upsertTags } from './categories'
 import type { UsableLedgers } from './bank/service'
@@ -571,6 +571,7 @@ export function listAccountTransactions(
       payeeName: named(r.payee).name,
       name: r.name,
       category: r.category,
+      splitByCategory: !!r.splitByCategory,
       notes: r.notes,
       status: r.status,
       origin: r.origin,
@@ -929,6 +930,12 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
       learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, input.categoryId ?? null)
     } else if (confirmsSuggestion) {
       learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, row.category_id)
+    } else if (parts && !wasSplit) {
+      // Split for the first time: its payee no longer learns the category you gave it, as it was before this change.
+      if (row.category_source === 'user') learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
+    } else if (wasSplit && !isSplitIntoCategories(ctx, id)) {
+      // Undone with its category kept (by an empty list, or by its new amount): that one is yours, and its payee learns it again.
+      learnOwn(ctx, id, 1)
     }
     const moved = input.amountMinor !== undefined || input.date !== undefined || input.payee !== undefined
     if (moved && !row.recurring_item_id && input.recurringItemId === undefined) matchRecurring(ctx, id)
