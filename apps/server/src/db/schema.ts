@@ -603,6 +603,26 @@ export const transactionLinks = sqliteTable(
   (t) => [uniqueIndex('links_pair').on(t.moneyInId, t.moneyOutId), index('links_out').on(t.moneyOutId)],
 )
 
+/**
+ * A transaction split into categories: its parts, in order, each with a category (or none), an
+ * amount and a note. They add up to the transaction's amount (parts_follow_amount keeps that when
+ * the amount changes), and reports count each part in its own category (the transaction_lines
+ * view). Not to be confused with a card payment split between ledgers (transactions.split_of).
+ */
+export const transactionParts = sqliteTable(
+  'transaction_parts',
+  {
+    transactionId: integer('transaction_id')
+      .notNull()
+      .references(() => transactions.id, { onDelete: 'cascade' }),
+    sort: integer('sort').notNull(),
+    categoryId: integer('category_id').references(() => categories.id, { onDelete: 'set null' }),
+    amountMinor: integer('amount_minor').notNull(),
+    note: text('note'),
+  },
+  (t) => [primaryKey({ columns: [t.transactionId, t.sort] }), index('transaction_parts_category').on(t.categoryId)],
+)
+
 export const transactionTags = sqliteTable(
   'transaction_tags',
   {

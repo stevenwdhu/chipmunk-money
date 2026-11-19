@@ -182,6 +182,11 @@ function schemaNames(sqlite: SQLite): string[] {
   return sqlite.prepare("SELECT type || ' ' || name FROM sqlite_master WHERE type IN ('trigger', 'index', 'view') AND name NOT LIKE 'sqlite_%'").pluck().all() as string[]
 }
 
+/** Every line reports add up (the transaction_lines view), in a fixed order, as JSON. */
+function reportLines(sqlite: SQLite): string {
+  return JSON.stringify(sqlite.prepare('SELECT * FROM transaction_lines ORDER BY ledger_id, id, owner_id, link_kind').all())
+}
+
 /** Triggers, indexes and views of the baseline that a later migration drops on purpose, and why. */
 const DROPPED: Record<string, string> = {
   'trigger keep_ledger_transactions': '0002: a transaction can move to another ledger that has its account, which tx_move_keeps_refs guards instead.',
@@ -200,8 +205,8 @@ function refusedByGuard(write: () => unknown): boolean {
 /**
  * Builds the baseline database, opens it with openDatabase and the given folder, and says what
  * went wrong, one line each: rows lost, added or changed, columns, triggers, indexes or views
- * gone, broken foreign keys or pages, accounts the view no longer gives its ledger, and guards
- * that no longer refuse. Added columns, tables and names are fine, and so is a trigger or view
+ * gone, broken foreign keys or pages, accounts the view no longer gives its ledger, report lines
+ * that changed, and guards that no longer refuse. Added columns, tables and names are fine, and so is a trigger or view
  * made again under its name, or one a later migration drops on purpose (DROPPED).
  */
 function upgradeProblems(migrations: string): string[] {
@@ -217,6 +222,7 @@ function upgradeProblems(migrations: string): string[] {
   const columnsBefore = tableColumns(plain)
   const contentsBefore = rowContents(plain, columnsBefore)
   const namesBefore = schemaNames(plain)
+  const linesBefore = reportLines(plain)
   const ran = lastAppliedMigration(plain)
   plain.close()
   const lost = (sqlite: SQLite) => {
@@ -266,6 +272,8 @@ function upgradeProblems(migrations: string): string[] {
   for (const fk of opened.pragma('foreign_key_check') as Array<{ table: string; parent: string }>) problems.push(`foreign key: ${fk.table} → ${fk.parent}`)
   const integrity = opened.pragma('integrity_check', { simple: true })
   if (integrity !== 'ok') problems.push(`integrity: ${integrity}`)
+  // Rows from before have no parts: reports add up the lines they did.
+  if (reportLines(opened) !== linesBefore) problems.push('transaction_lines gives other lines')
   for (const ledger of ['A', 'B'] as const) {
     const ids = opened.prepare('SELECT id FROM ledger_accounts WHERE ledger_id = ? ORDER BY id').pluck().all(ledger)
     if (JSON.stringify(ids) !== JSON.stringify([rows[ledger].account, rows[ledger].savings])) problems.push(`ledger_accounts gives ${ledger} ${JSON.stringify(ids)}`)

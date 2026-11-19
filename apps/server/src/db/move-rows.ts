@@ -158,6 +158,9 @@ const CROSSINGS: Record<string, string> = {
   'transaction in a category its ledger doesn’t use': `SELECT count(*) FROM transactions t JOIN categories c ON c.id = t.category_id
     WHERE c.ledger_id IS NOT t.ledger_id AND NOT (c.ledger_id IS NULL AND (SELECT k.category_list FROM ledgers k WHERE k.id = t.ledger_id) = 'shared')
       AND ${HELD('t.ledger_id')}`,
+  'part in a category its ledger doesn’t use': `SELECT count(*) FROM transaction_parts x JOIN transactions t ON t.id = x.transaction_id JOIN categories c ON c.id = x.category_id
+    WHERE c.ledger_id IS NOT t.ledger_id AND NOT (c.ledger_id IS NULL AND (SELECT k.category_list FROM ledgers k WHERE k.id = t.ledger_id) = 'shared')
+      AND ${HELD('t.ledger_id')}`,
   'transaction with another ledger’s recurring item': `SELECT count(*) FROM transactions t JOIN recurring_items r ON r.id = t.recurring_item_id
     WHERE r.ledger_id <> t.ledger_id AND (${HELD('t.ledger_id')} OR ${HELD('r.ledger_id')})`,
   'transaction with another ledger’s import batch': `SELECT count(*) FROM transactions t JOIN import_batches b ON b.id = t.import_batch_id
@@ -180,7 +183,7 @@ const CROSSINGS: Record<string, string> = {
 
 /**
  * Every reference that crosses ledgers, by what it is, with how many there are: none is how it
- * should be. A transaction's account, category, recurring item, import batch and transfer pair,
+ * should be. A transaction's account, category, parts' categories, recurring item, import batch and transfer pair,
  * a recurring item's account, links, rejected pairs, tags, dues and not-payments, and bank
  * payloads (which point only at rows the account's home holds). With `ledgers`, only references
  * from or to rows those ledgers hold. Read with every ledger in scope (`db`).

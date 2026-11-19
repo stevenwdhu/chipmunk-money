@@ -61,6 +61,10 @@ describe('deleteLedgerRows', () => {
     // B's card is shared with A, with a bank of A's own.
     const institution = writer(a)("INSERT INTO institutions (ledger_id, name) VALUES (@ledger, 'Family bank')")
     writer(a)('INSERT INTO account_ledgers (ledger_id, account_id, institution_id) VALUES (@ledger, @account, @institution)', { account: rowsB.account, institution })
+    // A's purchase is split into two categories.
+    for (const [sort, category, amount] of [[0, opts.category, -6000], [1, null, -4000]]) {
+      writer(a)('INSERT INTO transaction_parts (transaction_id, sort, category_id, amount_minor) VALUES (@purchase, @sort, @category, @amount)', { purchase: rowsA.purchase, sort, category, amount })
+    }
     // A bank account linked to one of A's accounts.
     storage.sqlite.prepare("INSERT INTO bank_connections (id, provider, name, secret) VALUES ('c', 'simplefin', 'SimpleFIN', 's')").run()
     storage.sqlite

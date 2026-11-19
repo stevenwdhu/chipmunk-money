@@ -58,6 +58,8 @@ export const TABLES: readonly TableDef[] = [
       { column: 'money_out_id', table: 'transactions' },
     ],
   },
+  // A transaction split into categories. Its category is one its transaction's ledger uses (guard_transaction_parts_*).
+  { name: 'transaction_parts', kind: 'child', parents: [{ column: 'transaction_id', table: 'transactions' }] },
   {
     name: 'transaction_tags',
     kind: 'child',
