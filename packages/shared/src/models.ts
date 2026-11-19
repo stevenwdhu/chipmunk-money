@@ -476,7 +476,18 @@ export const moveResultSchema = z
     unlinked: z.number().int().describe('Links let go, because one side moved and the other stayed.'),
     unpaired: z.number().int().describe('Transfers no longer paired with their other side, which stayed.'),
     recategorized: z.number().int().describe('Moved transactions whose category there isn’t the one they had (by name), or that have none there.'),
-    recurringDetached: z.number().int().describe('Moved transactions taken off a recurring item.'),
+    recurringDetached: z.number().int().describe('Moved transactions taken off a recurring item that stayed. None in a move you make: the item goes with them (`recurringItems`).'),
+    recurringItems: z
+      .array(
+        z.object({
+          itemId: id.describe('Its id in the ledger it left.'),
+          item: z.string().describe('Its name, or its payee.'),
+          payments: z.number().int().describe('Its payments that moved: the ones asked for and the rest of them.'),
+          left: z.number().int().describe('Its payments that couldn’t move (on an account the other ledger doesn’t have, or part of a split). With any, the item also stays where it was, with those.'),
+          joined: z.boolean().describe('The other ledger had an active recurring item for the payee already, and the payments are that one’s. Otherwise the item is there as it was.'),
+        }),
+      )
+      .describe('The recurring items that went with their payments. Moving one payment of a recurring item moves all of them, and the item, and `moved` counts them all.'),
     tagsCreated: z.number().int().describe('Tags the ledger they went to didn’t have, added for them.'),
     matched: z
       .object({ refunds: z.number().int(), transfers: z.number().int(), payments: z.number().int(), cleared: z.number().int() })
@@ -1087,6 +1098,19 @@ export const importPreviewRowSchema = z
   .meta({ id: 'ImportPreviewRow' })
 export type ImportPreviewRow = z.output<typeof importPreviewRowSchema>
 
+export const routedTransactionSchema = z
+  .object({
+    id,
+    payee: z.string().describe('Its name, or its payee.'),
+    ledger: z.string().describe('The ledger it went to, by name.'),
+    item: z.string().describe('The recurring item there it’s a payment of.'),
+  })
+  .meta({ id: 'RoutedTransaction' })
+  .describe(
+    'A new transaction on a shared account that went from the account’s home to another ledger that has it, because it’s a payment of an active recurring item there, of none in the home, and of none in any other ledger that has the account.',
+  )
+export type RoutedTransaction = z.output<typeof routedTransactionSchema>
+
 export const importResultSchema = z
   .object({
     batchId: id.nullable().describe('Null for a dry run.'),
@@ -1094,6 +1118,7 @@ export const importResultSchema = z
     skippedDuplicates: z.number().int(),
     categorized: z.number().int(),
     needsReview: z.number().int(),
+    routed: z.array(routedTransactionSchema).describe('Of the imported ones, those that went to another ledger for its recurring item. They’re no longer in this ledger.'),
     dryRun: z.boolean(),
   })
   .meta({ id: 'ImportResult' })
@@ -1359,6 +1384,7 @@ export const syncResultSchema = z
         updated: z.number().int(),
         adopted: z.number().int().describe('Matched to transactions you had entered or imported.'),
         removed: z.number().int().describe('Pending transactions the bank no longer reports.'),
+        routed: z.array(routedTransactionSchema).describe('Of the added ones, those that went to another ledger for its recurring item.'),
         error: z.string().nullable(),
       }),
     ),

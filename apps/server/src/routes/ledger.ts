@@ -139,7 +139,7 @@ import type { AppContext } from '../services/context'
 import * as imports from '../services/import'
 import * as institutions from '../services/institutions'
 import { matchTransactions } from '../services/matching'
-import { moveTransactions } from '../services/moves'
+import { moveTransactions, routeToItems } from '../services/moves'
 import { questionsFor } from '../services/questions'
 import * as recurring from '../services/recurring'
 import * as reports from '../services/reports'
@@ -396,7 +396,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Move transactions to another ledger',
       description:
-        'For transactions on a shared account: they go to another ledger that has the account (`to`), which holds them from then on, and each ledger’s balance on the account changes by them. All of them move, or none (400 naming the one that doesn’t fit: one this ledger doesn’t hold, a deleted one, one whose account `to` doesn’t have, a split payment or a share of one, or `to` archived). Up to 1,000 at a time. The other ledger treats them as new: links to transactions that stay are let go (a refund moving with its purchase keeps its link), a transfer is no longer paired, recurring items let go of them, tags go by name, and the category is the one of the same name there, else what that ledger’s history suggests, else none (a card payment or transfer takes that ledger’s category for it). Then that ledger’s matching runs, and AI categorizes what’s left without a category. There’s no undo: move them back with another move, from the other ledger. Afterwards their ids are not found here (404). Try it with `dryRun=true` first: `dropped` lists what would be let go.' +
+        'For transactions on a shared account: they go to another ledger that has the account (`to`), which holds them from then on, and each ledger’s balance on the account changes by them. All of them move, or none (400 naming the one that doesn’t fit: one this ledger doesn’t hold, a deleted one, one whose account `to` doesn’t have, a split payment or a share of one, or `to` archived). Up to 1,000 at a time. The other ledger treats them as new: links to transactions that stay are let go (a refund moving with its purchase keeps its link), a transfer is no longer paired, tags go by name, and the category is the one of the same name there, else what that ledger’s history suggests, else none (a card payment or transfer takes that ledger’s category for it). A recurring item goes with its payments: when one of them is a recurring item’s payment, the item’s other payments that can move are moved too (`moved` counts them, and the 1,000 limit applies to them all), and the item with them (`recurringItems`). There they’re payments of that ledger’s own active item for the payee when it has one, and otherwise the item is there as it was: its name, schedule, amount, price variation, number of payments and next due date, with the category of the same name. Here the item is gone, unless some of its payments couldn’t move (on an account `to` doesn’t have, or part of a split): it stays with those (`left`). Then that ledger’s matching runs, and AI categorizes what’s left without a category. There’s no undo: move them back with another move, from the other ledger. Afterwards their ids are not found here (404). Try it with `dryRun=true` first: `dropped` lists what would be let go, and `recurringItems` what would go along.' +
         ACROSS,
       body: transactionMoveSchema,
       response: moveResultSchema,
@@ -1565,14 +1565,18 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...imp,
       scope: 'write',
       summary: 'Import transactions',
-      description: 'Adds the rows that aren’t duplicates as one batch. Rows with an `externalId` the account already has are skipped, in any ledger that has a shared account. To take an import back, delete its transactions.',
+      description:
+        'Adds the rows that aren’t duplicates as one batch. Rows with an `externalId` the account already has are skipped, in any ledger that has a shared account. To take an import back, delete its transactions. Into a shared account, a new row that is a payment of an active recurring item in exactly one other ledger that has the account (not archived), and of none in this one, goes to that ledger, as after a bank sync: `routed` lists those, which are no longer here. A key limited to this ledger can import all the same.',
       body: importCommitSchema,
       response: importResultSchema,
       status: 201,
       dryRun: true,
     },
     (c, { body, dryRun }) => {
-      const result = imports.commitImport(c.var.ctx, body, { background: !dryRun })
+      const result = imports.commitImport(c.var.ctx, body, {
+        background: !dryRun,
+        route: (ids) => routeToItems(c.var.ctx, storage.ctxOf, ids, acting(c), { defer: dryRun }).map(({ accountId: _, ...r }) => r),
+      })
       if (dryRun) return { ...result, batchId: null, dryRun }
       log(c, {
         action: 'import',

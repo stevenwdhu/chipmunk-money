@@ -326,7 +326,7 @@ describe('moving transactions: links, pairs, recurring items, tags', () => {
     w.check()
   })
 
-  it('takes a payment off its recurring item, and the other ledger’s item takes it', async () => {
+  it('takes a payment off its recurring item when only the rows go (plain), and the other ledger’s item takes it', async () => {
     const w = world()
     const { personal, family } = w
     const add = (date: string) =>
@@ -342,14 +342,14 @@ describe('moving transactions: links, pairs, recurring items, tags', () => {
     const theirs = createRecurring(family, recurringCreateSchema.parse({ payee: 'SPOTIFY', expectedAmountMinor: -1199, cadence: 'monthly', anchorDate: '2026-09-05' }))
 
     const moved = pays[2]!.id
-    expect(w.move(personal, [moved], family)).toMatchObject({ recurringDetached: 1, dropped: { recurring: [{ id: moved, itemId: mine.id }] } })
+    expect(w.move(personal, [moved], family, { plain: true })).toMatchObject({ moved: 1, recurringDetached: 1, recurringItems: [], dropped: { recurring: [{ id: moved, itemId: mine.id }] } })
     expect(getRecurring(personal, mine.id)).toMatchObject({ occurrences: 2, nextDueDate: '2026-09-05' })
     expect(getTransaction(family, moved)).toMatchObject({ recurringItemId: theirs.id })
     expect(getRecurring(family, theirs.id)).toMatchObject({ occurrences: 1, nextDueDate: '2026-10-05' })
     w.check()
   })
 
-  it('gives back a plan’s payment from before your history, and reopens a paid-off plan', async () => {
+  it('gives back a plan’s payment from before your history, and reopens a paid-off plan, when only the rows go (plain)', async () => {
     const w = world()
     const { personal, family } = w
     const add = (date: string, amountMinor: number, payee: string) =>
@@ -364,7 +364,7 @@ describe('moving transactions: links, pairs, recurring items, tags', () => {
     )
     updateRecurring(personal, sofa.id, { paidPayments: 4 })
     expect(addPayment(personal, sofa.id, down.id)).toMatchObject({ paidPayments: 4, remainingPayments: 1 })
-    expect(w.move(personal, [down.id], family)).toMatchObject({ recurringDetached: 1 })
+    expect(w.move(personal, [down.id], family, { plain: true })).toMatchObject({ recurringDetached: 1 })
     // Still four paid: the one from before your history counts as paid before again.
     expect(getRecurring(personal, sofa.id)).toMatchObject({ paidPayments: 4, remainingPayments: 1, occurrences: 3 })
 
@@ -374,7 +374,7 @@ describe('moving transactions: links, pairs, recurring items, tags', () => {
     detectRecurring(personal)
     const klarna = confirmRecurring(personal, listRecurring(personal, 'suggested').find((r) => r.expectedAmountMinor === -2500)!.id)
     expect(klarna).toMatchObject({ status: 'ended', paidPayments: 4 })
-    w.move(personal, [pays[3]!.id], family)
+    w.move(personal, [pays[3]!.id], family, { plain: true })
     expect(getRecurring(personal, klarna.id)).toMatchObject({ status: 'active', paidPayments: 3, nextDueDate: '2026-07-14' })
     w.check()
   })
@@ -444,6 +444,156 @@ describe('moving transactions: what is refused', () => {
     expect(w.move(personal, ids.slice(0, MOVE_LIMIT), family)).toMatchObject({ moved: MOVE_LIMIT })
     expect(family.q.pluck('SELECT count(*) FROM transactions WHERE ledger_id = @ledger')).toBe(MOVE_LIMIT)
     w.check()
+  })
+})
+
+describe('moving transactions: a recurring item goes with its payments', () => {
+  /** Personal's monthly item on Visa with a payment each month from July to September, on the day given. */
+  async function subscription(w: ReturnType<typeof world>, payee: string, amountMinor: number, day: string, more: Record<string, unknown> = {}) {
+    const item = createRecurring(
+      w.personal,
+      recurringCreateSchema.parse({ payee, expectedAmountMinor: amountMinor, cadence: 'monthly', anchorDate: `2026-07-${day}`, accountId: w.visa, ...more }),
+    )
+    const pays: number[] = []
+    for (const month of ['07', '08', '09']) {
+      pays.push((await createTransaction(w.personal, transactionCreateSchema.parse({ accountId: w.visa, date: `2026-${month}-${day}`, amountMinor, payee }), { useAi: false })).id)
+    }
+    expect(getRecurring(w.personal, item.id)).toMatchObject({ occurrences: 3, nextDueDate: `2026-10-${day}` })
+    return { item, pays }
+  }
+  const dues = (ctx: AppContext, itemId: number) =>
+    ctx.q.all(
+      'SELECT transaction_id AS id, due_date AS due, one_off AS oneOff FROM recurring_payment_dues WHERE item_id IN (SELECT id FROM recurring_items WHERE ledger_id = @ledger AND id = ?)',
+      itemId,
+    )
+
+  it('moves every payment and the item when one payment is moved, says so in a dry run first, and moves it all back', async () => {
+    const w = world()
+    const { personal, family } = w
+    const subs = categoryId(personal, 'Software & media')
+    const { item, pays } = await subscription(w, 'NETFLIX', -1599, '03', { name: 'Netflix', categoryId: subs, amountTolerancePct: 15 })
+    // An extra charge you added to it by hand, for August's due date.
+    const extra = (await createTransaction(personal, transactionCreateSchema.parse({ accountId: w.visa, date: '2026-08-20', amountMinor: -500, payee: 'NETFLIX' }), { useAi: false })).id
+    expect(addPayment(personal, item.id, extra)).toMatchObject({ occurrences: 4, nextDueDate: '2026-10-03' })
+    expect(dues(personal, item.id)).toEqual([{ id: extra, due: '2026-08-03', oneOff: 1 }])
+    const plain = w.row(personal, '2026-09-10', -2000)
+    const before = w.check()
+    // Three payments of $15.99 and one of $5.00, and $20.00 besides.
+    expect(before.parts).toEqual({ personal: -3 * 1599 - 500 - 2000, family: 0 })
+
+    const whole = { itemId: item.id, item: 'Netflix', payments: 4, left: 0, joined: false }
+    const everything = w.everything(personal, family)
+    expect(w.move(personal, [pays[1]!], family, { dryRun: true })).toMatchObject({ moved: 4, recurringDetached: 0, recurringItems: [whole], dropped: { recurring: [] } })
+    expect(w.everything(personal, family)).toEqual(everything)
+
+    expect(w.move(personal, [pays[1]!], family)).toMatchObject({ moved: 4, recurringDetached: 0, recurringItems: [whole] })
+    // Gone where it was, with the other row left. Whole where it went: its settings, schedule, payments, due date and category of the same name.
+    expect(listRecurring(personal)).toEqual([])
+    expect(getTransaction(personal, plain).id).toBe(plain)
+    const theirs = listRecurring(family)
+    expect(theirs).toHaveLength(1)
+    expect(theirs[0]).toMatchObject({
+      name: 'Netflix',
+      payee: 'NETFLIX',
+      status: 'active',
+      origin: 'manual',
+      cadence: 'monthly',
+      anchorDate: '2026-07-03',
+      nextDueDate: '2026-10-03',
+      expectedAmountMinor: -1599,
+      amountTolerancePct: 15,
+      accountId: w.visa,
+      categoryId: categoryId(family, 'Software & media'),
+      occurrences: 4,
+    })
+    expect(dues(family, theirs[0]!.id)).toEqual([{ id: extra, due: '2026-08-03', oneOff: 1 }])
+    for (const id of [...pays, extra]) {
+      expect(getTransaction(family, id)).toMatchObject({ recurringItemId: theirs[0]!.id, categoryId: categoryId(family, 'Software & media'), categorySource: 'recurring' })
+    }
+    const after = w.check()
+    expect(after.parts).toEqual({ personal: -2000, family: -3 * 1599 - 500 })
+    expect(after.totalMinor).toBe(before.totalMinor)
+    expect(personal.q.column('SELECT summary FROM activity WHERE ledger_id = @ledger ORDER BY id DESC LIMIT 1')).toEqual(['Moved 4 transactions to Family, with the recurring item Netflix'])
+    expect(family.q.column('SELECT summary FROM activity WHERE ledger_id = @ledger ORDER BY id DESC LIMIT 1')).toEqual([
+      'Personal moved 4 transactions to this ledger, with the recurring item Netflix',
+    ])
+
+    // Back again, by its extra payment: the item is Personal's again, as it was, and Family has none.
+    expect(w.move(family, [extra], personal)).toMatchObject({ moved: 4, recurringItems: [{ item: 'Netflix', payments: 4, left: 0, joined: false }] })
+    expect(listRecurring(family)).toEqual([])
+    const mine = listRecurring(personal)
+    expect(mine).toHaveLength(1)
+    expect(mine[0]).toMatchObject({ name: 'Netflix', nextDueDate: '2026-10-03', anchorDate: '2026-07-03', occurrences: 4, categoryId: subs, accountId: w.visa, amountTolerancePct: 15 })
+    expect(dues(personal, mine[0]!.id)).toEqual([{ id: extra, due: '2026-08-03', oneOff: 1 }])
+    expect(w.check().parts).toEqual(before.parts)
+  })
+
+  it('makes them payments of the other ledger’s own active item for the payee, when it has one', async () => {
+    const w = world()
+    const { personal, family } = w
+    const { item, pays } = await subscription(w, 'SPOTIFY', -1199, '05')
+    const theirs = createRecurring(family, recurringCreateSchema.parse({ payee: 'SPOTIFY', name: 'Music', expectedAmountMinor: -1199, cadence: 'monthly', anchorDate: '2026-07-05' }))
+
+    expect(w.move(personal, [pays[2]!], family)).toMatchObject({ moved: 3, recurringItems: [{ itemId: item.id, item: 'SPOTIFY', payments: 3, left: 0, joined: true }] })
+    expect(listRecurring(personal)).toEqual([])
+    expect(listRecurring(family).map((r) => r.id)).toEqual([theirs.id])
+    expect(getRecurring(family, theirs.id)).toMatchObject({ name: 'Music', occurrences: 3, nextDueDate: '2026-10-05' })
+    for (const id of pays) expect(getTransaction(family, id).recurringItemId).toBe(theirs.id)
+    w.check()
+  })
+
+  it('leaves a payment on an account the other ledger doesn’t have, and the item with it', async () => {
+    const w = world()
+    const { personal, family } = w
+    const chequing = makeAccount(personal, 'Chequing', 'chequing', 0, 'TD')
+    const item = createRecurring(personal, recurringCreateSchema.parse({ payee: 'GYM', expectedAmountMinor: -4000, cadence: 'monthly', anchorDate: '2026-07-05' }))
+    const pay = async (date: string, accountId: number) =>
+      (await createTransaction(personal, transactionCreateSchema.parse({ accountId, date, amountMinor: -4000, payee: 'GYM' }), { useAi: false })).id
+    const old = await pay('2026-07-05', chequing)
+    const pays = [await pay('2026-08-05', w.visa), await pay('2026-09-05', w.visa)]
+    expect(getRecurring(personal, item.id)).toMatchObject({ occurrences: 3, nextDueDate: '2026-10-05' })
+
+    expect(w.move(personal, [pays[1]!], family)).toMatchObject({ moved: 2, recurringItems: [{ itemId: item.id, item: 'GYM', payments: 2, left: 1, joined: false }] })
+    // Personal keeps the item with July's payment, due again in August. Family has it with the two that moved.
+    expect(getRecurring(personal, item.id)).toMatchObject({ occurrences: 1, nextDueDate: '2026-08-05' })
+    expect(getTransaction(personal, old).recurringItemId).toBe(item.id)
+    const theirs = listRecurring(family)
+    expect(theirs).toHaveLength(1)
+    expect(theirs[0]).toMatchObject({ payee: 'GYM', occurrences: 2, nextDueDate: '2026-10-05', accountId: null })
+    w.check()
+  })
+
+  it('takes two items and plain rows in one move, and counts an item’s other payments against the limit', async () => {
+    const w = world()
+    const { personal, family } = w
+    const netflix = await subscription(w, 'NETFLIX', -1599, '03')
+    const spotify = await subscription(w, 'SPOTIFY', -1199, '05')
+    const plain = [w.row(personal, '2026-09-10', -2000), w.row(personal, '2026-09-11', -3000)]
+
+    const result = w.move(personal, [netflix.pays[0]!, spotify.pays[2]!, plain[0]!], family)
+    expect(result).toMatchObject({
+      moved: 7,
+      recurringItems: [
+        { itemId: netflix.item.id, item: 'NETFLIX', payments: 3, left: 0, joined: false },
+        { itemId: spotify.item.id, item: 'SPOTIFY', payments: 3, left: 0, joined: false },
+      ],
+    })
+    expect(listRecurring(personal)).toEqual([])
+    expect(listRecurring(family).map((r) => [r.payee, r.occurrences, r.nextDueDate])).toEqual([
+      ['NETFLIX', 3, '2026-10-03'],
+      ['SPOTIFY', 3, '2026-10-05'],
+    ])
+    expect(getTransaction(personal, plain[1]!).id).toBe(plain[1])
+    // 3 × $15.99 + 3 × $11.99 + $20.00 went, and $30.00 stayed.
+    expect(w.check().parts).toEqual({ personal: -3000, family: -3 * 1599 - 3 * 1199 - 2000 })
+
+    // An item with 1,000 payments and one more row: 1,001 with them, though two were picked.
+    const big = createRecurring(family, recurringCreateSchema.parse({ payee: 'TOLL', expectedAmountMinor: -100, cadence: 'weekly', anchorDate: '2026-10-01' }))
+    const tolls = family.q.transaction(() => Array.from({ length: MOVE_LIMIT }, (_, i) => w.row(family, addDays('2024-01-01', i), -100, { payee: 'TOLL' })))
+    family.q.run('UPDATE transactions SET recurring_item_id = ? WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(?))', big.id, JSON.stringify(tolls))
+    const before = w.everything(personal, family)
+    refused(() => w.move(family, [tolls[0]!, plain[0]!], personal), 'With the other payments of TOLL that’s 1001 transactions. Move at most 1000 at a time.')
+    expect(w.everything(personal, family)).toEqual(before)
   })
 })
 

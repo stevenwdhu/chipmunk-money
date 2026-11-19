@@ -19,6 +19,7 @@ import {
   type SwitchResult,
   type WealthsimpleConnect,
   type WealthsimpleConnectResult,
+  type RoutedTransaction,
 } from '@chipmunk/shared'
 import type { z } from 'zod'
 import type { accountBankSwitchSchema } from '@chipmunk/shared'
@@ -29,11 +30,12 @@ import { ulid } from '../../lib/ids'
 import { WrongSecretKeyError } from '../../lib/secrets'
 import type { Storage } from '../../storage'
 import * as accounts from '../accounts'
-import { recordActivity } from '../activity'
+import { recordActivity, type ActivityActor } from '../activity'
 import type { AppContext } from '../context'
 import * as institutions from '../institutions'
 import { categorizeUncategorized } from '../import'
 import { matchTransactions } from '../matching'
+import { routeToItems, type Routed } from '../moves'
 import { detectRecurring } from '../recurring'
 import { bankSyncHours, effectiveTimezone, getAppSetting, plaidCredentials, setAppSetting } from '../settings'
 import { keepRuleNames, rebuildPayeeKeys, worldOf } from '../payee-names'
@@ -546,9 +548,9 @@ export class BankService {
       provider,
     )
     this.caughtUp(ctx, accountId, acct)
-    this.settle(ctx, applied.newIds)
+    this.settle(ctx, applied.newIds, actor(provider))
     // The ledgers the account is shared with whose rows changed settle too.
-    for (const ledgerId of applied.ledgers) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [])
+    for (const ledgerId of applied.ledgers) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [], actor(provider))
     return { added: applied.added, adopted: applied.adopted }
   }
 
@@ -567,15 +569,22 @@ export class BankService {
     if (acct.balanceMinor !== null && acct.balanceDate) this.alignWithBank(ctx, accountId, { balanceMinor: acct.balanceMinor, balanceDate: acct.balanceDate })
   }
 
-  /** As after a sync: refunds and card payments first, then recurring payments, then AI for the new ones. */
-  private settle(ctx: AppContext, newIds: number[]) {
+  /**
+   * As after a sync: refunds and card payments first, then the new ones that are payments of another
+   * ledger's recurring item go there (routeToItems, returned), then recurring payments, then AI for
+   * the new ones still here.
+   */
+  private settle(ctx: AppContext, newIds: number[], by: ActivityActor): Routed[] {
     const earliest = newIds.length
       ? (ctx.q.pluck<string>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(@ids))', { ids: JSON.stringify(newIds) }) ?? null)
       : null
     const { cleared } = matchTransactions(ctx, { earliest })
-    if (!newIds.length && !cleared.length) return
+    if (!newIds.length && !cleared.length) return []
+    const routed = routeToItems(ctx, this.storage.ctxOf, newIds, by)
+    const went = new Set(routed.map((r) => r.id))
     detectRecurring(ctx)
-    if (aiEnabled(ctx)) void categorizeUncategorized(ctx, { ids: [...newIds, ...cleared] })
+    if (aiEnabled(ctx)) void categorizeUncategorized(ctx, { ids: [...newIds, ...cleared].filter((id) => !went.has(id)) })
+    return routed
   }
 
   /** A bank account a ledger account can switch to: one that isn't syncing into another account. */
@@ -1040,7 +1049,7 @@ export class BankService {
         continue
       }
       const providerError = remote?.error ?? null
-      const summary = { bankAccountId: acct.id, name: acct.name, ledger: ledger.slug, accountId: target.id, accountName: target.name, added: 0, updated: 0, adopted: 0, removed: 0, error: providerError }
+      const summary = { bankAccountId: acct.id, name: acct.name, ledger: ledger.slug, accountId: target.id, accountName: target.name, added: 0, updated: 0, adopted: 0, removed: 0, routed: [] as RoutedTransaction[], error: providerError }
       if (!remote) {
         summary.error = `${BANK_PROVIDER_LABELS[row.provider]} didn’t return this account this time.`
         this.db.update(bankAccounts).set({ error: summary.error }).where(eq(bankAccounts.id, acct.id)).run()
@@ -1085,7 +1094,11 @@ export class BankService {
       result.accounts.push(summary)
     }
 
-    for (const { ctx, newIds } of touched.values()) this.settle(ctx, newIds)
+    for (const { ctx, newIds } of touched.values()) {
+      for (const { accountId, ...r } of this.settle(ctx, newIds, actor(row.provider))) {
+        result.accounts.find((a) => a.ledger === ctx.ledger.slug && a.accountId === accountId)?.routed.push(r)
+      }
+    }
   }
 
   /** Connections whose scheduled sync is due (not while a switch involving them is reviewed). */

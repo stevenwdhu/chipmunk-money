@@ -122,6 +122,9 @@ const WRITE: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, op
 const amountPair = (minor: number) => ({ minor, formatted: money(minor) })
 const moneyOut = z.object({ minor: z.number(), formatted: z.string() })
 const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`
+/** A new transaction a sync or an import sent to another ledger for its recurring item. */
+const ROUTED = z.object({ id: z.number(), payee: z.string(), ledger: z.string().describe('The ledger it went to, by name.'), item: z.string().describe('The recurring item there it’s a payment of.') })
+const routedLines = (routed: z.output<typeof ROUTED>[]) => routed.map((r) => `#${r.id} ${r.payee} went to ${r.ledger}, where it’s a payment of ${r.item}.`)
 
 async function monthRange(ctx: ToolContext, from?: string, to?: string) {
   const today = await ctx.today()
@@ -801,7 +804,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'write',
     title: 'Move transactions to another ledger',
     description:
-      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.',
+      'Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A recurring item goes with its payments: moving one payment of a recurring item moves all its payments that can move, and the item (`recurringItems`), so `moved` can be more than you asked for. Tell the user before you move one. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go and what would go along first.',
     input: z.object({
       ledger,
       ids: z.array(z.number().int()).min(1).max(1000).describe('Transactions this ledger holds, on accounts shared with `to`.'),
@@ -817,7 +820,17 @@ export const TOOLS: ToolDef[] = [
       unlinked: z.number().describe('Links let go, because one side moved and the other stayed.'),
       unpaired: z.number().describe('Transfers no longer paired with their other side, which stayed.'),
       recategorized: z.number().describe('Moved transactions with another category there, or none.'),
-      recurringDetached: z.number().describe('Moved transactions taken off a recurring item.'),
+      recurringDetached: z.number().describe('Moved transactions taken off a recurring item that stayed. None when the item goes with them.'),
+      recurringItems: z
+        .array(
+          z.object({
+            item: z.string(),
+            payments: z.number().describe('Its payments that moved: the ones asked for and the rest of them.'),
+            left: z.number().describe('Its payments that couldn’t move. With any, the item also stays where it was, with those.'),
+            joined: z.boolean().describe('They’re payments of an active item the other ledger already had for the payee. Otherwise the item is there as it was.'),
+          }),
+        )
+        .describe('The recurring items that went with their payments.'),
       tagsCreated: z.number().describe('Tags the other ledger didn’t have, added for them.'),
       matched: z
         .object({ refunds: z.number(), transfers: z.number(), payments: z.number(), cleared: z.number() })
@@ -831,6 +844,7 @@ export const TOOLS: ToolDef[] = [
       const l = await ctx.ledger(args.ledger)
       const to = await ctx.ledger(args.to)
       const r = await ctx.api.post<MoveResult>(`/ledgers/${l.slug}/transactions/move`, { ids: args.ids, to: to.slug }, { dryRun: args.dryRun })
+      const recurringItems = r.recurringItems.map(({ item, payments, left, joined }) => ({ item, payments, left, joined }))
       const partlyLinked = r.dropped.partlyLinked.map((p) => ({ id: p.id, ledger: p.ledger, payee: p.payee, left: money(p.leftMinor) }))
       const found = [
         r.matched.refunds ? plural(r.matched.refunds, 'refund') : '',
@@ -844,6 +858,10 @@ export const TOOLS: ToolDef[] = [
         r.unlinked ? `${plural(r.unlinked, 'link')} let go (one side stayed).` : '',
         r.unpaired ? `${plural(r.unpaired, 'transfer')} no longer paired with ${r.unpaired === 1 ? 'its' : 'their'} other side.` : '',
         r.recurringDetached ? `${r.recurringDetached} taken off a recurring item.` : '',
+        ...recurringItems.map(
+          (i) =>
+            `${i.item} is a recurring item: ${plural(i.payments, 'payment')} ${args.dryRun ? 'would go' : 'went'}${i.joined ? `, as payments of ${to.name}’s own item` : ' with the item'}${i.left ? `, and ${i.left} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${l.name} with the item` : ''}.`,
+        ),
         r.recategorized ? `${r.recategorized} with another category in ${to.name}, or none.` : '',
         r.tagsCreated ? `${plural(r.tagsCreated, 'tag')} added in ${to.name}.` : '',
         found.length ? `Matched in ${to.name}: ${found.join(', ')}.` : '',
@@ -863,6 +881,7 @@ export const TOOLS: ToolDef[] = [
           unpaired: r.unpaired,
           recategorized: r.recategorized,
           recurringDetached: r.recurringDetached,
+          recurringItems,
           tagsCreated: r.tagsCreated,
           matched: r.matched,
           partlyLinked,
@@ -1883,7 +1902,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'write',
     title: 'Import transactions',
     description:
-      'Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions.',
+      'Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions. Into a shared account, a new row that is a payment of a recurring item in one other ledger that has the account goes to that ledger (`routed`).',
     input: z.object({
       ledger,
       account: nameOrId,
@@ -1909,6 +1928,7 @@ export const TOOLS: ToolDef[] = [
       duplicates: z.number(),
       categorized: z.number(),
       needsReview: z.number().optional(),
+      routed: z.array(ROUTED).optional().describe('Imported rows that went to another ledger, where each is a payment of a recurring item.'),
       preview: z
         .array(
           z.object({
@@ -1952,8 +1972,11 @@ export const TOOLS: ToolDef[] = [
       }
       const r = await ctx.api.post<ImportResult>(`/ledgers/${l.slug}/import/commit`, { accountId, rows, fileName: args.fileName })
       return {
-        text: `Imported ${plural(r.imported, 'transaction')} into ${lk.accountName(accountId)} (${r.skippedDuplicates} duplicates skipped); ${r.categorized} categorized, ${r.needsReview} to review.`,
-        data: { ledger: l.slug, committed: true, newRows: r.imported, duplicates: r.skippedDuplicates, categorized: r.categorized, needsReview: r.needsReview },
+        text: [
+          `Imported ${plural(r.imported, 'transaction')} into ${lk.accountName(accountId)} (${r.skippedDuplicates} duplicates skipped); ${r.categorized} categorized, ${r.needsReview} to review.`,
+          ...routedLines(r.routed),
+        ].join('\n'),
+        data: { ledger: l.slug, committed: true, newRows: r.imported, duplicates: r.skippedDuplicates, categorized: r.categorized, needsReview: r.needsReview, routed: r.routed },
       }
     },
   }),
@@ -1975,6 +1998,7 @@ export const TOOLS: ToolDef[] = [
           updated: z.number(),
           matched: z.number(),
           removed: z.number(),
+          routed: z.array(ROUTED).describe('New transactions on a shared account that went to another ledger, where each is a payment of a recurring item.'),
           error: z.string().nullable(),
         }),
       ),
@@ -1984,12 +2008,13 @@ export const TOOLS: ToolDef[] = [
     run: async (_args, ctx) => {
       const results = await ctx.api.post<SyncResult[]>('/bank/sync')
       const synced = results.flatMap((r) =>
-        r.accounts.map((a) => ({ account: a.accountName, ledger: a.ledger, added: a.added, updated: a.updated, matched: a.adopted, removed: a.removed, error: a.error })),
+        r.accounts.map((a) => ({ account: a.accountName, ledger: a.ledger, added: a.added, updated: a.updated, matched: a.adopted, removed: a.removed, routed: a.routed, error: a.error })),
       )
       const errors = results.filter((r) => !r.ok).map((r) => r.error ?? 'Sync failed')
       const text = results.length
         ? [
             ...synced.map((a) => `${a.account} (${a.ledger}): ${a.added} new, ${a.updated} updated, ${a.matched} matched, ${a.removed} removed${a.error ? ` · ${a.error}` : ''}`),
+            ...routedLines(synced.flatMap((a) => a.routed)),
             ...errors.map((e) => `Error: ${e}`),
           ].join('\n')
         : 'No bank accounts are set up to sync. Connect one in App settings → Bank sync.'

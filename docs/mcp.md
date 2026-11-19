@@ -361,7 +361,7 @@ No arguments.
 
 #### `move_transactions`
 
-**Move transactions to another ledger.** Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go first.
+**Move transactions to another ledger.** Moves transactions on a shared account to another ledger that has it, where they count from then on. All of them move, or none. Each keeps its category when the other ledger has one of the same name, and its tags. A link is kept only when both its sides move. A transfer is no longer paired (the other ledger’s matching may pair it again). A recurring item goes with its payments: moving one payment of a recurring item moves all its payments that can move, and the item (`recurringItems`), so `moved` can be more than you asked for. Tell the user before you move one. A split payment and its shares can’t be moved. Needs a key that can use both ledgers. Use `dryRun: true` to see what would be let go and what would go along first.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
@@ -561,7 +561,7 @@ No arguments.
 
 #### `import_transactions`
 
-**Import transactions.** Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions.
+**Import transactions.** Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions. Into a shared account, a new row that is a payment of a recurring item in one other ledger that has the account goes to that ledger (`routed`).
 
 | Argument | Type | | What it is |
 |---|---|---|---|

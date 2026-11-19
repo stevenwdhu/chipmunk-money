@@ -559,6 +559,92 @@ export function detachPayments(ctx: AppContext, txIds: number[]): DetachedItem[]
 }
 
 /**
+ * A recurring item as a move takes it to another ledger with its payments: what it is, its other
+ * payees and accepted price changes, and what's recorded of the payments that go (the due date each
+ * was said to be for, and the ones you said aren't its).
+ */
+export interface CarriedItem {
+  id: number
+  /** Its name, or its payee when it has none. */
+  label: string
+  payeeKey: string
+  categoryId: number | null
+  accountId: number | null
+  settings: Record<string, unknown>
+  payees: Array<{ payeeKey: string; name: string }>
+  priceChanges: Array<{ fromDate: string; previous: number }>
+  dues: Array<{ txId: number; dueDate: string; oneOff: number }>
+  notPayments: number[]
+}
+
+/** Reads an item to carry it (CarriedItem), with what's recorded of these transactions. Before detachPayments lets go of them. */
+export function itemToCarry(ctx: AppContext, itemId: number, txIds: number[]): CarriedItem {
+  const forItem = { item: itemId, txs: JSON.stringify(txIds) }
+  const { id, title, category_id, account_id, ...settings } = ctx.q.mustGet<Record<string, unknown> & { id: number; name: string; title: string | null; payee_key: string; category_id: number | null; account_id: number | null }>(
+    `SELECT id, name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct, cadence, anchor_date, next_due_date, status, origin,
+       detection_score, second_day, total_payments, paid_before, full_price_minor
+     FROM recurring_items WHERE ledger_id = @ledger AND id = @item`,
+    'Recurring item not found',
+    { item: itemId },
+  )
+  return {
+    id,
+    label: title ?? settings.name,
+    payeeKey: settings.payee_key,
+    categoryId: category_id,
+    accountId: account_id,
+    settings: { ...settings, title },
+    payees: ctx.q.all(`SELECT payee_key AS payeeKey, name FROM recurring_payees WHERE ${THIS_ITEM('item_id')}`, { item: itemId }),
+    priceChanges: ctx.q.all(`SELECT from_date AS fromDate, previous_amount_minor AS previous FROM recurring_price_changes WHERE ${THIS_ITEM('item_id')}`, { item: itemId }),
+    dues: ctx.q.all(
+      `SELECT transaction_id AS txId, due_date AS dueDate, one_off AS oneOff FROM recurring_payment_dues
+       WHERE ${THIS_ITEM('item_id')} AND transaction_id IN (SELECT value FROM json_each(@txs))`,
+      forItem,
+    ),
+    notPayments: ctx.q.column<number>(
+      `SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')} AND transaction_id IN (SELECT value FROM json_each(@txs))`,
+      forItem,
+    ),
+  }
+}
+
+/**
+ * Makes a carried item in the ledger its payments moved to, as it was: its settings, with the
+ * category and account the caller found for it here, its other payees and price changes, the
+ * payments (`txIds`, now this ledger's) linked to it with their due dates, and its not-payments
+ * among the moved rows. Then it works out its payments as any item does. Returns its id here.
+ */
+export function receiveItem(ctx: AppContext, item: CarriedItem, here: { categoryId: number | null; accountId: number | null; txIds: number[] }): number {
+  const id = Number(
+    ctx.q.run(
+      `INSERT INTO recurring_items (ledger_id, name, title, payee_key, category_id, account_id, expected_amount_minor, amount_tolerance_pct,
+         cadence, anchor_date, next_due_date, status, origin, detection_score, second_day, total_payments, paid_before, full_price_minor)
+       VALUES (@ledger, @name, @title, @payee_key, @category, @account, @expected_amount_minor, @amount_tolerance_pct,
+         @cadence, @anchor_date, @next_due_date, @status, @origin, @detection_score, @second_day, @total_payments, @paid_before, @full_price_minor)`,
+      { ...item.settings, category: here.categoryId, account: here.accountId },
+    ).lastInsertRowid,
+  )
+  for (const p of item.payees) ctx.q.run('INSERT INTO recurring_payees (item_id, payee_key, name) VALUES (?, ?, ?)', id, p.payeeKey, p.name)
+  for (const c of item.priceChanges) ctx.q.run('INSERT INTO recurring_price_changes (item_id, from_date, previous_amount_minor) VALUES (?, ?, ?)', id, c.fromDate, c.previous)
+  for (const txId of here.txIds) linkTo(ctx, id, txId)
+  for (const d of item.dues) ctx.q.run('INSERT INTO recurring_payment_dues (item_id, transaction_id, due_date, one_off) VALUES (?, ?, ?, ?)', id, d.txId, d.dueDate, d.oneOff)
+  for (const txId of item.notPayments) ctx.q.run('INSERT INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', id, txId)
+  recalculateRecurring(ctx, id)
+  return id
+}
+
+/** The ledger's active items from a payee, as theirs or as one of their other payees. */
+export function activeItemsOf(ctx: AppContext, payeeKey: string): number[] {
+  return ctx.q.column<number>(
+    `SELECT r.id FROM recurring_items r
+     WHERE r.ledger_id = @ledger AND r.status = 'active'
+       AND (r.payee_key = @key OR EXISTS (SELECT 1 FROM recurring_payees p WHERE p.item_id = r.id AND p.payee_key = @key))
+     ORDER BY r.id`,
+    { key: payeeKey },
+  )
+}
+
+/**
  * Added payments taken off (or deleted) that were among a plan's payments from before your history:
  * they count as paid before again.
  */
@@ -619,25 +705,22 @@ export function recurringPaymentIds(ctx: AppContext, id: number): number[] {
   )
 }
 
-/** Links an unlinked transaction to a matching active recurring item. Returns the item id. */
-export function matchRecurring(ctx: AppContext, txId: number): number | null {
-  const tx = ctx.q.get<{
-    id: number
-    accountId: number
-    date: string
-    amount: number
-    payeeKey: string
-    categoryId: number | null
-    recurringItemId: number | null
-    transferPairId: number | null
-  }>(
-    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey, category_id AS categoryId,
-       recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
-     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL AND split_of IS NULL`,
-    { id: txId },
-  )
-  if (!tx || tx.recurringItemId || tx.transferPairId) return null
+/** What says whose payment a transaction is: its account, date, amount and payee. */
+export interface PaymentFacts {
+  accountId: number
+  date: string
+  amount: number
+  payeeKey: string
+}
 
+/**
+ * The ledger's active item this would be a payment of, with the item's next due date once it's
+ * paid, or null: from one of its payees, on its account, in its due window and within its price
+ * variation. The one check for "it's this item's payment": for a transaction of the ledger
+ * (matchRecurring), and for a new one on a shared account that another ledger's item is waiting
+ * for (routeToItems). A suggestion that was never accepted isn't an active item.
+ */
+export function matchingItem(ctx: AppContext, tx: PaymentFacts): { id: number; next: ISODate } | null {
   // The ledger's items from this payee, as theirs or as one of their other payees.
   const items = ctx.q.all<{
     id: number
@@ -689,17 +772,30 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
 
     let next = item.nextDueDate
     while (daysBetween(tx.date, next) <= window) next = stepDue(item, next)
-
-    ctx.q.transaction(() => {
-      linkTo(ctx, item.id, tx.id)
-      setNextDue(ctx, item.id, next)
-      applyItemCategory(ctx, item.id)
-      followLatestAmount(ctx, item.id)
-      settleInstalments(ctx, item.id)
-    })
-    return item.id
+    return { id: item.id, next }
   }
   return null
+}
+
+/** Links an unlinked transaction to a matching active recurring item. Returns the item id. */
+export function matchRecurring(ctx: AppContext, txId: number): number | null {
+  const tx = ctx.q.get<PaymentFacts & { id: number; recurringItemId: number | null; transferPairId: number | null }>(
+    `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey,
+       recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
+     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL AND split_of IS NULL`,
+    { id: txId },
+  )
+  if (!tx || tx.recurringItemId || tx.transferPairId) return null
+  const item = matchingItem(ctx, tx)
+  if (!item) return null
+  ctx.q.transaction(() => {
+    linkTo(ctx, item.id, tx.id)
+    setNextDue(ctx, item.id, item.next)
+    applyItemCategory(ctx, item.id)
+    followLatestAmount(ctx, item.id)
+    settleInstalments(ctx, item.id)
+  })
+  return item.id
 }
 
 /**

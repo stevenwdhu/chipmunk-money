@@ -116,9 +116,16 @@ export function previewImport(ctx: AppContext, input: PreviewInput): ImportPrevi
 /**
  * Adds the rows that aren't duplicates as one import batch, which is how the background AI
  * categorizing finds them. A wrong import is taken back by deleting its rows. With
- * `background: false` (dry runs), AI categorization isn't started afterwards.
+ * `background: false` (dry runs), AI categorization isn't started afterwards. `route` is given the
+ * new rows once the matching has run, to send the ones that are payments of another ledger's
+ * recurring item there, as after a sync (routeToItems, which the caller binds: moves.ts imports
+ * this file).
  */
-export function commitImport(ctx: AppContext, input: CommitInput, opts: { background?: boolean } = {}): ImportResult {
+export function commitImport(
+  ctx: AppContext,
+  input: CommitInput,
+  opts: { background?: boolean; route?: (ids: number[]) => ImportResult['routed'] } = {},
+): ImportResult {
   if (!hasAccount(ctx, input.accountId)) badRequest('That account does not exist')
   requireHome(ctx, input.accountId, 'import')
 
@@ -127,6 +134,7 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
   const fresh = input.rows.filter((_, i) => dupes[i] === null)
   const cache = new Map<string, SuggestionResult | null>()
 
+  const ids: number[] = []
   const result = ctx.q.transaction(() => {
     const batchId = Number(
       ctx.q.run(
@@ -165,6 +173,7 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
         },
         { origin: 'import', importBatchId: batchId, suggestion },
       )
+      ids.push(id)
       if (row.category) setBankCategory(row.category, id)
       if (row.categoryId || suggestion?.categoryId) categorized++
       if (!row.categoryId && suggestion?.categoryId && !suggestion.autoApply) needsReview++
@@ -175,6 +184,7 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
       skippedDuplicates: input.rows.length - fresh.length,
       categorized,
       needsReview,
+      routed: [] as ImportResult['routed'],
       dryRun: false,
     }
   })
@@ -182,6 +192,7 @@ export function commitImport(ctx: AppContext, input: CommitInput, opts: { backgr
   if (input.mapping) saveImportMapping(ctx, input.accountId, input.mapping)
   const earliest = fresh.reduce<string | null>((d, r) => (!d || r.date < d ? r.date : d), null)
   const { cleared } = matchTransactions(ctx, { earliest })
+  if (opts.route) result.routed = opts.route(ids)
   detectRecurring(ctx)
   // AI categorization of whatever history couldn't place runs in the background.
   if (opts.background !== false && aiEnabled(ctx)) {

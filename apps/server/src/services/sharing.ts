@@ -378,7 +378,7 @@ function keepOnOwnAccount(home: AppContext, member: AppContext, ctxOf: CtxOf, ac
     accountId,
   )
   for (let i = 0; i < pending.length; i += MOVE_LIMIT) {
-    const result = moveTransactions(member, ctxOf, { ids: pending.slice(i, i + MOVE_LIMIT), to: home.ledger.id, defer: true }, actor)
+    const result = moveTransactions(member, ctxOf, { ids: pending.slice(i, i + MOVE_LIMIT), to: home.ledger.id, defer: true, plain: true }, actor)
     moved += result.moved
     deferred.push(...result.deferred!)
   }
@@ -524,7 +524,7 @@ function leave(
     deferred.push(...kept.deferred)
   } else {
     for (const ids of moveChunks(member, accountId)) {
-      const result = moveTransactions(member, ctxOf, { ids, to: home.ledger.id, defer: true }, actor)
+      const result = moveTransactions(member, ctxOf, { ids, to: home.ledger.id, defer: true, plain: true }, actor)
       moved += result.moved
       deferred.push(...result.deferred!)
     }

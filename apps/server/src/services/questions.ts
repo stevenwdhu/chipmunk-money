@@ -358,7 +358,7 @@ const sharedAccounts: Topic = {
         if (target) {
           const to = target.ledgerId
           for (const ids of moveChunks(ctx, accountId)) {
-            const result = moveTransactions(ctx, ctxOf, { ids, to, defer: true }, actor)
+            const result = moveTransactions(ctx, ctxOf, { ids, to, defer: true, plain: true }, actor)
             moved += result.moved
             categorize.set(to, [...(categorize.get(to) ?? []), ...result.deferred!])
           }

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { ApiKeyCreated } from '@chipmunk/shared'
+import { recurringCreateSchema, type ApiKeyCreated } from '@chipmunk/shared'
 import { createApp } from './app'
 import { bankAccounts, bankConnections } from './db/schema'
 import { keepTransactions } from './services/bank/store'
 import type { AppContext } from './services/context'
+import { createRecurring } from './services/recurring'
 import { fakeBridge, fakeTx, TOKEN, type FakeCard } from './test/fake-bridge'
 import { categoryId, makeAccount, testLedger, testStorage } from './test/helpers'
 import { expectNoCrossLedgerReferences, expectPartsSumToAccount } from './test/shared-accounts'
@@ -299,6 +300,7 @@ describe('POST /transactions/move', () => {
       unpaired: 0,
       recategorized: 0,
       recurringDetached: 0,
+      recurringItems: [],
       tagsCreated: 0,
       matched: { refunds: 0, transfers: 0, payments: 0, cleared: 0 },
       dropped: { links: [], partlyLinked: [], pairs: [], recurring: [] },
@@ -796,5 +798,72 @@ describe('the bank and a shared account over HTTP', () => {
     expect((await w.held(w.family)).length + (await w.held(w.personal)).length).toBe(2)
     // A key limited to Family can't: the connection syncs into Personal.
     expect(await sync(await w.key('write', [w.family]))).toMatchObject(refused('This connection syncs into ledgers this API key can’t use.'))
+  })
+})
+
+describe('new payments follow their recurring item over HTTP', () => {
+  /** Family's active Netflix item, $15.99 a month, due on October 1st. */
+  const netflix = (ctx: AppContext) =>
+    createRecurring(ctx, recurringCreateSchema.parse({ payee: 'Netflix', name: 'Netflix family plan', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-10-01' }))
+  const moves = (w: World, ctx: AppContext) => ctx.q.column<string>("SELECT summary FROM activity WHERE ledger_id = @ledger AND action = 'move' ORDER BY id")
+
+  it('routes a sync run with a key for the home alone, which still can’t read the row where it went', async () => {
+    const card: FakeCard = { balance: '-15.99', transactions: [fakeTx('n1', '2026-10-01', '-15.99', 'Netflix')] }
+    const w = setup({ fetch: fakeBridge(card) })
+    const conn = await w.call('POST', '/bank/connections', { setupToken: TOKEN })
+    const bankAccountId = (conn.body.accounts as Json[]).find((a) => a.remoteId === 'visa').id as string
+    expect((await w.call('PUT', `${w.base(w.personal)}/accounts/${w.visa}/bank`, { bankAccountId })).status).toBe(200)
+    expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
+    const item = netflix(w.family)
+
+    const mine = await w.key('write', [w.personal])
+    const synced = await w.call('POST', `/bank/connections/${conn.body.id}/sync`, undefined, mine)
+    expect(synced.status, synced.message).toBe(200)
+    const [id] = await w.held(w.family)
+    expect(synced.body.accounts).toMatchObject([{ added: 1, routed: [{ id, payee: 'Netflix', ledger: 'Family', item: 'Netflix family plan' }] }])
+    expect(await w.held(w.personal)).toEqual([])
+    expect((await w.call('GET', `${w.base(w.family)}/transactions/${id}`)).body).toMatchObject({ recurringItemId: item.id, amountMinor: -1599 })
+    expect((await w.call('GET', `${w.base(w.family)}/transactions/${id}`, undefined, mine)).status).toBe(403)
+    expect((await w.call('GET', `${w.base(w.personal)}/transactions/${id}`, undefined, mine)).status).toBe(404)
+    expect(moves(w, w.personal)).toEqual(['Netflix (-$15.99 on 2026-10-01) went to Family, where it’s a payment of Netflix family plan'])
+    expect(moves(w, w.family)).toEqual(['Netflix (-$15.99 on 2026-10-01) is new on Visa, a payment of Netflix family plan'])
+  })
+
+  it('routes a CSV import’s rows, with a dry run first, and imports into an account that isn’t shared as before', async () => {
+    const w = setup()
+    const item = netflix(w.family)
+    const rows = [
+      { line: 1, date: '2026-10-01', amountMinor: -1599, payee: 'Netflix' },
+      { line: 2, date: '2026-10-02', amountMinor: -400, payee: 'Corner Cafe' },
+    ]
+    const commit = (accountId: number, dryRun = false, headers?: Headers) =>
+      w.call('POST', `${w.base(w.personal)}/import/commit${dryRun ? '?dryRun=true' : ''}`, { accountId, rows, fileName: 'visa.csv' }, headers)
+
+    // Not shared: both rows stay, whatever Family's items are.
+    const alone = await commit(w.visa)
+    expect(alone.status, alone.message).toBe(201)
+    expect(alone.body).toMatchObject({ imported: 2, skippedDuplicates: 0, routed: [] })
+    expect(await w.held(w.personal)).toHaveLength(2)
+    expect(moves(w, w.personal)).toEqual([])
+    for (const id of await w.held(w.personal)) expect((await w.call('DELETE', `${w.base(w.personal)}/transactions/${id}?permanent=true`)).status).toBeLessThan(300)
+
+    expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
+    const routed = [{ payee: 'Netflix', ledger: 'Family', item: 'Netflix family plan' }]
+    const mine = await w.key('write', [w.personal])
+    const dry = await w.unchanged(() => commit(w.visa, true, mine))
+    expect(dry.body).toMatchObject({ imported: 2, routed, dryRun: true })
+
+    const done = await commit(w.visa, false, mine)
+    expect(done.status, done.message).toBe(201)
+    expect(done.body).toMatchObject({ imported: 2, skippedDuplicates: 0, routed })
+    const [id] = await w.held(w.family)
+    expect(done.body.routed[0].id).toBe(id)
+    expect((await w.call('GET', `${w.base(w.family)}/transactions/${id}`)).body).toMatchObject({ recurringItemId: item.id, payee: 'Netflix' })
+    // The cafe's $4.00 is Personal's (with the opening balance), and Netflix's $15.99 is Family's.
+    expect(w.parts()).toEqual({ personal: OPENING - 400, family: -1599 })
+    expect(moves(w, w.personal)).toEqual(['Netflix (-$15.99 on 2026-10-01) went to Family, where it’s a payment of Netflix family plan'])
+    expect(moves(w, w.family)).toEqual(['Netflix (-$15.99 on 2026-10-01) is new on Visa, a payment of Netflix family plan'])
+    // The same file again adds nothing: the routed row is a duplicate where it is.
+    expect((await commit(w.visa)).body).toMatchObject({ imported: 0, skippedDuplicates: 2, routed: [] })
   })
 })
