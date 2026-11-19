@@ -279,7 +279,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'List transactions',
       description:
-        'Newest first. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`. One split into categories is found by the category of any of its parts. On a shared account, only the transactions this ledger holds: GET /accounts/{id}/transactions lists every ledger’s.',
+        'Pending ones first, then newest first. A pending one is no recurring item’s payment until it posts, unless you add it to one. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`. One split into categories is found by the category of any of its parts. On a shared account, only the transactions this ledger holds: GET /accounts/{id}/transactions lists every ledger’s.',
       query: transactionQuerySchema,
       response: transactionPageSchema,
     },
@@ -953,7 +953,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'List a shared account’s transactions in every ledger',
       description:
-        'Newest first, from `from` to `to`, each with the ledger that holds it (`here`: this one), its category by name, and the account’s total balance after it, so the list reads like the bank’s statement. A payment split between the ledgers is listed once, with its shares. Only for a shared account (409 otherwise), from any ledger that has it. A key limited to some ledgers must be allowed in every ledger that has the account (403 otherwise). To change one another ledger holds, use that ledger’s routes, or move it here first.',
+        'Pending ones first, then newest first, from `from` to `to`, each with the ledger that holds it (`here`: this one), its category by name, and the account’s total balance after it, so the list reads like the bank’s statement. A payment split between the ledgers is listed once, with its shares. Only for a shared account (409 otherwise), from any ledger that has it. A key limited to some ledgers must be allowed in every ledger that has the account (403 otherwise). To change one another ledger holds, use that ledger’s routes, or move it here first.',
       query: accountTransactionsQuerySchema,
       response: accountTransactionPageSchema,
     },
@@ -1859,7 +1859,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'Export transactions as CSV',
       description:
-        'A transaction split into categories has a row for each part, with the part’s amount and category (and its note, when it has one), so a spreadsheet sums by category. So does a refund or payback that has the category of a split purchase: a row for each part it comes off. With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: each whole, and transfers and what’s left out of totals stay in.',
+        'Oldest first, with pending ones last. A transaction split into categories has a row for each part, with the part’s amount and category (and its note, when it has one), so a spreadsheet sums by category. So does a refund or payback that has the category of a split purchase: a row for each part it comes off. With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: each whole, and transfers and what’s left out of totals stay in.',
       query: z.object({ from: isoDate.optional(), to: isoDate.optional() }).extend(filterQuery.shape),
       file: { contentType: 'text/csv', description: 'date, account, payee, amount, currency, category, group, notes, status, tags' },
     },

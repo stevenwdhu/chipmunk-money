@@ -526,12 +526,13 @@ export interface Routed {
 
 /**
  * New payments follow their recurring item. Of the transactions a sync or an import just added in
- * the home (`ids`), one that's no payment of an active item in the home, and would be one in exactly
+ * the home, or a sync found posted there after being pending (`ids`), one that's no payment of an active item in the home, and would be one in exactly
  * one other ledger that has its account and isn't archived (matchingItem, the check matchRecurring
  * links by), moves there, by an ordinary move: that ledger's item takes it and categorizes it. With
  * no such ledger, or two, it stays in the home. So does a card payment or a transfer (a row in a
  * category left out of totals, or paired) and a row linked to another (a purchase and its refund),
- * so run this after the home's matching has found those, and a split row. Nothing is asked of a
+ * so run this after the home's matching has found those, a split row, and a pending one, which is
+ * given again once it posts. Nothing is asked of a
  * sync's key: a sync writes in every ledger that has the account as it is. An import's rows are the
  * caller's own choice, so its key's ledgers are given (`usable`, null for all): a row whose item is
  * in a ledger the key can't use stays in the home, and nothing says why. With `defer`, AI
@@ -543,7 +544,7 @@ export function routeToItems(home: AppContext, ctxOf: CtxOf, ids: number[], acto
     `SELECT t.id, t.account_id AS accountId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, coalesce(t.name, t.payee) AS payee
      FROM transactions t
      WHERE t.ledger_id = @ledger AND t.${THESE} AND t.deleted_at IS NULL AND t.bank_id_only = 0 AND t.recurring_item_id IS NULL AND t.transfer_pair_id IS NULL
-       AND NOT ${SPLIT}
+       AND t.status <> 'pending' AND NOT ${SPLIT}
        AND NOT EXISTS (SELECT 1 FROM transaction_links l JOIN transactions i ON i.id = l.money_in_id WHERE i.ledger_id = @ledger AND (l.money_in_id = t.id OR l.money_out_id = t.id))
        AND NOT EXISTS (SELECT 1 FROM ledger_categories c WHERE c.ledger_id = t.ledger_id AND c.id = t.category_id AND c.exclude_from_totals <> 0)
      ORDER BY t.date, t.id`,

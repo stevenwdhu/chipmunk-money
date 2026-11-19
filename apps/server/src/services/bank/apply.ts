@@ -3,7 +3,7 @@ import { historySuggestion } from '../categorize'
 import type { BankRow } from '../account-rows'
 import type { AppContext, CtxOf } from '../context'
 import type { ActivityActor } from '../activity'
-import { paidOff, recalculateRecurring } from '../recurring'
+import { matchRecurring, paidOff, recalculateRecurring } from '../recurring'
 import { isSplitIntoCategories, learnOwn } from '../category-splits'
 import { followBankPayee } from '../payee-names'
 import { payeeKeyOf } from '../payee-namer'
@@ -30,6 +30,8 @@ export interface LedgerChanges {
 export interface ApplyResult extends LedgerChanges {
   /** New transactions, for AI categorization afterwards. All in the home. */
   newIds: number[]
+  /** The home's transactions that were pending and no longer are: each may be another ledger's recurring item's, as a new one. */
+  posted: number[]
   /**
    * What changed, by the ledger that holds the rows (its id): new ones in the home, and the rest
    * where each row is. Only ledgers where something changed. For each one's activity and matching.
@@ -84,7 +86,8 @@ export type ApplyScope =
  *
  * 1. Known transactions (same externalId) get the bank's date, amount, pending status and payee
  *    (followBankPayee: one you entered keeps yours). Your category, notes and tags stay as you set
- *    them. Ones you deleted stay deleted.
+ *    them. Ones you deleted stay deleted. One that was pending and no longer is, here or under a new
+ *    id (2), is matched to its ledger's recurring items then, as a new one is (`posted`).
  * 2. A transaction that comes back under a new id (posted replacing pending, or an id the provider
  *    re-issued) updates the earlier row, so your edits carry over. Plaid says which pending one a
  *    posted transaction replaces; otherwise it's matched by amount, date and payee.
@@ -132,7 +135,7 @@ export function applyRemoteTransactions(
   const home = ctx.ledger.id
   const homeOf = ctx.accountWide.account(accountId)?.homeLedgerId
   if (homeOf !== undefined && homeOf !== home) throw new Error(`Account ${accountId} syncs in its home ${homeOf}, not in ${home}`)
-  const result: ApplyResult = { added: 0, updated: 0, adopted: 0, removed: 0, newIds: [], byLedger: new Map(), ledgers: new Set() }
+  const result: ApplyResult = { added: 0, updated: 0, adopted: 0, removed: 0, newIds: [], posted: [], byLedger: new Map(), ledgers: new Set() }
   /** Recurring items that lose a payment, and whether each was a paid-off plan before, by ledger. */
   const losing = new Map<string, Map<number, boolean>>()
   /** Recurring items that get a payment back (a row restored), by ledger. */
@@ -196,6 +199,11 @@ export function applyRemoteTransactions(
     if (wasSplit && !isSplitIntoCategories(at, row.id)) learnOwn(at, row.id, 1)
     followBankPayee(at, row, r.payee)
     if (row.splitPayment) following.set(row.id, row)
+    // No longer pending: a recurring item of its ledger takes it now, as it would a new one.
+    if (row.status === 'pending' && !r.pending) {
+      matchRecurring(at, row.id)
+      if (row.ledgerId === home) result.posted.push(row.id)
+    }
   }
   /** A row the bank removed, back where it is: no longer deleted, and its recurring item works it out again. */
   const restore = (row: LocalRow) => {

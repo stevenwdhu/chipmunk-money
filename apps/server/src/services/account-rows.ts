@@ -276,9 +276,10 @@ const FROZEN = '(t.account_id <> @accountId)'
  * A shared account's place for each row in its all-ledgers list, as one string (the register's,
  * transactions.ts): its date; then, that day, the ones without a time of day that come first (money
  * in on a bank account, money out on a credit card), then ones with a time in time order, then the
- * rest without one; then the order they were added.
+ * rest without one; then the order they were added. A pending one comes after every posted one (a
+ * "p" before its date), so it's on top of the list.
  */
-const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END
+const SORT_KEY = `(CASE WHEN t.status = 'pending' THEN 'p' ELSE '' END || t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END
   || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
 
 /** The module's one unscoped call: every read in READS runs through it. */
@@ -635,7 +636,7 @@ const READS = {
 
   /**
    * The sum of a shared account's live rows in every ledger listed above `sortKey` in its all-ledgers
-   * list (SORT_KEY): newer, or later the same day. Split rows aren't listed, and they sum to zero, so
+   * list (SORT_KEY): newer, later the same day, or pending. Split rows aren't listed, and they sum to zero, so
    * they're left out here too (NOT_SPLIT).
    */
   sumAfter(db: UnscopedQuery, accountId: number, sortKey: string): number {

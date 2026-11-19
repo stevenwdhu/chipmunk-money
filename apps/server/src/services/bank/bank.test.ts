@@ -2,11 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { recurringCreateSchema } from '@chipmunk/shared'
 import type { Account, ActivityPage, ApiKeyCreated, BankConnection, Institution, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
 import { bankConnections } from '../../db/schema'
 import { SecretBox } from '../../lib/secrets'
 import { categoryId, makeAccount, testLedger, testStorage } from '../../test/helpers'
+import { createRecurring, getRecurring } from '../recurring'
 import { createTransaction } from '../transactions'
 import { BankService } from './service'
 import { decimalToMinor, sanitize } from './simplefin'
@@ -276,6 +278,25 @@ describe('bank connections', () => {
     bridge.state.accounts[1]!.transactions = [tx('s1-new', '2026-10-03', '-31.25', 'Shell'), tx('b1', '2026-10-01', '-12.50', 'TIM HORTONS #123')]
     expect((await sync(conn.id)).accounts[0]).toMatchObject({ added: 0, updated: 1, removed: 0 })
     expect((await transactions()).filter((t) => t.payee === 'Shell')).toEqual([expect.objectContaining({ id: shell.id, externalId: 's1-new' })])
+  })
+
+  it('leaves a pending charge off its recurring item, and links it when it posts under a new id', async () => {
+    const { connect, remote, link, sync, transactions, ctx, bridge } = await setup()
+    const visa = makeAccount(ctx, 'TD Visa', 'credit')
+    const item = createRecurring(ctx, recurringCreateSchema.parse({ payee: 'Netflix', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-10-01' }))
+    bridge.state.accounts[1]!.transactions = [tx('p1', '2026-10-01', '-15.99', 'Netflix', { pending: true })]
+    const conn = await connect()
+    await link(visa, remote(conn, 'visa').id, '2026-09-15')
+    expect((await sync(conn.id)).accounts[0]).toMatchObject({ added: 1 })
+    const [pending] = await transactions()
+    expect(pending).toMatchObject({ status: 'pending', amountMinor: -1599, recurringItemId: null })
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 0, nextDueDate: '2026-10-01' })
+
+    // It posts a day later under a new id, a cent more: the same row, now the item's payment.
+    bridge.state.accounts[1]!.transactions = [tx('s1', '2026-10-02', '-16.00', 'Netflix')]
+    expect((await sync(conn.id)).accounts[0]).toMatchObject({ added: 0, updated: 1, removed: 0 })
+    expect(await transactions()).toEqual([expect.objectContaining({ id: pending!.id, status: 'cleared', amountMinor: -1600, externalId: 's1', recurringItemId: item.id })])
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 1, nextDueDate: '2026-11-01' })
   })
 
   it('leaves older transactions alone when another account needs a longer window', async () => {

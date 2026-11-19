@@ -1,9 +1,11 @@
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
+import { recurringCreateSchema } from '@chipmunk/shared'
 import type { Account, ActivityPage, BankConnection, Settings, SyncResult, TransactionPage } from '@chipmunk/shared'
 import { createApp } from '../../app'
 import { bankAccounts, bankConnections, bankTransactions } from '../../db/schema'
 import { makeAccount, testStorage } from '../../test/helpers'
+import { createRecurring, getRecurring } from '../recurring'
 import { aiConfig, getAppSetting, sealStoredSecrets, setAppSetting } from '../settings'
 import { plaidCategory } from './plaid'
 
@@ -271,6 +273,29 @@ describe('Plaid', () => {
     expect(activity.items.map((a) => a.summary)).toContain('Synced TD Chequing from TD Canada Trust: 2 updated, 1 removed')
     const account = (await api('GET', `/ledgers/personal/accounts/${chequing}`)).body as Account
     expect(account.bank).toMatchObject({ provider: 'plaid', name: 'Chequing (1234)' })
+  })
+
+  it('leaves a pending charge off its recurring item, and links it when the posted one replaces it', async () => {
+    const { plaid, ctx, keys, connect, remote, link, sync, transactions } = await setup()
+    await keys()
+    const conn = await connect()
+    const chequing = makeAccount(ctx, 'TD Chequing')
+    const item = createRecurring(ctx, recurringCreateSchema.parse({ payee: 'Netflix', expectedAmountMinor: -1599, cadence: 'monthly', anchorDate: '2026-10-01' }))
+    plaid.state.batches = [{ added: [plaidTx('p-nf', 'acc-chq', '2026-10-01', 15.99, 'Netflix', { pending: true })] }]
+    await link(chequing, remote(conn, 'acc-chq').id, '2026-09-01')
+    expect((await sync(conn.id)).accounts[0]).toMatchObject({ added: 1 })
+    const [pending] = await transactions(chequing)
+    expect(pending).toMatchObject({ status: 'pending', amountMinor: -1599, recurringItemId: null })
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 0, nextDueDate: '2026-10-01' })
+
+    // The posted one replaces it, a cent more: the same row, now the item's payment.
+    plaid.state.batches.push({
+      added: [plaidTx('t-nf', 'acc-chq', '2026-10-02', 16, 'Netflix', { pending_transaction_id: 'p-nf' })],
+      removed: [{ transaction_id: 'p-nf', account_id: 'acc-chq' }],
+    })
+    expect((await sync(conn.id)).accounts[0]).toMatchObject({ added: 0, updated: 1, removed: 0 })
+    expect(await transactions(chequing)).toEqual([expect.objectContaining({ id: pending!.id, status: 'cleared', amountMinor: -1600, externalId: 't-nf', recurringItemId: item.id })])
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 1, nextDueDate: '2026-11-01' })
   })
 
   it('leaves an amount or date you corrected alone, until you let syncs update it again', async () => {

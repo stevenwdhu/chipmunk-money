@@ -147,7 +147,7 @@ export function expectPartsSumToAccount(storage: Storage, accountId: number, opt
 
     // The register's running balance, page by page: each row's is the part less the ledger's own rows listed above it.
     const own = new Map(rows.get(l.ledgerId)!.map((r) => [r.id, r.amount]))
-    const register: Array<{ id: number; date: string; balanceAfterMinor: number | null }> = []
+    const register: Array<{ id: number; date: string; status: string; balanceAfterMinor: number | null }> = []
     for (let cursor: string | undefined; ; ) {
       const page = listTransactions(c, transactionQuerySchema.parse({ accountId, limit: 2, cursor }))
       register.push(...page.items)
@@ -155,7 +155,9 @@ export function expectPartsSumToAccount(storage: Storage, accountId: number, opt
       cursor = page.nextCursor
     }
     expect(register.map((t) => t.id).sort((a, b) => a - b), `${l.slug}’s register lists its own rows`).toEqual([...own.keys()].sort((a, b) => a - b))
-    expect(register.map((t) => t.date), `${l.slug}’s register, newest first`).toEqual(register.map((t) => t.date).sort().reverse())
+    // Pending ones on top ("p" sorts after a posted one's "c"), then newest first.
+    const place = register.map((t) => `${t.status[0]}${t.date}`)
+    expect(place, `${l.slug}’s register, pending ones then newest first`).toEqual([...place].sort().reverse())
     let above = 0
     register.forEach((t, k) => {
       if (t.balanceAfterMinor !== null) expect(t.balanceAfterMinor, `${l.slug}’s running balance after its row ${k + 1}`).toBe(parts[i]! - above)

@@ -91,9 +91,11 @@ const LATE = `(CASE WHEN t.account_id IN (SELECT id FROM ledger_accounts WHERE l
  * A transaction's place in the list, oldest first, as one string (and the paging cursor): its date; then,
  * that day, the ones without a time of day that come first (money in on a bank account, money out on a
  * credit card), then ones with a time in time order, then the rest without one (see LATE); then the
- * order they were added.
+ * order they were added. A pending one comes after every posted one, whatever their dates (a "p"
+ * before its date, which sorts after any digit): on top of a list, newest first, and the last ones an
+ * account's running balance counts.
  */
-const SORT_KEY = `(t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN ${LATE} THEN 2 ELSE 0 END || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
+const SORT_KEY = `(CASE WHEN t.status = 'pending' THEN 'p' ELSE '' END || t.date || '|' || CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN ${LATE} THEN 2 ELSE 0 END || '|' || coalesce(t.datetime, '') || '|' || printf('%012d', t.id))`
 
 /**
  * A transaction row with its transfer's other side's origin, which says whether the two are kept in step,
@@ -490,7 +492,7 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
   if (scope) where.push(scope.sql)
   if (q.cursor) {
     // The last row's place in the list (SORT_KEY).
-    if (!/^\d{4}-\d{2}-\d{2}\|[012]\|[\d:T-]*\|\d{12}$/.test(q.cursor)) badRequest('Invalid cursor')
+    if (!CURSOR.test(q.cursor)) badRequest('Invalid cursor')
     where.push(`${SORT_KEY} < ?`)
     params.push(q.cursor)
   }
@@ -512,7 +514,7 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
 }
 
 /** A row's place in a list (SORT_KEY), as a paging cursor has it. */
-const CURSOR = /^\d{4}-\d{2}-\d{2}\|[012]\|[\d:T-]*\|\d{12}$/
+const CURSOR = /^p?\d{4}-\d{2}-\d{2}\|[012]\|[\d:T-]*\|\d{12}$/
 
 /**
  * A shared account's transactions in every ledger that has it, one page at a time, newest first as
@@ -543,7 +545,7 @@ export function listAccountTransactions(
   const rows = ctx.accountWide.accountTransactions(accountId, { from: q.from, to: q.to, cursor: q.cursor, limit: limit + 1 })
   const page = rows.slice(0, limit)
   const first = page[0]
-  // The account's total less everything listed above the first row (newer, or later the same day), in every ledger.
+  // The account's total less everything listed above the first row (newer, later the same day, or pending), in every ledger.
   let after = first ? currentParts(ctx, accountId).totalMinor - ctx.accountWide.sumAfter(accountId, first.sortKey) : 0
   const named = payeeNamerFor(ctx)
   // The split payments' shares, by payment: the holder's given row is all of them.
@@ -602,7 +604,7 @@ function runningBalances(ctx: AppContext, q: QueryInput, page: TxRow[]): number[
   if (!q.accountId || !first || q.categoryId || q.tagId || q.recurringItemId || q.needsReview || q.labelId || q.q || !isEmptyFilter(q.filter) || q.filteredOut || q.side) return null
   const account = getAccount(ctx, q.accountId)
   if (accountTypeInfo(account.type).revalued) return null
-  // Everything listed above the first row: newer, or later the same day (see SORT_KEY).
+  // Everything listed above the first row: newer, later the same day, or pending (see SORT_KEY).
   const later = ctx.q.pluck<number>(
     `SELECT coalesce(sum(t.amount_minor), 0) FROM transactions t WHERE t.ledger_id = @ledger AND t.account_id = ? AND t.deleted_at IS NULL AND ${SORT_KEY} > ?`,
     q.accountId,
@@ -940,7 +942,9 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
         // Undone with its category kept (by an empty list, or by its new amount): that one is yours, and its payee learns it again.
         learnOwn(ctx, id, 1)
       }
-      const moved = input.amountMinor !== undefined || input.date !== undefined || input.payee !== undefined
+      // No longer pending counts too: a recurring item takes it then, as it would a new one.
+      const moved =
+        input.amountMinor !== undefined || input.date !== undefined || input.payee !== undefined || (input.status !== undefined && input.status !== row.status)
       if (moved && !row.recurring_item_id && input.recurringItemId === undefined) matchRecurring(ctx, id)
       // A payment of an item that changed: the item works its payments out again.
       else if (moved && row.recurring_item_id && input.recurringItemId === undefined) {

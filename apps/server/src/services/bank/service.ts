@@ -549,7 +549,7 @@ export class BankService {
       provider,
     )
     this.caughtUp(ctx, accountId, acct)
-    const routed = this.settle(ctx, applied.newIds, actor(provider))
+    const routed = this.settle(ctx, applied.newIds, actor(provider), applied.posted)
     // The ledgers the account is shared with whose rows changed settle too.
     for (const ledgerId of applied.ledgers) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [], actor(provider))
     return { added: applied.added, adopted: applied.adopted, routed }
@@ -572,16 +572,16 @@ export class BankService {
 
   /**
    * As after a sync: refunds and card payments first, then the new ones that are payments of another
-   * ledger's recurring item go there (routeToItems, returned), then recurring payments, then AI for
-   * the new ones still here.
+   * ledger's recurring item go there (routeToItems, returned), and so do ones that were pending and
+   * posted (`posted`), then recurring payments, then AI for the new ones still here.
    */
-  private settle(ctx: AppContext, newIds: number[], by: ActivityActor): Routed[] {
+  private settle(ctx: AppContext, newIds: number[], by: ActivityActor, posted: number[] = []): Routed[] {
     const earliest = newIds.length
       ? (ctx.q.pluck<string>('SELECT min(date) FROM transactions WHERE ledger_id = @ledger AND id IN (SELECT value FROM json_each(@ids))', { ids: JSON.stringify(newIds) }) ?? null)
       : null
     const { cleared } = matchTransactions(ctx, { earliest })
-    if (!newIds.length && !cleared.length) return []
-    const routed = routeToItems(ctx, this.storage.ctxOf, newIds, by)
+    if (!newIds.length && !posted.length && !cleared.length) return []
+    const routed = routeToItems(ctx, this.storage.ctxOf, [...newIds, ...posted], by)
     const went = new Set(routed.map((r) => r.id))
     detectRecurring(ctx)
     if (aiEnabled(ctx)) void categorizeUncategorized(ctx, { ids: [...newIds, ...cleared].filter((id) => !went.has(id)) })
@@ -1036,7 +1036,7 @@ export class BankService {
   /** Puts what the bank reported into each linked ledger account. */
   private applyToLinked(row: ConnectionRow, linked: AccountRow[], remoteAccounts: RemoteAccount[], changesFor: Fetched_['changesFor'], result: SyncResult) {
     const now = this.now()
-    const touched = new Map<string, { ctx: AppContext; newIds: number[] }>()
+    const touched = new Map<string, { ctx: AppContext; newIds: number[]; posted: number[] }>()
     for (const acct of linked) {
       const remote = remoteAccounts.find((r) => r.remoteId === acct.remoteId)
       const ledger = this.storage.registry.find(acct.ledgerId!)
@@ -1062,17 +1062,18 @@ export class BankService {
       const applied = applyRemoteTransactions(ctx, this.storage.ctxOf, target.id, transactions, scope, row.provider)
       Object.assign(summary, { added: applied.added, updated: applied.updated, adopted: applied.adopted, removed: applied.removed })
       if (!providerError) this.alignWithBank(ctx, target.id, remote)
-      const entry = touched.get(ledger.id) ?? { ctx, newIds: [] }
+      const entry = touched.get(ledger.id) ?? { ctx, newIds: [], posted: [] }
       entry.newIds.push(...applied.newIds)
+      entry.posted.push(...applied.posted)
       touched.set(ledger.id, entry)
 
       // One entry in each ledger whose rows changed: the home's new and changed ones, and those of
       // the ledgers it's shared with, where their rows are. Each of those settles too, and so does
       // one where only a split row followed its payment (no entry: the payment's ledger has it).
-      for (const ledgerId of applied.ledgers) if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: this.storage.ctxOf(ledgerId), newIds: [] })
+      for (const ledgerId of applied.ledgers) if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: this.storage.ctxOf(ledgerId), newIds: [], posted: [] })
       for (const [ledgerId, changes] of applied.byLedger) {
         const at = touched.get(ledgerId)?.ctx ?? this.storage.ctxOf(ledgerId)
-        if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: at, newIds: [] })
+        if (!touched.has(ledgerId)) touched.set(ledgerId, { ctx: at, newIds: [], posted: [] })
         const parts = [
           changes.added && `${changes.added} new`,
           changes.updated && `${changes.updated} updated`,
@@ -1095,8 +1096,8 @@ export class BankService {
       result.accounts.push(summary)
     }
 
-    for (const { ctx, newIds } of touched.values()) {
-      for (const { accountId, ...r } of this.settle(ctx, newIds, actor(row.provider))) {
+    for (const { ctx, newIds, posted } of touched.values()) {
+      for (const { accountId, ...r } of this.settle(ctx, newIds, actor(row.provider), posted)) {
         result.accounts.find((a) => a.ledger === ctx.ledger.slug && a.accountId === accountId)?.routed.push(r)
       }
     }

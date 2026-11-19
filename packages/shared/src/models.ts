@@ -1400,7 +1400,7 @@ export const syncResultSchema = z
         updated: z.number().int(),
         adopted: z.number().int().describe('Matched to transactions you had entered or imported.'),
         removed: z.number().int().describe('Pending transactions the bank no longer reports.'),
-        routed: z.array(routedTransactionSchema).describe('Of the added ones, those that went to another ledger for its recurring item.'),
+        routed: z.array(routedTransactionSchema).describe('Of the added ones, and of the pending ones that posted, those that went to another ledger for its recurring item.'),
         error: z.string().nullable(),
       }),
     ),

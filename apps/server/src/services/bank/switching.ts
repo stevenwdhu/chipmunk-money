@@ -9,6 +9,7 @@ import { isSplitIntoCategories, learnOwn } from '../category-splits'
 import type { AppContext, CtxOf } from '../context'
 import { deleteTransaction, insertTransaction } from '../transactions'
 import { followBankPayee } from '../payee-names'
+import { matchRecurring } from '../recurring'
 import { followPayment, splitLedgers, undoSplitFirst } from '../splits'
 import { logPayloads } from './apply'
 import type { RemoteTransaction } from './types'
@@ -234,6 +235,7 @@ export function applySwitch(
         continue
       }
       const wasSplit = isSplitIntoCategories(at, l.id)
+      const wasPending = at.q.pluck<string>('SELECT status FROM transactions WHERE id = @id AND ledger_id = @ledger', { id: l.id }) === 'pending'
       const changed = at.q.run(updateFromBank, {
         id: l.id,
         externalId: r.remoteId,
@@ -251,6 +253,8 @@ export function applySwitch(
       if (wasSplit && !isSplitIntoCategories(at, l.id)) learnOwn(at, l.id, 1)
       // Its payee is the new service's now.
       followBankPayee(at, l, r.payee)
+      // No longer pending: a recurring item of its ledger takes it now, as it would a new one.
+      if (wasPending && !r.pending) matchRecurring(at, l.id)
       // A split payment's split rows follow it.
       if (l.splitPayment) {
         if (followPayment(at, ctxOf, l.id)) for (const ledgerId of splitLedgers(at, l.id)) result.ledgers.add(ledgerId)

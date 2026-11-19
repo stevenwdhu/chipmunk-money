@@ -84,20 +84,45 @@ describe('new payments follow their recurring item: bank sync', () => {
     expect(w.everything()).toEqual(before)
   })
 
-  it('routes what Fetch history brings, and a pending charge that then posts where it went', async () => {
+  it('keeps a pending charge in the home, whatever Fetch history brings, and routes it once it posts', async () => {
     const w = await synced()
     const item = w.netflix(w.family)
     w.charge('n1', '2026-10-01', '-15.99', 'Netflix', { pending: true })
-    expect(await w.sync({ full: true })).toMatchObject({ added: 1, routed: [{ payee: 'Netflix', ledger: 'Family', item: 'Netflix' }] })
+    expect(await w.sync({ full: true })).toMatchObject({ added: 1, routed: [] })
     const [pending] = w.held('n1')
-    expect(pending).toMatchObject({ ledger: 'family', status: 'pending', amount: -1599 })
+    expect(pending).toMatchObject({ ledger: 'personal', status: 'pending', amount: -1599 })
+    expect(getRecurring(w.family, item.id).occurrences).toBe(0)
+    // $50.00 at the cafe and the pending $15.99 are Personal's.
+    expect(w.check()).toEqual({ personal: -6599, family: 0 })
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 0, routed: [] })
+    expect(w.held('n1')).toMatchObject([{ ledger: 'personal', status: 'pending' }])
 
-    // It posts, a cent more: Family's row changes in place, and nothing is routed again.
+    // It posts, a cent more: the same row goes to Family, where it's the item's payment.
     w.charge('n1', '2026-10-01', '-16.00', 'Netflix')
-    expect(await w.sync()).toMatchObject({ added: 0, updated: 1, routed: [] })
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 1, routed: [{ id: pending!.id, payee: 'Netflix', ledger: 'Family', item: 'Netflix' }] })
     expect(w.held('n1')).toEqual([{ ledger: 'family', id: pending!.id, status: 'cleared', amount: -1600 }])
     expect(getTransaction(w.family, pending!.id).recurringItemId).toBe(item.id)
+    expect(getRecurring(w.family, item.id)).toMatchObject({ occurrences: 1, nextDueDate: '2026-11-01' })
     expect(w.check()).toEqual({ personal: -5000, family: -1600 })
+
+    // And nothing is routed again.
+    const before = w.everything()
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 0, routed: [] })
+    expect(w.everything()).toEqual(before)
+  })
+
+  it('links a pending charge that posts in the home to the home’s own item, and routes nothing', async () => {
+    const w = await synced()
+    const mine = w.netflix(w.personal)
+    w.netflix(w.family)
+    w.charge('n1', '2026-10-01', '-15.99', 'Netflix', { pending: true })
+    expect(await w.sync()).toMatchObject({ added: 1, routed: [] })
+    const [pending] = w.held('n1')
+    expect(getTransaction(w.personal, pending!.id)).toMatchObject({ status: 'pending', recurringItemId: null })
+    w.charge('n1', '2026-10-01', '-15.99', 'Netflix')
+    expect(await w.sync()).toMatchObject({ added: 0, updated: 1, routed: [] })
+    expect(getTransaction(w.personal, pending!.id)).toMatchObject({ status: 'cleared', recurringItemId: mine.id })
+    expect(w.check()).toEqual({ personal: -6599, family: 0 })
   })
 
   it('keeps it in the home when the home has a matching item, when two other ledgers do, and when the only one is archived', async () => {

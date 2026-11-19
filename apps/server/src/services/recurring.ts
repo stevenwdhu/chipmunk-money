@@ -154,7 +154,7 @@ const LINKED_WITH_DUES = `
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
-/** A suggestion's payments, newest first: its payees' unlinked ones at about its amount, on its schedule. */
+/** A suggestion's payments, newest first: its payees' unlinked ones at about its amount, on its schedule. Not pending ones. */
 function suggestedPayments(ctx: AppContext, r: ItemRow): Array<{ id: number; date: string; amount: number }> {
   const item = {
     payeeKey: r.payee_key,
@@ -170,7 +170,7 @@ function suggestedPayments(ctx: AppContext, r: ItemRow): Array<{ id: number; dat
     .all<{ id: number; date: string; amount: number }>(
       `SELECT id, date, amount_minor AS amount FROM transactions
        WHERE ledger_id = @ledger AND payee_key IN (SELECT value FROM json_each(@keys))
-         AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL
+         AND deleted_at IS NULL AND recurring_item_id IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL AND status <> 'pending'
        ORDER BY date DESC, id DESC`,
       { keys: JSON.stringify([r.payee_key, ...(JSON.parse(r.other_keys) as string[])]) },
     )
@@ -752,7 +752,8 @@ export interface PaymentFacts {
  * paid, or null: from one of its payees, on its account, in its due window and within its price
  * variation. The one check for "it's this item's payment": for a transaction of the ledger
  * (matchRecurring), and for a new one on a shared account that another ledger's item is waiting
- * for (routeToItems). A suggestion that was never accepted isn't an active item.
+ * for (routeToItems). A suggestion that was never accepted isn't an active item. Neither caller asks
+ * for a pending transaction: it's matched once it posts.
  */
 export function matchingItem(ctx: AppContext, tx: PaymentFacts): { id: number; next: ISODate } | null {
   // The ledger's items from this payee, as theirs or as one of their other payees.
@@ -811,12 +812,15 @@ export function matchingItem(ctx: AppContext, tx: PaymentFacts): { id: number; n
   return null
 }
 
-/** Links an unlinked transaction to a matching active recurring item. Returns the item id. */
+/**
+ * Links an unlinked transaction to a matching active recurring item. Returns the item id. Not a
+ * pending one, whose amount and date can still change: it's matched when it posts.
+ */
 export function matchRecurring(ctx: AppContext, txId: number): number | null {
   const tx = ctx.q.get<PaymentFacts & { id: number; recurringItemId: number | null; transferPairId: number | null }>(
     `SELECT id, account_id AS accountId, date, amount_minor AS amount, payee_key AS payeeKey,
        recurring_item_id AS recurringItemId, transfer_pair_id AS transferPairId
-     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL AND split_of IS NULL`,
+     FROM transactions WHERE ledger_id = @ledger AND id = @id AND deleted_at IS NULL AND split_of IS NULL AND status <> 'pending'`,
     { id: txId },
   )
   if (!tx || tx.recurringItemId || tx.transferPairId) return null
@@ -841,8 +845,8 @@ export function matchRecurring(ctx: AppContext, txId: number): number | null {
  * at most one payment: from one of its payees, within the price variation, the closest to the amount.
  * Going back in time the amount follows the payments found (prices drift), except a plan's, and before a
  * price change you accepted it's the old one. A plan keeps no more than it has. Payments from another account than the
- * item's, ones closer to another item's amount from the same payee, and ones you said aren't its are left
- * out; a stopped item only loses payments. The next due date is the one after the latest payment's (it
+ * item's, ones closer to another item's amount from the same payee, ones you said aren't its, and pending
+ * ones you didn't add or link yourself are left out; a stopped item only loses payments. The next due date is the one after the latest payment's (it
  * only moves back when a payment was taken off, and not before one you just set). Returns how many were unlinked.
  */
 function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; removed?: boolean } = {}): number {
@@ -876,8 +880,8 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
   )
   const keys = [item.payeeKey, ...ctx.q.column<string>(`SELECT payee_key FROM recurring_payees WHERE ${THIS_ITEM('item_id')}`, forItem)]
   // Its payees' payments: linked to it, or to nothing yet.
-  const txs = ctx.q.all<{ id: number; date: string; amount: number; payeeKey: string; accountId: number; itemId: number | null }>(
-    `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, account_id AS accountId, recurring_item_id AS itemId FROM transactions
+  const txs = ctx.q.all<{ id: number; date: string; amount: number; payeeKey: string; accountId: number; itemId: number | null; pending: number }>(
+    `SELECT id, date, amount_minor AS amount, payee_key AS payeeKey, account_id AS accountId, recurring_item_id AS itemId, status = 'pending' AS pending FROM transactions
      WHERE ledger_id = @ledger AND deleted_at IS NULL AND transfer_pair_id IS NULL AND split_of IS NULL AND (recurring_item_id IS NULL OR recurring_item_id = @item)
        AND payee_key IN (SELECT value FROM json_each(@keys))
        AND id NOT IN (SELECT transaction_id FROM recurring_not_payments WHERE ${THIS_ITEM('item_id')})
@@ -885,7 +889,16 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
     { ...forItem, keys: JSON.stringify(keys) },
   )
   const linking = item.status === 'active'
-  const candidates = txs.filter((t) => (item.accountId === null || t.accountId === item.accountId) && (linking || t.itemId === itemId))
+  // Payments you said are its, each for a due date (one that came early or late stays that date's).
+  const pinned = new Map(
+    ctx.q
+      .all<{ id: number; due: string }>(`SELECT transaction_id AS id, due_date AS due FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')}`, forItem)
+      .map((p) => [p.id, p.due]),
+  )
+  // A pending one is only its payment when you said so: it's taken once it posts.
+  const candidates = txs.filter(
+    (t) => (item.accountId === null || t.accountId === item.accountId) && (linking || t.itemId === itemId) && (!t.pending || pinned.has(t.id)),
+  )
   // Payments linked to it another way (by hand, from another payee) keep their due dates.
   const fixed = ctx.q.all<{ id: number; date: string; amount: number }>(
     `SELECT id, date, amount_minor AS amount FROM transactions
@@ -897,12 +910,6 @@ function relink(ctx: AppContext, itemId: number, opts: { keepNextDue?: boolean; 
   const extras = candidates.filter((t) => oneOff.has(t.id))
   const window = matchWindow(item.cadence)
   const gap = (t: { amount: number }, expected: number) => Math.abs(t.amount - expected)
-  // Payments you said are its, each for a due date (one that came early or late stays that date's).
-  const pinned = new Map(
-    ctx.q
-      .all<{ id: number; due: string }>(`SELECT transaction_id AS id, due_date AS due FROM recurring_payment_dues WHERE ${THIS_ITEM('item_id')}`, forItem)
-      .map((p) => [p.id, p.due]),
-  )
 
   let matching: typeof candidates = []
   const dates = [...candidates.map((t) => t.date), ...fixed.map((f) => f.date), ...pinned.values()].sort()
@@ -1349,7 +1356,7 @@ interface DetectRow {
  * that covers the most of its due dates. One that's stopped is too, for your history (`stopped`). Other payments from the payee (another
  * subscription, say) don't matter, unless payments of that amount are as common between the windows as
  * in them (a coffee you buy every few days isn't a schedule). Payments that already belong to an item, or
- * match one in any status (a dismissed one too), are skipped.
+ * match one in any status (a dismissed one too), are skipped, and so are pending ones.
  */
 export function detectRecurring(ctx: AppContext): { created: number } {
   const { priceVariationPct: pct, dateVariationDays: days } = recurringDetection(ctx.app)
@@ -1359,7 +1366,7 @@ export function detectRecurring(ctx: AppContext): { created: number } {
        t.account_id AS accountId, t.recurring_item_id AS recurringItemId
      FROM transactions t LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND COALESCE(c.exclude_from_totals, 0) = 0
-       AND t.date <= @today AND t.payee_key <> '' AND t.amount_minor <> 0
+       AND t.date <= @today AND t.payee_key <> '' AND t.amount_minor <> 0 AND t.status <> 'pending'
      ORDER BY t.payee_key, t.date, t.id`,
     { today: todayDate },
   )

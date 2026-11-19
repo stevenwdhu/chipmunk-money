@@ -424,7 +424,8 @@ export function incomeVsExpense(ctx: AppContext, endMonth: MonthKey, count: numb
 
 /**
  * Rows for CSV export of transactions in a date range: oldest first, in the order they're listed (a
- * day's money in, then ones with a time of day, then money out, the other way round on a credit card).
+ * day's money in, then ones with a time of day, then money out, the other way round on a credit card),
+ * so pending ones come last.
  * One split into categories has a row for each part, in the parts' order, with the part's amount and
  * category and its note (the transaction's notes for a part without one), so a spreadsheet sums by
  * category. So does a refund or payback that has the category of the one purchase it pays back, when
@@ -446,7 +447,7 @@ export function exportRows(ctx: AppContext, from?: ISODate, to?: ISODate, filter
      LEFT JOIN ledger_categories c ON c.id = CASE WHEN p.transaction_id IS NOT NULL THEN p.category_id WHEN x.id IS NOT NULL THEN x.category_id ELSE t.category_id END AND c.ledger_id = t.ledger_id
      LEFT JOIN ledger_category_groups g ON g.id = c.group_id AND g.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.deleted_at IS NULL AND t.date BETWEEN ? AND ?${scope ? ` AND ${scope.sql}` : ''}
-     ORDER BY t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END, t.datetime, t.id, p.sort, abs(x.amount_minor) DESC, x.category_id`,
+     ORDER BY t.status = 'pending', t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END, t.datetime, t.id, p.sort, abs(x.amount_minor) DESC, x.category_id`,
     from ?? '0000-01-01',
     to ?? addDays(today(ctx), 3650),
     scope?.params ?? {},

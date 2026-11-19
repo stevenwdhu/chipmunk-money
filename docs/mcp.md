@@ -95,7 +95,7 @@ No arguments.
 
 #### `search_transactions`
 
-**Search transactions.** Newest first. Filter by text (payee, name, notes or an amount like 12.99), date range, account, category ("uncategorized" for none), category label, tag, or needsReview, and by a custom report or Only count and Filter out conditions (or what they filter out). Pass `cursor` from the previous result for more.
+**Search transactions.** Pending ones first, then newest first. Filter by text (payee, name, notes or an amount like 12.99), date range, account, category ("uncategorized" for none), category label, tag, or needsReview, and by a custom report or Only count and Filter out conditions (or what they filter out). Pass `cursor` from the previous result for more.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
@@ -144,7 +144,7 @@ No arguments.
 
 #### `list_account_transactions`
 
-**List a shared account’s transactions in every ledger.** A shared account’s transactions in whichever ledger holds them, newest first, each with the account’s total balance after it, like the bank’s statement. A split payment is listed once, with its shares. Only for a shared account, and a key that can use every ledger that has it. For one ledger’s own, use search_transactions with `account`. Pass `cursor` from the previous result for more.
+**List a shared account’s transactions in every ledger.** A shared account’s transactions in whichever ledger holds them, pending ones first, then newest first, each with the account’s total balance after it, like the bank’s statement. A split payment is listed once, with its shares. Only for a shared account, and a key that can use every ledger that has it. For one ledger’s own, use search_transactions with `account`. Pass `cursor` from the previous result for more.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
