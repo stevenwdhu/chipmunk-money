@@ -292,7 +292,7 @@ export const transactionUpdateSchema = z.object({
     .nullable()
     .optional()
     .describe(
-      'A recurring item: adds it to the item as one of its payments, whatever its amount, as POST /recurring/{id}/add-payment does (from another item, it moves). It takes the item’s category, and `categoryId` is then left aside. Refused (400, and nothing changes) when the item is a suggestion not confirmed yet, the transaction is on another account than the item’s, is money in for an item that’s money out (or the other way), is a transfer, or a plan has all its payments. null: takes it off its item, which doesn’t take it back.',
+      'A recurring item: adds it to the item as one of its payments, whatever its amount, as POST /recurring/{id}/add-payment does (from another item, it moves). It takes the item’s category, and `categoryId` is then left aside (one split into categories keeps its parts and its category). Refused (400, and nothing changes) when the item is a suggestion not confirmed yet, the transaction is on another account than the item’s, is money in for an item that’s money out (or the other way), is a transfer, or a plan has all its payments. null: takes it off its item, which doesn’t take it back.',
     ),
   parts: partsInput.optional().describe('Splits it into categories, as PUT /transactions/{id}/parts does, after the other changes (so the parts add up to a new `amountMinor`): `categoryId` is then left aside. Left out, a split stays, and its largest part takes a change of amount.'),
   transferPairId: z.null().optional().describe('null: it isn’t a transfer. Unlinks both sides, which keep their categories as yours.'),
