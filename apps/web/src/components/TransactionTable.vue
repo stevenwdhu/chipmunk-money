@@ -249,14 +249,15 @@ useIntersectionObserver(sentinel, ([entry]) => {
   if (entry?.isIntersecting && list.hasNextPage.value && !list.isFetchingNextPage.value) list.fetchNextPage()
 })
 
-// Phone: group by day
+// Phone: group by day. Pending ones come first from the server, under one Pending heading.
 const days = computed(() => {
   const groups: Array<{ date: string; items: Item[]; total: number }> = []
   const listed = new Set(items.value.map((t) => t.id))
   for (const t of all.value) {
+    const date = t.status === 'pending' ? 'pending' : t.date
     let g = groups[groups.length - 1]
-    if (!g || g.date !== t.date) {
-      g = { date: t.date, items: [], total: 0 }
+    if (!g || g.date !== date) {
+      g = { date, items: [], total: 0 }
       groups.push(g)
     }
     // A given row under its payment still counts in the day's total.
@@ -574,7 +575,7 @@ async function accept(tx: Transaction) {
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span :class="cn('truncate font-medium', tx.split?.part === 'given' && 'text-muted-foreground')">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
                   <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split between ledgers</span>
-                  <span v-if="tx.across && tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
+                  <span v-if="tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
                 </div>
@@ -663,13 +664,14 @@ async function accept(tx: Transaction) {
             :class="i === 0 && 'rounded-t-xl'"
             class="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-[5] flex justify-between border-b bg-muted/90 px-4 py-1.5 text-xs font-medium text-muted-foreground backdrop-blur"
           >
-            <span>{{ formatDateLong(day.date) }}</span>
+            <span>{{ day.date === 'pending' ? 'Pending' : formatDateLong(day.date) }}</span>
             <MoneyText :amount="day.total" :colored="false" />
           </h2>
           <TransactionList
             :items="day.items"
+            :today="today"
             :faded="kept"
-            :show-date="false"
+            :show-date="day.date === 'pending'"
             :show-account="!oneAccount"
             :balance-of="balanceOf"
             :under="foldedUnder"

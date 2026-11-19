@@ -51,8 +51,8 @@ const badge = computed(() => ({
   acceptable: true,
   txId: props.tx.id,
 }))
-/** All ledgers: "Family · Groceries · Pending". */
-const held = computed(() => (across.value ? [across.value.ledger.name, categoryAcross(across.value), across.value.status === 'pending' ? 'Pending' : null].filter(Boolean).join(' · ') : ''))
+/** All ledgers: "Family · Groceries". */
+const held = computed(() => (across.value ? [across.value.ledger.name, categoryAcross(across.value)].filter(Boolean).join(' · ') : ''))
 /** Date and account, under the payee while the row is too narrow for their own columns. */
 const meta = computed(() => {
   const parts: string[] = []
@@ -83,6 +83,7 @@ const meta = computed(() => {
           <!-- A split row says what it is: whose payment it's a share of, or who its shares are for. -->
           <span :class="['truncate text-sm font-medium', tx.split?.part === 'given' && 'text-muted-foreground']">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
           <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split between ledgers</span>
+          <span v-if="tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
           <LinkBadge :tx="tx" />
           <Repeat v-if="tx.recurringItemId" class="size-3 shrink-0 text-muted-foreground" aria-label="Recurring" />
         </div>
