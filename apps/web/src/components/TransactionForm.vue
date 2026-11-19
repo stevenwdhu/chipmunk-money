@@ -7,6 +7,7 @@ import { formatMoney, parseMoney, recurringLabel, type CategorySuggestion, type 
 import FilterOutOfReport from '@/components/FilterOutOfReport.vue'
 import AccountSelect from '@/components/AccountSelect.vue'
 import BankDataDialog from '@/components/BankDataDialog.vue'
+import CategoryPartsEditor from '@/components/CategoryPartsEditor.vue'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
 import PaybackDialog from '@/components/PaybackDialog.vue'
@@ -36,6 +37,7 @@ import { usePayeeOptions } from '@/composables/usePayeeOptions'
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { money } from '@/lib/format'
+import { checkLines, partLines, type PartLine } from '@/lib/parts'
 import { currentLedger, lapi } from '@/lib/ledger'
 import { titleOf } from '@/lib/payee'
 import { MOVE_SPLIT, SHARES_OVER, sharedNote, sharesFor, splitLock } from '@/lib/sharing'
@@ -155,8 +157,11 @@ function linkedRefund(tx: Transaction) {
   suggestion.value = null
   // The new category is saved already: not a change of yours.
   const before = JSON.parse(initial.value || '[]') as unknown[]
+  // Linked in full, a split into categories is undone.
+  if (!tx.parts) parts.value = null
   if (before.length) {
     before[4] = tx.categoryId
+    before[11] = parts.value
     initial.value = JSON.stringify(before)
   }
 }
@@ -174,6 +179,8 @@ const date = ref('')
 const time = ref('')
 const tags = ref<string[]>([])
 const notes = ref('')
+/** Its lines while it's split into categories, or null. */
+const parts = ref<PartLine[] | null>(null)
 const showBankData = ref(false)
 const errors = ref<Record<string, string>>({})
 
@@ -204,6 +211,7 @@ function reset(keep = false) {
     time.value = tx.datetime?.slice(11, 16) ?? ''
     tags.value = tx.tags.map((t) => t.name)
     notes.value = tx.notes ?? ''
+    parts.value = tx.parts ? partLines(tx.parts) : null
     categoryTouched.value = !tx.needsReview
     suggestion.value = tx.needsReview && tx.categoryId
       ? { categoryId: tx.categoryId, source: tx.categorySource === 'ai' ? 'ai' : 'history', confidence: tx.categoryConfidence ?? 0, reason: '' }
@@ -223,6 +231,7 @@ function reset(keep = false) {
     categoryId.value = d.categoryId ?? null
     tags.value = []
     notes.value = ''
+    parts.value = null
     categoryTouched.value = d.categoryId !== undefined && d.categoryId !== null
     suggestion.value = null
   }
@@ -234,7 +243,7 @@ function reset(keep = false) {
 
 /** The fields, to tell whether you changed anything since it opened. */
 const fields = () =>
-  JSON.stringify([kind.value, amountText.value, payee.value, name.value, categoryId.value, accountId.value, transferAccountId.value, date.value, time.value, tags.value, notes.value])
+  JSON.stringify([kind.value, amountText.value, payee.value, name.value, categoryId.value, accountId.value, transferAccountId.value, date.value, time.value, tags.value, notes.value, parts.value])
 const initial = ref('')
 const dirty = computed(() => !!initial.value && fields() !== initial.value)
 watch(dirty, (d) => (ui.editorDirty = d), { immediate: true })
@@ -288,7 +297,7 @@ const payeeOptions = usePayeeOptions()
 /** What a suggestion depends on. It's asked for again only when one of these changes, or with Ask again. */
 const suggestionKey = () => JSON.stringify([payee.value.trim(), kind.value, amountMinor.value, accountId.value])
 let askedFor = ''
-const canSuggest = computed(() => !isRefund.value && kind.value !== 'transfer' && payee.value.trim().length >= 2)
+const canSuggest = computed(() => !isRefund.value && kind.value !== 'transfer' && !parts.value && payee.value.trim().length >= 2)
 
 /** History first, then AI when history has nothing. `again`: you asked, so even with a category you picked. */
 async function runSuggestion(again = false) {
@@ -323,9 +332,36 @@ function pickCategory(id: number | null) {
   categoryTouched.value = true
 }
 
+// Split into categories: not a transfer, a refund or payback with the category of what it pays back,
+// or part of a payment split between ledgers. A card payment is refused by the server, in its words.
+const canSplitByCategory = computed(() => kind.value !== 'transfer' && !isRefund.value && !split.value)
+const partsCheck = computed(() => (parts.value ? checkLines(parts.value, amountMinor.value === null ? null : Math.abs(amountMinor.value)) : null))
+/** It starts with its category on the first line and the whole amount on the last. */
+function splitByCategory() {
+  parts.value = [
+    { categoryId: categoryId.value, amountText: '', note: '' },
+    { categoryId: null, amountText: '', note: '' },
+  ]
+}
+/** Back to one category: its largest part's, as the server keeps. */
+function undoSplit() {
+  const amounts = partsCheck.value?.amounts ?? []
+  const largest = amounts.indexOf(Math.max(...amounts))
+  if (parts.value && largest >= 0) pickCategory(parts.value[largest]!.categoryId)
+  parts.value = null
+}
+/** The parts as the server takes them, of the transaction's sign. */
+function partsInput() {
+  const sign = (amountMinor.value ?? 0) < 0 ? -1 : 1
+  return (parts.value ?? []).map((l, i) => ({ categoryId: l.categoryId, amountMinor: sign * partsCheck.value!.amounts[i]!, note: l.note.trim() || null }))
+}
+/** The parts changed from what it has: only then are they sent, as sending one category would undo them. */
+const partsChanged = (tx: Transaction) =>
+  JSON.stringify(partsInput()) !== JSON.stringify((tx.parts ?? []).map((p) => ({ categoryId: p.categoryId, amountMinor: p.amountMinor, note: p.note })))
+
 const suggestionText = computed(() => {
   const s = suggestion.value
-  if (isRefund.value || !s?.categoryId || categoryId.value !== s.categoryId) return null
+  if (isRefund.value || parts.value || !s?.categoryId || categoryId.value !== s.categoryId) return null
   const name = categoriesById.value.get(s.categoryId)?.name
   const who = s.source === 'ai' ? 'AI suggestion' : s.source === 'fuzzy' ? 'Similar to a past payee' : 'From your history'
   return `${who}${name ? `: ${name}` : ''}${s.confidence ? ` · ${Math.round(s.confidence * 100)}% sure` : ''}`
@@ -338,11 +374,15 @@ function validate() {
   if (!accountId.value) e.account = 'Pick an account'
   if (kind.value === 'transfer' && !isTransferEdit.value && !transferAccountId.value) e.transfer = 'Pick the account the money goes to'
   if (!date.value) e.date = 'Pick a date'
+  // Said in the editor.
+  if (kind.value !== 'transfer' && partsCheck.value?.problem) e.parts = partsCheck.value.problem
   errors.value = e
   return Object.keys(e).length === 0
 }
 
 const saving = computed(() => m.create.isPending.value || m.update.isPending.value)
+/** Save waits until the parts add up. */
+const partsWaiting = computed(() => kind.value !== 'transfer' && !!partsCheck.value?.problem)
 /** Its date and time, keeping the seconds a bank gave when the time isn't changed. */
 const datetime = () => {
   if (!time.value) return null
@@ -373,17 +413,22 @@ async function save(addAnother = false): Promise<boolean> {
         notes: notes.value.trim() || null,
         tags: tags.value,
         // A refund's is its purchase's (sent as it is, saving accepts it when it's waiting for review).
-        ...(isTransferEdit.value ? {} : { categoryId: isRefund.value ? before.categoryId : categoryId.value }),
+        ...(isTransferEdit.value
+          ? {}
+          : parts.value
+            ? partsChanged(before) ? { parts: partsInput() } : {}
+            : { categoryId: isRefund.value ? before.categoryId : categoryId.value }),
       })
       const said = [
         saved.correctedAt && !before.correctedAt && 'You corrected the bank’s data, so bank syncs leave its amount and date alone.',
         // A recurring item's payments share one category.
-        saved.recurringItemId && saved.categoryId !== before.categoryId && 'Its recurring item’s other payments have the new category too.',
+        saved.recurringItemId && !saved.parts && saved.categoryId !== before.categoryId && 'Its recurring item’s other payments have the new category too.',
         // And one name.
         saved.recurringItemId && saved.name !== before.name && 'Its recurring item and its other payments have the new name too.',
       ].filter(Boolean)
       toast.success('Transaction saved', { description: said.length ? said.join(' ') : undefined })
-      if (saved.categorySource !== 'linked' && (saved.categoryId !== before.categoryId || before.needsReview)) ui.askAboutPayee(saved)
+      // Nothing is learned from a split into categories.
+      if (saved.categorySource !== 'linked' && !saved.parts && (saved.categoryId !== before.categoryId || before.needsReview)) ui.askAboutPayee(saved)
       emit('done')
       return true
     }
@@ -398,6 +443,7 @@ async function save(addAnother = false): Promise<boolean> {
       notes: notes.value.trim() || null,
       tags: tags.value,
       transferAccountId: kind.value === 'transfer' ? transferAccountId.value : null,
+      ...(kind.value !== 'transfer' && parts.value ? { parts: partsInput() } : {}),
     })
     toast.success(`Added ${formatMoney(created.amountMinor)} · ${titleOf(created)}`, {
       action: { label: 'Undo', onClick: () => m.remove.mutate(created.id) },
@@ -558,8 +604,10 @@ const kinds: Array<{ value: Kind; label: string }> = [
     </div>
 
     <div v-if="kind !== 'transfer'" class="grid gap-1.5">
-      <Label for="tx-category">Category</Label>
+      <Label for="tx-category">{{ parts ? 'Split into categories' : 'Category' }}</Label>
+      <CategoryPartsEditor v-if="parts" v-model="parts" :total-minor="amountMinor === null ? null : Math.abs(amountMinor)" @undo="undoSplit" />
       <CategoryPicker
+        v-else
         id="tx-category"
         :model-value="categoryId"
         :suggested-id="isRefund ? null : (suggestion?.categoryId ?? null)"
@@ -567,7 +615,7 @@ const kinds: Array<{ value: Kind; label: string }> = [
         :class="suggestionText ? 'border-ai' : ''"
         @update:model-value="pickCategory"
       />
-      <p v-if="suggesting" class="flex items-center gap-1 text-xs text-muted-foreground">
+      <p v-if="suggesting && !parts" class="flex items-center gap-1 text-xs text-muted-foreground">
         <Loader2 class="size-3 animate-spin" />Finding a category…
       </p>
       <p v-else-if="suggestionText" class="flex flex-wrap items-center gap-x-1 text-xs text-muted-foreground">
@@ -577,6 +625,9 @@ const kinds: Array<{ value: Kind; label: string }> = [
       <!-- A transaction without a suggestion: one on request. -->
       <p v-else-if="editing && canSuggest && !categoryId" class="text-xs">
         <button type="button" class="text-primary underline-offset-4 hover:underline" @click="runSuggestion(true)">Suggest a category</button>
+      </p>
+      <p v-if="!parts && canSplitByCategory" class="text-xs">
+        <button type="button" class="text-primary underline-offset-4 hover:underline" @click="splitByCategory">Split into categories…</button>
       </p>
       <p v-if="isRefund && editing?.links.length === 1" class="text-xs text-muted-foreground">
         Always the category of what it pays back: it changes when that one’s does.
@@ -676,10 +727,10 @@ const kinds: Array<{ value: Kind; label: string }> = [
       >
         <Trash2 />Delete
       </Button>
-      <Button v-else type="button" variant="outline" class="sm:mr-auto" :disabled="saving" @click="save(true)">
+      <Button v-else type="button" variant="outline" class="sm:mr-auto" :disabled="saving || partsWaiting" @click="save(true)">
         Save &amp; add another
       </Button>
-      <Button type="submit" :disabled="saving">
+      <Button type="submit" :disabled="saving || partsWaiting">
         <Loader2 v-if="saving" class="animate-spin" />{{ editing ? 'Save changes' : 'Save transaction' }}
       </Button>
     </div>

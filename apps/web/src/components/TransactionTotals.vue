@@ -9,17 +9,25 @@ import { foldGiven } from '@/lib/sharing'
  * out across accounts, so they count only for a single account's list. What a split payment gave the
  * other ledgers shows under the payment, not as a row, so it isn't counted as a transaction, and it
  * is money out like the amount the list shows there. With more still to load, the count is what's
- * loaded so far ("100+"), as the page asks for them.
+ * loaded so far ("100+"), as the page asks for them. Filtered by categories, one split into categories
+ * counts only its parts in them.
  */
-const props = defineProps<{ items: Transaction[]; more?: boolean; singleAccount?: boolean }>()
+const props = defineProps<{ items: Transaction[]; more?: boolean; singleAccount?: boolean; categoryIds?: Array<number | 'none'> }>()
+
+const amountOf = (t: Transaction) => {
+  const ids = props.categoryIds
+  if (!t.parts || !ids?.length) return t.amountMinor
+  return t.parts.filter((p) => ids.includes(p.categoryId ?? 'none')).reduce((n, p) => n + p.amountMinor, 0)
+}
 
 const totals = computed(() => {
   let inflow = 0
   let outflow = 0
   for (const t of props.items) {
     if (t.transferPairId && !props.singleAccount) continue
-    if (t.amountMinor > 0) inflow += t.amountMinor
-    else outflow += t.amountMinor
+    const amount = amountOf(t)
+    if (amount > 0) inflow += amount
+    else outflow += amount
   }
   return { inflow, outflow, count: props.more ? props.items.length : foldGiven(props.items).items.length }
 })

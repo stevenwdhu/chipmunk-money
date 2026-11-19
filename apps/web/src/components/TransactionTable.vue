@@ -17,6 +17,7 @@ import {
   type Transaction,
   type TransactionColumn,
 } from '@chipmunk/shared'
+import CategoryParts from '@/components/CategoryParts.vue'
 import CategoryPicker from '@/components/CategoryPicker.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import FilterOutOfReport from '@/components/FilterOutOfReport.vue'
@@ -366,6 +367,13 @@ watch(aiRunning, (running, was) => {
  * the bill, to pick the money in that paid it back.
  */
 const selectedItems = computed(() => items.value.filter((t) => selected.value.has(t.id)))
+/** Said beside Set category when the selection holds a transaction split into categories: one category undoes the split. */
+const splitByCategory = computed(() => {
+  const n = selectedItems.value.filter((t) => t.parts).length
+  if (!n) return null
+  if (n === selectedItems.value.length) return n === 1 ? 'Setting a category undoes its split by category.' : 'Setting a category undoes their splits by category.'
+  return `Setting a category undoes the split by category of ${n} of them.`
+})
 /** The ledgers the selection can move to: the ones every selected row's account is shared with. */
 const moveLedgers = computed(() => commonLedgers(selectedItems.value.map((t) => accounts.value.get(t.accountId))))
 const ledgers = useLedgers()
@@ -465,6 +473,7 @@ async function accept(tx: Transaction) {
       <template v-else>
         <CategoryPicker v-model="bulkCategory" size="sm" class="w-48" placeholder="Set category…" />
         <Button size="sm" variant="outline" :disabled="m.bulk.isPending.value" @click="bulk('category')">Apply</Button>
+        <span v-if="splitByCategory" class="text-sm text-muted-foreground">{{ splitByCategory }}</span>
         <Popover>
           <PopoverTrigger as-child><Button size="sm" variant="outline"><Tag />Add tag</Button></PopoverTrigger>
           <PopoverContent class="w-56" align="start">
@@ -563,7 +572,7 @@ async function accept(tx: Transaction) {
                 <!-- Its name, or what you call its payee, or its payee as sent. -->
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span :class="cn('truncate font-medium', tx.split?.part === 'given' && 'text-muted-foreground')">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
-                  <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split</span>
+                  <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split between ledgers</span>
                   <span v-if="tx.across && tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
@@ -601,6 +610,10 @@ async function accept(tx: Transaction) {
               </TableCell>
               <!-- All ledgers: its category in the ledger that holds it, by name. It's changed in the editor. -->
               <TableCell v-else-if="col === 'category' && tx.across" :style="columns.cellStyle(col)" class="max-w-0 truncate text-muted-foreground">{{ tx.across.category }}</TableCell>
+              <!-- Split into categories: changed in the editor the row opens, so picking one here can't undo it by a slip. -->
+              <TableCell v-else-if="col === 'category' && tx.parts" :style="columns.cellStyle(col)" class="max-w-0">
+                <CategoryParts :parts="tx.parts" />
+              </TableCell>
               <TableCell v-else-if="col === 'category'" :style="columns.cellStyle(col)" class="max-w-0" @click.stop>
                 <span v-if="tx.transferPairId" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                   <ArrowLeftRight class="size-3.5" />{{ categories.get(tx.categoryId ?? -1)?.name ?? 'Transfer' }}

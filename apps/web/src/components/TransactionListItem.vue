@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { Repeat } from '@lucide/vue'
 import { formatMoney, type Transaction } from '@chipmunk/shared'
 import CategoryBadge from '@/components/CategoryBadge.vue'
+import CategoryParts from '@/components/CategoryParts.vue'
 import LedgerMark from '@/components/ledger/LedgerMark.vue'
 import LinkBadge from '@/components/LinkBadge.vue'
 import { billCount, netAmount } from '@/lib/links'
@@ -81,7 +82,7 @@ const meta = computed(() => {
         <div class="flex items-center gap-1.5">
           <!-- A split row says what it is: whose payment it's a share of, or who its shares are for. -->
           <span :class="['truncate text-sm font-medium', tx.split?.part === 'given' && 'text-muted-foreground']">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
-          <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split</span>
+          <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split between ledgers</span>
           <LinkBadge :tx="tx" />
           <Repeat v-if="tx.recurringItemId" class="size-3 shrink-0 text-muted-foreground" aria-label="Recurring" />
         </div>
@@ -102,6 +103,7 @@ const meta = computed(() => {
           <LedgerMark :ledger="holder" size="sm" />
           <span class="truncate">{{ held }}</span>
         </div>
+        <CategoryParts v-else-if="tx.parts" :parts="tx.parts" class="mt-1 @xl:hidden" />
         <CategoryBadge v-else v-bind="badge" class="mt-1 max-w-full @xl:hidden" @accept="emit('accept', tx)" />
         <div v-if="meta" class="mt-1 truncate text-xs text-muted-foreground @xl:hidden">{{ meta }}</div>
         <p v-if="tx.notes" class="mt-1 line-clamp-2 text-xs break-words whitespace-pre-line text-foreground/80">{{ tx.notes }}</p>
@@ -114,6 +116,7 @@ const meta = computed(() => {
         <LedgerMark :ledger="holder" size="sm" />
         <span class="truncate">{{ held }}</span>
       </span>
+      <CategoryParts v-else-if="tx.parts" :parts="tx.parts" class="hidden @xl:flex" />
       <CategoryBadge v-else v-bind="badge" class="hidden @xl:inline-flex" @accept="emit('accept', tx)" />
       <span v-if="showAccount" class="hidden pt-px text-sm whitespace-nowrap text-muted-foreground @xl:block">{{ account?.name }}</span>
       <div class="flex min-w-0 flex-col items-end gap-1">

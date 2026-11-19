@@ -6,6 +6,7 @@ What changed in each release of Chipmunk, called Spending Tracker before the ren
 
 ### Added
 
+- A transaction can be split into categories: **Split into categories…** in the transaction form gives each part its own category, amount and note, and the transaction stays one row with its parts under it. Reports, the totals under a category filter, the CSV export (one row per part), the API (`PUT /transactions/{id}/parts`, and `parts` on a transaction) and the MCP tool `split_by_category` count each part in its own category. Setting one category undoes the split.
 - On a shared account, a new payment follows its recurring item. A transaction from a bank sync, Fetch all history or a CSV import goes from the home to another ledger when it's a payment of an active recurring item there, of none in the home, and of none in any other ledger that has the account. The sync's or import's message and Activity in both ledgers say what went where. A transaction linked to another (a purchase with its refund) stays in the home. A CSV import made with an API key limited to some ledgers sends a transaction only to a ledger the key can use. The API's sync and import results list them (`routed`), and so do the MCP tools.
 
 ### Changed

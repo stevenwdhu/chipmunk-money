@@ -50,9 +50,11 @@ const out = useReportPurchases(() => ({ ...params.value, set: 'filtered-out' as 
 
 const rules = computed(() => sideOf(props.state.filter.value, 'spending').filterOut)
 const charged = (i: Item) => -i.transaction.amountMinor
+/** One split into categories shows what the report counts of it: under a category filter, its part. */
+const shown = (i: Item) => (i.transaction.parts ? i.inRangeMinor : charged(i))
 const meta = (i: Item) => {
   const c = i.transaction.categoryId === null ? null : categories.value.get(i.transaction.categoryId)
-  return [shortDate(i.transaction.date, today.value), c?.name].filter(Boolean).join(' · ')
+  return [shortDate(i.transaction.date, today.value), i.transaction.parts ? 'Split by category' : c?.name].filter(Boolean).join(' · ')
 }
 
 function filterOut(i: Item) {
@@ -95,8 +97,9 @@ function putItBack(i: Item) {
                   <span class="block truncate text-xs text-muted-foreground">{{ meta(i) }}</span>
                 </span>
                 <span class="shrink-0 text-right">
-                  <span class="block text-sm tabular">{{ money(charged(i)) }}</span>
-                  <span v-if="i.shareMinor !== charged(i)" class="block text-xs text-muted-foreground tabular">your share {{ money(i.shareMinor) }}</span>
+                  <span class="block text-sm tabular">{{ money(shown(i)) }}</span>
+                  <span v-if="shown(i) !== charged(i)" class="block text-xs text-muted-foreground tabular">of {{ money(charged(i)) }}</span>
+                  <span v-else-if="i.shareMinor !== charged(i)" class="block text-xs text-muted-foreground tabular">your share {{ money(i.shareMinor) }}</span>
                 </span>
               </button>
               <Button
