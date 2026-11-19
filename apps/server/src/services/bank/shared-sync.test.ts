@@ -186,7 +186,7 @@ describe('bank sync on a shared account', () => {
     // What a new link takes in, from what was kept: nothing new either, and its opening date goes back to the oldest row, wherever it is.
     w.bank.unlinkAccount(w.personal, w.visa)
     w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId }, null)
-    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0 })
+    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0, routed: [] })
     // No new row, no opening balance change, no recorded balance, no activity.
     expect(everything()).toEqual(before)
     expect(w.opening()).toMatchObject({ openingBalanceMinor: -25000, recorded: null })
@@ -196,7 +196,7 @@ describe('bank sync on a shared account', () => {
     w.move(w.personal, ['a1'], w.family)
     w.bank.unlinkAccount(w.personal, w.visa)
     w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccountId }, null)
-    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0 })
+    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 0, adopted: 0, routed: [] })
     expect(w.opening().openingDate).toBe('2026-09-28')
     expect(w.personal.accountWide.firstDate(w.visa)).toBe('2026-09-28')
 

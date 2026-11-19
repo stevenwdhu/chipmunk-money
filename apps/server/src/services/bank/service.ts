@@ -531,9 +531,10 @@ export class BankService {
    * Brings a newly linked account up to date from what's kept of its bank account, without fetching:
    * its transactions from "sync from" on, and its balance. When nothing was fetched for it yet, its
    * connection's next sync brings them, and this returns null. A shared account's rows are matched in
-   * every ledger that holds them, as a sync's are.
+   * every ledger that holds them, as a sync's are, and `routed` of the added ones went to another
+   * ledger for its recurring item.
    */
-  fill(ctx: AppContext, accountId: number): { added: number; adopted: number } | null {
+  fill(ctx: AppContext, accountId: number): { added: number; adopted: number; routed: Routed[] } | null {
     accounts.requireHome(ctx, accountId, 'bank')
     const acct = this.linkedTo(ctx.ledger.id, accountId)
     if (!acct?.fetchedAt || acct.lastSyncedAt) return null
@@ -548,10 +549,10 @@ export class BankService {
       provider,
     )
     this.caughtUp(ctx, accountId, acct)
-    this.settle(ctx, applied.newIds, actor(provider))
+    const routed = this.settle(ctx, applied.newIds, actor(provider))
     // The ledgers the account is shared with whose rows changed settle too.
     for (const ledgerId of applied.ledgers) if (ledgerId !== ctx.ledger.id) this.settle(this.storage.ctxOf(ledgerId), [], actor(provider))
-    return { added: applied.added, adopted: applied.adopted }
+    return { added: applied.added, adopted: applied.adopted, routed }
   }
 
   /**

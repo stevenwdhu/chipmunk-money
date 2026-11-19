@@ -67,8 +67,8 @@ export interface MoveResult {
   recurringDetached: number
   /**
    * The recurring items that went with their payments: `payments` of each moved (the picked ones
-   * and the rest of them), `left` couldn't (the item stays with those), and `joined` says they're
-   * payments of an item `to` already had for the payee, not of this one made there.
+   * and the rest of them), `left` couldn't (the item stays with those, ended), and `joined` says
+   * they're all payments of an item `to` already had for the payee, not of this one made there.
    */
   recurringItems: Array<{ itemId: number; item: string; payments: number; left: number; joined: boolean }>
   /** Tags `to` didn't have, added for the moved rows. */
@@ -119,8 +119,8 @@ interface CategoryNow {
   excluded: number
 }
 
-/** Thrown to end a dry run's transaction: a throw out of a transaction rolls it back. */
-const ROLL_BACK = new Error('dry run')
+/** Thrown to roll a transaction back on purpose (a dry run's, and a try at joining an item): a throw out of one rolls it back. */
+const ROLL_BACK = new Error('roll back')
 
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
 const describe = (r: Pick<MovingRow, 'name' | 'payee' | 'amount' | 'currency' | 'date'>) =>
@@ -278,11 +278,12 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
  * 7. Bank payloads that point at them point at no row: only the home's rows have payloads.
  * 8. One UPDATE changes their ledger (moveRows, through ctx.accountWide).
  * 9. In `to`: the carried links and the tags, then the items that came: the payments are those of
- *    its own active item for the payee when it has one that takes any of them, else the item is made
- *    there as it was (receiveItem), its category by the rule of step 5 without the history. Then its
- *    matching (from the earliest moved date) and its recurring items, each moved row as a new one.
- *    In `from`: an item with no payment left is gone, and one that kept some (they couldn't move)
- *    works them out again, as does one that only let go (`plain`).
+ *    its own active item for the payee when it has one that takes them all and gives up none of its
+ *    own, else the item is made there as it was (receiveItem), its category by the rule of step 5
+ *    without the history. Then its matching (from the earliest moved date) and its recurring items,
+ *    each moved row as a new one. In `from`: an item with no payment left is gone, one that kept some
+ *    (they couldn't move) works them out again and is ended, and one that only let go (`plain`)
+ *    works them out again.
  * 10. Activity in both ledgers.
  * 11. Nothing refers across the two ledgers afterwards, or it all rolls back.
  * After the commit, not in a dry run and not deferred: AI categorizes, in `to`, the moved rows
@@ -369,9 +370,22 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     for (const id of new Set(carried.map((l) => l.moneyIn))) settleLinkedCategory(toCtx, id)
     const tagsCreated = moveTags(toCtx, tags)
     const recurringItems = [...going.values()].map((i) => {
-      // `to`'s own items for the payee take what's theirs of the payments. When none takes any, the item is made there.
-      for (const id of activeItemsOf(toCtx, i.carried.payeeKey)) recalculateRecurring(toCtx, id, { followAmount: true })
-      const joined = !!toCtx.q.pluck<number>(`SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IS NOT NULL AND ${THESE}`, json(i.payments))
+      // `to`'s own items for the payee take the payments when they take them all and keep every payment
+      // they had (an item has one payment for a due date). Otherwise that's undone, and the item is made there.
+      const own = activeItemsOf(toCtx, i.carried.payeeKey)
+      const theirs = () => toCtx.q.column<number>('SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id IN (SELECT value FROM json_each(?))', json(own))
+      let joined = own.length > 0
+      try {
+        toCtx.q.transaction(() => {
+          const had = theirs()
+          for (const id of own) recalculateRecurring(toCtx, id, { followAmount: true })
+          const have = new Set(theirs())
+          if (![...had, ...i.payments].every((id) => have.has(id))) throw ROLL_BACK
+        })
+      } catch (err) {
+        if (err !== ROLL_BACK) throw err
+        joined = false
+      }
       if (!joined) {
         receiveItem(toCtx, i.carried, {
           categoryId: categoryThere(toCtx, i.carried.categoryId, itemCategories.get(i.itemId) ?? null)?.id ?? null,
@@ -387,8 +401,11 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     if (input.routed && taken[0] == null) badRequest(`${describe(rows[0]!)} isn’t a payment of ${input.routed} in ${toCtx.ledger.name} after all.`)
     // In `from`: an item that went with all its payments is gone, and the others work theirs out without these.
     for (const item of detached) {
-      if (going.get(item.itemId)?.left === 0) deleteRecurring(fromCtx, item.itemId)
+      const went = going.get(item.itemId)
+      if (went?.left === 0) deleteRecurring(fromCtx, item.itemId)
       else recalculateRecurring(fromCtx, item.itemId, { removed: true, followAmount: true, wasPaidOff: item.wasPaidOff })
+      // One that went and also stays, with what couldn't move, is ended here: the next payments are the other ledger's item's.
+      if (went?.left) fromCtx.q.run("UPDATE recurring_items SET status = 'ended' WHERE ledger_id = @ledger AND id = ?", item.itemId)
     }
 
     // 10. Activity.
@@ -474,17 +491,21 @@ export interface Routed {
  * one other ledger that has its account and isn't archived (matchingItem, the check matchRecurring
  * links by), moves there, by an ordinary move: that ledger's item takes it and categorizes it. With
  * no such ledger, or two, it stays in the home. So does a card payment or a transfer (a row in a
- * category left out of totals, or paired), so run this after the home's matching has found those,
- * and a split row. Nothing is asked of the caller's key: a sync writes in every ledger that has
- * the account as it is. With `defer`, AI categorizes nothing afterwards (a dry run). Returns what went.
+ * category left out of totals, or paired) and a row linked to another (a purchase and its refund),
+ * so run this after the home's matching has found those, and a split row. Nothing is asked of a
+ * sync's key: a sync writes in every ledger that has the account as it is. An import's rows are the
+ * caller's own choice, so its key's ledgers are given (`usable`, null for all): a row whose item is
+ * in a ledger the key can't use stays in the home, and nothing says why. With `defer`, AI
+ * categorizes nothing afterwards (a dry run). Returns what went.
  */
-export function routeToItems(home: AppContext, ctxOf: CtxOf, ids: number[], actor: ActivityActor, opts: { defer?: boolean } = {}): Routed[] {
+export function routeToItems(home: AppContext, ctxOf: CtxOf, ids: number[], actor: ActivityActor, opts: { defer?: boolean; usable?: readonly string[] | null } = {}): Routed[] {
   if (!ids.length) return []
   const rows = home.q.all<{ id: number; accountId: number; date: string; amount: number; payeeKey: string; payee: string }>(
     `SELECT t.id, t.account_id AS accountId, t.date, t.amount_minor AS amount, t.payee_key AS payeeKey, coalesce(t.name, t.payee) AS payee
      FROM transactions t
      WHERE t.ledger_id = @ledger AND t.${THESE} AND t.deleted_at IS NULL AND t.bank_id_only = 0 AND t.recurring_item_id IS NULL AND t.transfer_pair_id IS NULL
        AND NOT ${SPLIT}
+       AND NOT EXISTS (SELECT 1 FROM transaction_links l JOIN transactions i ON i.id = l.money_in_id WHERE i.ledger_id = @ledger AND (l.money_in_id = t.id OR l.money_out_id = t.id))
        AND NOT EXISTS (SELECT 1 FROM ledger_categories c WHERE c.ledger_id = t.ledger_id AND c.id = t.category_id AND c.exclude_from_totals <> 0)
      ORDER BY t.date, t.id`,
     json(ids),
@@ -509,6 +530,7 @@ export function routeToItems(home: AppContext, ctxOf: CtxOf, ids: number[], acto
     })
     if (waiting.length !== 1) continue
     const { ctx, item } = waiting[0]!
+    if (opts.usable && !opts.usable.includes(ctx.ledger.id)) continue
     try {
       moveTransactions(home, ctxOf, { ids: [r.id], to: ctx.ledger.id, routed: item, defer: opts.defer }, actor)
     } catch (err) {

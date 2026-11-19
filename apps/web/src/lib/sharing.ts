@@ -64,9 +64,9 @@ export const dropsAnything = (r: MoveResult) =>
 function itemGoes(i: MoveResult['recurringItems'][number], from: string, to: string): string {
   const payments = i.payments === 1 ? 'its payment' : `its ${i.payments} payments`
   const goes = i.joined
-    ? `${i.item} is a recurring item, so ${payments} go too, as payments of ${to}’s own ${i.item}.`
+    ? `${i.item} is a recurring item, so ${payments} go too, as payments of ${to}’s own recurring item for it.`
     : `${i.item} is a recurring item, so ${payments} and the item go too.`
-  return i.left ? `${goes} ${count(i.left, 'payment')} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${from}, with the item.` : goes
+  return i.left ? `${goes} ${count(i.left, 'payment')} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${from} with the item, which is ended there.` : goes
 }
 
 /**

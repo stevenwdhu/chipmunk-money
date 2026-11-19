@@ -52,7 +52,7 @@ A moved transaction belongs to the other ledger from then on, and that ledger tr
 - **Notes and tags** go along. A tag the other ledger doesn't have is added to it.
 - **Refund and payback links** are kept when both sides move together. A link to something that stays behind is let go.
 - **A transfer** is no longer paired, and its other side stays where it is. The other ledger's own matching may pair the moved side again, with a withdrawal there.
-- **A recurring item goes with its payments.** Moving one payment of a recurring item moves all its payments, and the item: its name, schedule, amount, price variation, number of payments, next due date, and the due dates you gave its payments. Its category is the other ledger's category of the same name. When the other ledger already has an active recurring item for that payee, the payments become that item's, and no second item is made. The item is then gone from the ledger it left. A payment that can't move (on an account the other ledger doesn't have, or part of a split) stays where it is, and the item stays there too, with those payments. At most 1,000 transactions move at a time, an item's other payments included, and the app says so when an item makes it more.
+- **A recurring item goes with its payments.** Moving one payment of a recurring item moves all its payments, and the item: its name, schedule, amount, price variation, number of payments, next due date, and the due dates you gave its payments. Its category is the other ledger's category of the same name. When the other ledger already has an active recurring item for that payee, the payments become that item's, and no second item is made. That happens only when its item can take every one of them and keeps all its own payments. When it can't (it has its own payment for the same due date, or an older payment is outside its price variation), the item is made there beside it, so no payment arrives without an item. The item is then gone from the ledger it left. A payment that can't move (on an account the other ledger doesn't have, or part of a split) stays where it is, and the item stays there too, with those payments. It's ended there, so its next payments go to the other ledger's item. At most 1,000 transactions move at a time, an item's other payments included, and the app says so when an item makes it more.
 
 When a move would take a recurring item along, or let go of a link or a transfer's pair, the app lists that and asks before it moves anything: "Netflix is a recurring item, so its 14 payments and the item go too." A payment that's split between ledgers can't move until its split is undone, and a deleted transaction has to be restored first.
 
@@ -62,13 +62,13 @@ Once a recurring item is in another ledger, its next payments go there on their 
 
 - it's no payment of an active recurring item in the home,
 - it's a payment of an active recurring item in exactly one other ledger that has the card, and that ledger isn't archived,
-- it isn't a card payment, a transfer or part of a split.
+- it isn't a card payment, a transfer, part of a split, or linked to another transaction (a purchase that came with its refund stays in the home, with the refund).
 
 "A payment of" means what it means everywhere else: the item's payee, an amount within its price variation, and a date in its due window. A suggested item you never accepted doesn't count. In the other ledger the transaction is that item's payment, in its category.
 
 Otherwise it stays in the home: when the home has a matching item of its own, and when two other ledgers both do. A transaction you enter by hand stays where you enter it.
 
-The sync's or import's message says what went where ("Netflix went to Family, where it's a payment of Netflix."), and so does **Activity** in both ledgers. The other ledger's entry says the transaction is new on the card, and not which ledger it came through.
+The sync's or import's message says what went where ("Netflix went to Family, where it's a payment of Netflix."), and so does **Activity** in both ledgers. The other ledger's entry says the transaction is new on the card, and not which ledger it came through. A CSV import made with an API key limited to some ledgers sends a transaction only to a ledger the key can use. Otherwise it stays in the home.
 
 ### Splitting a card payment
 

@@ -849,11 +849,14 @@ describe('new payments follow their recurring item over HTTP', () => {
 
     expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
     const routed = [{ payee: 'Netflix', ledger: 'Family', item: 'Netflix family plan' }]
+    // A key for the home alone chose the rows itself: none goes to a ledger it can't use, and nothing says one would.
     const mine = await w.key('write', [w.personal])
-    const dry = await w.unchanged(() => commit(w.visa, true, mine))
+    expect((await w.unchanged(() => commit(w.visa, true, mine))).body).toMatchObject({ imported: 2, routed: [], dryRun: true })
+    const both = await w.key('write', [w.personal, w.family])
+    const dry = await w.unchanged(() => commit(w.visa, true, both))
     expect(dry.body).toMatchObject({ imported: 2, routed, dryRun: true })
 
-    const done = await commit(w.visa, false, mine)
+    const done = await commit(w.visa)
     expect(done.status, done.message).toBe(201)
     expect(done.body).toMatchObject({ imported: 2, skippedDuplicates: 0, routed })
     const [id] = await w.held(w.family)
@@ -865,5 +868,37 @@ describe('new payments follow their recurring item over HTTP', () => {
     expect(moves(w, w.family)).toEqual(['Netflix (-$15.99 on 2026-10-01) is new on Visa, a payment of Netflix family plan'])
     // The same file again adds nothing: the routed row is a duplicate where it is.
     expect((await commit(w.visa)).body).toMatchObject({ imported: 0, skippedDuplicates: 2, routed: [] })
+  })
+
+  it('keeps a purchase that came with its refund in the home, still linked', async () => {
+    const w = setup()
+    expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
+    netflix(w.family)
+    const rows = [
+      { line: 1, date: '2026-10-01', amountMinor: -1599, payee: 'Netflix' },
+      { line: 2, date: '2026-10-03', amountMinor: 1599, payee: 'Netflix' },
+    ]
+    const pair = await w.call('POST', `${w.base(w.personal)}/import/commit`, { accountId: w.visa, rows, fileName: 'visa.csv' })
+    expect(pair.body).toMatchObject({ imported: 2, routed: [] })
+    expect(await w.held(w.personal)).toHaveLength(2)
+    expect(w.personal.q.pluck('SELECT count(*) FROM transaction_links l JOIN transactions t ON t.id = l.money_in_id WHERE t.ledger_id = @ledger')).toBe(1)
+    expect(await w.held(w.family)).toEqual([])
+    expect(moves(w, w.personal)).toEqual([])
+  })
+
+  it('says in Activity how many transactions an account just switched to synced sent to another ledger', async () => {
+    const card: FakeCard = { balance: '-19.99', transactions: [fakeTx('n1', '2026-10-01', '-15.99', 'Netflix'), fakeTx('c1', '2026-10-02', '-4.00', 'Corner Cafe')] }
+    const w = setup({ fetch: fakeBridge(card) })
+    const conn = await w.call('POST', '/bank/connections', { setupToken: TOKEN })
+    const bankAccountId = (conn.body.accounts as Json[]).find((a) => a.remoteId === 'visa').id as string
+    expect((await w.sharing({ ledgers: ['personal', 'family'] })).status).toBe(200)
+    netflix(w.family)
+    // A sync before the card is linked keeps its transactions, for the link to take.
+    expect((await w.call('POST', `/bank/connections/${conn.body.id}/sync`)).status).toBe(200)
+
+    expect((await w.call('PUT', `${w.base(w.personal)}/accounts/${w.visa}/bank`, { bankAccountId })).status).toBe(200)
+    expect(await w.held(w.family)).toHaveLength(1)
+    expect(w.personal.q.pluck("SELECT summary FROM activity WHERE ledger_id = @ledger AND action = 'link_bank'")).toMatch(/: 2 added, 1 of them to another ledger for its recurring item, 0 matched$/)
+    expect(moves(w, w.personal)).toEqual(['Netflix (-$15.99 on 2026-10-01) went to Family, where it’s a payment of Netflix family plan'])
   })
 })

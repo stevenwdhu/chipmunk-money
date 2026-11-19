@@ -826,7 +826,7 @@ export const TOOLS: ToolDef[] = [
           z.object({
             item: z.string(),
             payments: z.number().describe('Its payments that moved: the ones asked for and the rest of them.'),
-            left: z.number().describe('Its payments that couldn’t move. With any, the item also stays where it was, with those.'),
+            left: z.number().describe('Its payments that couldn’t move. With any, the item also stays where it was, with those, and is ended there.'),
             joined: z.boolean().describe('They’re payments of an active item the other ledger already had for the payee. Otherwise the item is there as it was.'),
           }),
         )
@@ -860,7 +860,7 @@ export const TOOLS: ToolDef[] = [
         r.recurringDetached ? `${r.recurringDetached} taken off a recurring item.` : '',
         ...recurringItems.map(
           (i) =>
-            `${i.item} is a recurring item: ${plural(i.payments, 'payment')} ${args.dryRun ? 'would go' : 'went'}${i.joined ? `, as payments of ${to.name}’s own item` : ' with the item'}${i.left ? `, and ${i.left} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${l.name} with the item` : ''}.`,
+            `${i.item} is a recurring item: ${plural(i.payments, 'payment')} ${args.dryRun ? 'would go' : 'went'}${i.joined ? `, as payments of ${to.name}’s own item` : ' with the item'}${i.left ? `, and ${i.left} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${l.name} with the item, which is ended there` : ''}.`,
         ),
         r.recategorized ? `${r.recategorized} with another category in ${to.name}, or none.` : '',
         r.tagsCreated ? `${plural(r.tagsCreated, 'tag')} added in ${to.name}.` : '',
@@ -1902,7 +1902,7 @@ export const TOOLS: ToolDef[] = [
     scope: 'write',
     title: 'Import transactions',
     description:
-      'Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions. Into a shared account, a new row that is a payment of a recurring item in one other ledger that has the account goes to that ledger (`routed`).',
+      'Imports rows from a bank statement into one account. First call it without `confirm` to see which rows are new, which look like duplicates, and the category each would get. Then call again with `confirm: true` to import the new ones as one batch. To take an import back, delete its transactions. Into a shared account, a new row that is a payment of a recurring item in one other ledger that has the account goes to that ledger (`routed`), when this key can use it.',
     input: z.object({
       ledger,
       account: nameOrId,

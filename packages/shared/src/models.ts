@@ -483,8 +483,8 @@ export const moveResultSchema = z
           itemId: id.describe('Its id in the ledger it left.'),
           item: z.string().describe('Its name, or its payee.'),
           payments: z.number().int().describe('Its payments that moved: the ones asked for and the rest of them.'),
-          left: z.number().int().describe('Its payments that couldn’t move (on an account the other ledger doesn’t have, or part of a split). With any, the item also stays where it was, with those.'),
-          joined: z.boolean().describe('The other ledger had an active recurring item for the payee already, and the payments are that one’s. Otherwise the item is there as it was.'),
+          left: z.number().int().describe('Its payments that couldn’t move (on an account the other ledger doesn’t have, or part of a split). With any, the item also stays where it was, with those, and is ended there: its next payments are the other ledger’s item’s.'),
+          joined: z.boolean().describe('The other ledger had an active recurring item for the payee already, and the payments are all that one’s. Otherwise the item is there as it was: also when the other ledger’s item couldn’t take every payment, or would give up one of its own for the same due date.'),
         }),
       )
       .describe('The recurring items that went with their payments. Moving one payment of a recurring item moves all of them, and the item, and `moved` counts them all.'),

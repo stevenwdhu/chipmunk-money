@@ -286,7 +286,7 @@ describe('switching a shared account’s bank service', () => {
     const [o1, o2, o3] = ['o1', 'o2', 'o3'].map((x) => w.row(x).id)
     // As PUT /accounts/:id/bank does.
     w.bank.linkAccount(w.personal, w.visa, { bankAccountId: w.bankAccount('new') }, null)
-    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 1, adopted: 0 })
+    expect(w.bank.fill(w.personal, w.visa)).toEqual({ added: 1, adopted: 0, routed: [] })
     expect(w.rows().map(({ ledger, id, externalId }) => ({ ledger, id, externalId }))).toEqual([
       { ledger: 'personal', id: o1, externalId: 'n1' },
       { ledger: 'personal', id: expect.any(Number), externalId: 'n5' },
