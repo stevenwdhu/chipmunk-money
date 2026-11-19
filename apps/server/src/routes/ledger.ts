@@ -537,7 +537,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Update a transaction',
       description:
-        'Only the fields you send change. Setting `categoryId` also teaches the app for this payee, and on a transaction split into categories it undoes the split. `tags` replaces all tags. `parts` splits it into categories, as PUT /transactions/{id}/parts does.',
+        'Only the fields you send change. Setting `categoryId` also teaches the app for this payee, and on a transaction split into categories it undoes the split. `tags` replaces all tags. `parts` splits it into categories, as PUT /transactions/{id}/parts does. `recurringItemId` adds it to that recurring item as one payment, as POST /recurring/{id}/add-payment does: outside the item’s price variation too, and a second one in a period is an extra payment. Its payee isn’t added to the item’s, and no others like it are linked (POST /recurring/{id}/link-payment does that). It then has the item’s category, whatever `categoryId` says in the same request: to change the category of an item and its payments, send `categoryId` for one of its payments on its own. All of it happens or none: when the item refuses the payment (400, with the reason), no other field you sent changes.',
       body: transactionUpdateSchema,
       response: transactionSchema,
     },

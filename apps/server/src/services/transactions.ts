@@ -35,7 +35,7 @@ import type { AppContext } from './context'
 import { payeeKeyOf, payeeNamerFor } from './payee-namer'
 import { linksFor } from './links'
 import { isPersonTransfer, releaseLinks } from './matching'
-import { cadenceInfo, getRecurring, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
+import { addPayment, cadenceInfo, getRecurring, matchRecurring, paidOff, recalculateRecurring, setItemCategory, updateRecurring } from './recurring'
 import { checkSplitEdit, refuseSplitDelete, splitPartOf, splitsFor, type SplitEdit } from './splits'
 
 type CreateInput = z.output<typeof transactionCreateSchema>
@@ -787,8 +787,10 @@ export function insertTransaction(ctx: AppContext, input: CreateInput, opts: Cre
 export function updateTransaction(ctx: AppContext, id: number, update: UpdateInput): Transaction {
   const row = getRow(ctx, id)
   // Split into categories: `parts` says how, and `categoryId` is left aside. On one that's split, one
-  // category (or no parts) undoes the split, and with neither the split stays.
-  const input = update.parts?.length ? { ...update, categoryId: undefined } : update
+  // category (or no parts) undoes the split, and with neither the split stays. Added to a recurring
+  // item, it takes the item's category, as its payments share one: `categoryId` is left aside then too.
+  const links = update.recurringItemId != null && update.recurringItemId !== row.recurring_item_id
+  const input = update.parts?.length || links ? { ...update, categoryId: undefined } : update
   const wasSplit = isSplitIntoCategories(ctx, id)
   const parts = input.parts?.length ? checkParts(ctx, id, input.parts, input.amountMinor ?? row.amount_minor) : null
   const undoesSplit = wasSplit && !parts && (input.categoryId !== undefined || input.parts !== undefined)
@@ -826,7 +828,8 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
   }
   if (newName !== undefined && !nameItemId) set('name', 'name', newName)
   if (input.status !== undefined) set('status', 'status', input.status)
-  if (input.recurringItemId !== undefined) set('recurring_item_id', 'recurringItemId', input.recurringItemId)
+  // Off the item it was on. Another item takes it below, as a payment added by hand (addPayment).
+  if (input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id) set('recurring_item_id', 'recurringItemId', null)
 
   let payeeKey = row.payee_key
   // A synced or imported one's payee is what the bank or file sent: matching and learning go by it.
@@ -880,6 +883,7 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
   const pairPart = mirrored && !unlinksTransfer ? splitPartOf(ctx, row.transfer_pair_id!) : null
   if (pairPart) checkSplitEdit(ctx, pairPart, { amountMinor: amountChanges ? -input.amountMinor! : undefined, date: dateChanges, payee: payeeChanges })
 
+  // All of it or none: a recurring item that refuses the payment leaves everything as it was.
   ctx.q.transaction(() => {
     if (sets.length) {
       sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
@@ -914,56 +918,50 @@ export function updateTransaction(ctx: AppContext, id: number, update: UpdateInp
         ctx.q.run(`UPDATE transactions SET ${pairSets.join(', ')} WHERE id = @id AND ledger_id = @ledger`, pairParams)
       }
     }
+
+    // A recurring item's payments share one category: this one's goes to the item and its other payments.
+    const itemId = input.recurringItemId !== undefined ? input.recurringItemId : row.recurring_item_id
+    if (categoryChanged && itemId) setItemCategory(ctx, itemId, input.categoryId ?? null)
+    // And one name: naming this one renames the item.
+    if (newName !== undefined && nameItemId && newName !== row.item_name) updateRecurring(ctx, nameItemId, { name: newName })
+
+    // A split row is the split's: nothing learns from it, and no recurring item takes it.
+    if (!row.transfer_pair_id && row.split_of === null) {
+      if (categoryChanged) {
+        // A split's category was its largest part's: nothing learned it.
+        if (row.category_source === 'user' && row.category_id && !wasSplit) learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
+        learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, input.categoryId ?? null)
+      } else if (confirmsSuggestion) {
+        learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, row.category_id)
+      } else if (parts && !wasSplit) {
+        // Split for the first time: its payee no longer learns the category you gave it, as it was before this change.
+        if (row.category_source === 'user') learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
+      } else if (wasSplit && !isSplitIntoCategories(ctx, id)) {
+        // Undone with its category kept (by an empty list, or by its new amount): that one is yours, and its payee learns it again.
+        learnOwn(ctx, id, 1)
+      }
+      const moved = input.amountMinor !== undefined || input.date !== undefined || input.payee !== undefined
+      if (moved && !row.recurring_item_id && input.recurringItemId === undefined) matchRecurring(ctx, id)
+      // A payment of an item that changed: the item works its payments out again.
+      else if (moved && row.recurring_item_id && input.recurringItemId === undefined) {
+        recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
+      }
+    }
+    // Moved to another item, or taken off one: the old one doesn't take it back, and recalculates.
+    if (input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id) {
+      if (row.recurring_item_id) {
+        ctx.q.run('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', row.recurring_item_id, id)
+        ctx.q.run(
+          'DELETE FROM recurring_payment_dues WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
+          id,
+          row.recurring_item_id,
+        )
+        recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
+      }
+      // Onto an item: as adding it by hand there, whatever its amount, and refused as that is.
+      if (input.recurringItemId) addPayment(ctx, input.recurringItemId, id)
+    }
   })
-
-  // A recurring item's payments share one category: this one's goes to the item and its other payments.
-  const itemId = input.recurringItemId !== undefined ? input.recurringItemId : row.recurring_item_id
-  if (categoryChanged && itemId) setItemCategory(ctx, itemId, input.categoryId ?? null)
-  // And one name: naming this one renames the item.
-  if (newName !== undefined && nameItemId && newName !== row.item_name) updateRecurring(ctx, nameItemId, { name: newName })
-
-  // A split row is the split's: nothing learns from it, and no recurring item takes it.
-  if (!row.transfer_pair_id && row.split_of === null) {
-    if (categoryChanged) {
-      // A split's category was its largest part's: nothing learned it.
-      if (row.category_source === 'user' && row.category_id && !wasSplit) learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
-      learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, input.categoryId ?? null)
-    } else if (confirmsSuggestion) {
-      learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, row.category_id)
-    } else if (parts && !wasSplit) {
-      // Split for the first time: its payee no longer learns the category you gave it, as it was before this change.
-      if (row.category_source === 'user') learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
-    } else if (wasSplit && !isSplitIntoCategories(ctx, id)) {
-      // Undone with its category kept (by an empty list, or by its new amount): that one is yours, and its payee learns it again.
-      learnOwn(ctx, id, 1)
-    }
-    const moved = input.amountMinor !== undefined || input.date !== undefined || input.payee !== undefined
-    if (moved && !row.recurring_item_id && input.recurringItemId === undefined) matchRecurring(ctx, id)
-    // A payment of an item that changed: the item works its payments out again.
-    else if (moved && row.recurring_item_id && input.recurringItemId === undefined) {
-      recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
-    }
-  }
-  // Moved to another item, or taken off one: the old one doesn't take it back, and both recalculate.
-  if (input.recurringItemId !== undefined && input.recurringItemId !== row.recurring_item_id) {
-    if (row.recurring_item_id) {
-      ctx.q.run('INSERT OR IGNORE INTO recurring_not_payments (item_id, transaction_id) VALUES (?, ?)', row.recurring_item_id, id)
-      ctx.q.run(
-        'DELETE FROM recurring_payment_dues WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
-        id,
-        row.recurring_item_id,
-      )
-      recalculateRecurring(ctx, row.recurring_item_id, { removed: true, followAmount: true, wasPaidOff: itemWasPaidOff })
-    }
-    if (input.recurringItemId) {
-      ctx.q.run(
-        'DELETE FROM recurring_not_payments WHERE transaction_id IN (SELECT id FROM transactions WHERE ledger_id = @ledger AND id = ?) AND item_id = ?',
-        id,
-        input.recurringItemId,
-      )
-      recalculateRecurring(ctx, input.recurringItemId, { followAmount: true })
-    }
-  }
   return getTransaction(ctx, id)
 }
 

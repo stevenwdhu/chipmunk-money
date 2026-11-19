@@ -928,6 +928,117 @@ describe('cases from the 0.2.0 review', () => {
   })
 })
 
+describe('a payment added to an item by its recurringItemId', () => {
+  const pay = (ctx: AppContext, accountId: number, payee: string, amountMinor: number, date: string) =>
+    createTransaction(ctx, tx({ accountId, date, amountMinor, payee }), { useAi: false })
+  /** A $50 monthly bill on a Visa, within 10% ($45 to $55), in Electronics, with its Aug 1, Sep 1 and Oct 1 payments. */
+  const bill = async () => {
+    const ctx = testContext({ now: '2026-11-10T18:00:00Z' })
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    const [electronics, shopping] = [categoryId(ctx, 'Electronics'), categoryId(ctx, 'General shopping')]
+    const paid = []
+    for (const d of ['2026-08-01', '2026-09-01', '2026-10-01']) paid.push(await pay(ctx, acc, 'ROGERS', -5000, d))
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'ROGERS', expectedAmountMinor: -5000, cadence: 'monthly', amountTolerancePct: 10, anchorDate: '2026-08-01', accountId: acc, categoryId: electronics }),
+    )
+    expect(item).toMatchObject({ occurrences: 3, nextDueDate: '2026-11-01' })
+    return { ctx, acc, item, paid, electronics, shopping }
+  }
+  /** Everything a refusal must leave alone: the transaction, the item, and its payments. */
+  const state = (ctx: AppContext, txId: number, itemId: number) => ({
+    tx: getTransaction(ctx, txId),
+    item: getRecurring(ctx, itemId),
+    payments: recurringPaymentIds(ctx, itemId).map((id) => getTransaction(ctx, id)),
+  })
+
+  it('links one outside the price variation, with or without a category sent: it takes the item’s', async () => {
+    for (const sent of [{}, { categoryId: 'shopping' as const }]) {
+      const { ctx, acc, item, paid, electronics, shopping } = await bill()
+      // $80 is $30 from $50: more than the $5 of variation, so the item didn't take it.
+      const big = await pay(ctx, acc, 'ROGERS', -8000, '2026-11-02')
+      expect(getTransaction(ctx, big.id)).toMatchObject({ recurringItemId: null, categoryId: null })
+      const after = updateTransaction(ctx, big.id, { recurringItemId: item.id, notes: 'Overage', ...('categoryId' in sent ? { categoryId: shopping } : {}) })
+      expect(after).toMatchObject({ recurringItemId: item.id, categoryId: electronics, categorySource: 'recurring', notes: 'Overage' })
+      // A payment like the others, at its own amount: 4 of them, and the item's amount and category stay.
+      expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 4, expectedAmountMinor: -5000, categoryId: electronics })
+      expect(paid.map((t) => getTransaction(ctx, t.id).categoryId)).toEqual([electronics, electronics, electronics])
+      // And it stays when the item works its payments out again.
+      expect(updateRecurring(ctx, item.id, { name: 'Internet' }).occurrences).toBe(4)
+      expect(getTransaction(ctx, big.id).recurringItemId).toBe(item.id)
+    }
+  })
+
+  it('links a second one in a period as an extra payment', async () => {
+    const { ctx, acc, item, paid } = await bill()
+    const again = await pay(ctx, acc, 'ROGERS', -5000, '2026-10-03')
+    expect(getTransaction(ctx, again.id).recurringItemId).toBeNull()
+    expect(updateTransaction(ctx, again.id, { recurringItemId: item.id }).recurringItemId).toBe(item.id)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 4 })
+    expect(paid.map((t) => getTransaction(ctx, t.id).recurringItemId)).toEqual([item.id, item.id, item.id])
+  })
+
+  it('refuses what adding a payment by hand refuses, and changes nothing', async () => {
+    const { ctx, acc, item, shopping } = await bill()
+    const chequing = makeAccount(ctx, 'Chequing', 'chequing')
+    const elsewhere = await pay(ctx, chequing, 'ROGERS', -5000, '2026-11-01')
+    const refund = await pay(ctx, acc, 'ROGERS', 5000, '2026-11-02')
+    for (const [t, reason] of [
+      [elsewhere, 'That’s from another account than the item’s'],
+      [refund, 'That’s money in, and this item is money out'],
+    ] as const) {
+      updateTransaction(ctx, t.id, { categoryId: shopping, notes: 'Mine', tags: ['kept'] })
+      const before = state(ctx, t.id, item.id)
+      expect(() => updateTransaction(ctx, t.id, { recurringItemId: item.id, categoryId: null, notes: 'Changed', tags: [], name: 'Internet', date: '2026-11-03', status: 'pending' })).toThrow(reason)
+      expect(() => updateTransaction(ctx, t.id, { recurringItemId: item.id })).toThrow(reason)
+      expect(state(ctx, t.id, item.id)).toEqual(before)
+      expect(before.tx).toMatchObject({ categoryId: shopping, notes: 'Mine', tags: [{ name: 'kept' }], recurringItemId: null })
+    }
+    const before = state(ctx, refund.id, item.id)
+    expect(() => updateTransaction(ctx, refund.id, { recurringItemId: 999_999, notes: 'Changed' })).toThrow('Recurring item not found')
+    expect(state(ctx, refund.id, item.id)).toEqual(before)
+  })
+
+  it('refuses one more than a plan has, and changes nothing', async () => {
+    const ctx = testContext({ now: '2026-12-20T18:00:00Z' })
+    const acc = makeAccount(ctx, 'Visa', 'credit')
+    for (const d of ['2026-07-15', '2026-08-15', '2026-09-15']) await pay(ctx, acc, 'AFFIRM', -10_000, d)
+    const item = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'AFFIRM', name: 'Sofa', expectedAmountMinor: -10_000, cadence: 'monthly', anchorDate: '2026-07-15', totalPayments: 5, accountId: acc }),
+    )
+    // Its 4th and 5th as they come: paid off.
+    for (const d of ['2026-10-15', '2026-11-15']) await pay(ctx, acc, 'AFFIRM', -10_000, d)
+    expect(getRecurring(ctx, item.id)).toMatchObject({ status: 'ended', paidPayments: 5, remainingPayments: 0 })
+    const sixth = await pay(ctx, acc, 'AFFIRM', -10_000, '2026-12-15')
+    updateTransaction(ctx, sixth.id, { categoryId: categoryId(ctx, 'General shopping'), notes: 'Mine' })
+    const before = state(ctx, sixth.id, item.id)
+    expect(() => updateTransaction(ctx, sixth.id, { recurringItemId: item.id, categoryId: null, notes: 'Changed' })).toThrow(
+      'Sofa has all 5 payments already. Take one off first, or change how many it has.',
+    )
+    expect(state(ctx, sixth.id, item.id)).toEqual(before)
+  })
+
+  it('moves a payment to another item, and takes one off, and neither item takes it back', async () => {
+    const { ctx, acc, item, paid, electronics } = await bill()
+    const phones = categoryId(ctx, 'Phones')
+    const other = createRecurring(
+      ctx,
+      recurringCreateSchema.parse({ payee: 'BELL', expectedAmountMinor: -9000, cadence: 'monthly', amountTolerancePct: 10, anchorDate: '2026-08-05', accountId: acc, categoryId: phones }),
+    )
+    // Oct 1's goes to the other item, whose payee and amount aren't its: 2 left here, 1 there, in the other's category.
+    expect(updateTransaction(ctx, paid[2]!.id, { recurringItemId: other.id })).toMatchObject({ recurringItemId: other.id, categoryId: phones })
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 2, categoryId: electronics })
+    expect(getRecurring(ctx, other.id)).toMatchObject({ occurrences: 1, expectedAmountMinor: -9000 })
+    // Sep 1's comes off: 1 left.
+    expect(updateTransaction(ctx, paid[1]!.id, { recurringItemId: null }).recurringItemId).toBeNull()
+    expect(getRecurring(ctx, item.id)).toMatchObject({ occurrences: 1 })
+    expect(updateRecurring(ctx, item.id, { name: 'Internet' }).occurrences).toBe(1)
+    expect(updateRecurring(ctx, other.id, { name: 'Phone' }).occurrences).toBe(1)
+    expect(paid.map((t) => getTransaction(ctx, t.id).recurringItemId)).toEqual([item.id, null, other.id])
+  })
+})
+
 describe('recurring items in two ledgers', () => {
   /** Two ledgers of one database, each with a card and the same payee's monthly payments. */
   const twins = async () => {

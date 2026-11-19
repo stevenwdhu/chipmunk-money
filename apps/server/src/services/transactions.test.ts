@@ -417,7 +417,7 @@ describe('transactions in two ledgers', () => {
     )
     // The database's guard refuses them (the API answers as for an id that doesn't exist).
     expect(() => updateTransaction(a, mine, { categoryId: theirCategory })).toThrow('cross-ledger reference')
-    expect(() => updateTransaction(a, mine, { recurringItemId: theirItem })).toThrow('cross-ledger reference')
+    expect(() => updateTransaction(a, mine, { recurringItemId: theirItem })).toThrow('Recurring item not found')
     await expect(createTransaction(a, tx({ accountId: accA.chequing, date: '2026-09-02', amountMinor: -100, payee: 'Y', categoryId: theirCategory }))).rejects.toThrow(
       'cross-ledger reference',
     )
