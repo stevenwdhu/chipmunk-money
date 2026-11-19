@@ -210,6 +210,12 @@ export const transactionView = z.object({
     })
     .nullable()
     .describe('How it’s split between the ledgers that share its account (split_transaction). Null when it isn’t part of a split.'),
+  parts: z
+    .array(z.object({ category: z.string().nullable(), categoryId: z.number().nullable(), amountMinor: z.number(), amount: z.string(), note: z.string().nullable() }))
+    .nullable()
+    .describe(
+      'Its parts when it’s split into categories (split_by_category), which add up to its amount: reports count each part in its own category, and `category` is its largest part’s. Null when it isn’t. Not the same as `split`.',
+    ),
 })
 export type TransactionView = z.output<typeof transactionView>
 
@@ -245,6 +251,7 @@ export function viewTransaction(t: Transaction, lk: Lookups): TransactionView {
     links: t.links.map((l) => ({ kind: l.kind, transactionId: l.transactionId, amount: money(l.amountMinor, t.currency) })),
     externalId: t.externalId,
     split: viewSplit(t),
+    parts: t.parts && t.parts.map((p) => ({ category: lk.categoryName(p.categoryId), categoryId: p.categoryId, amountMinor: p.amountMinor, amount: money(p.amountMinor, t.currency), note: p.note })),
   }
 }
 
@@ -259,7 +266,11 @@ function splitWords(t: TransactionView): string {
 
 /** One line per transaction for the text part of a result. */
 export function transactionLine(t: TransactionView): string {
-  const cat = t.category ? `${t.category}${t.needsReview ? ` (suggested${t.suggestedBy ? ` from ${t.suggestedBy}` : ''})` : ''}` : 'uncategorized'
+  const cat = t.parts
+    ? `split by category: ${t.parts.map((p) => `${p.category ?? 'uncategorized'} ${p.amount}`).join(', ')}`
+    : t.category
+      ? `${t.category}${t.needsReview ? ` (suggested${t.suggestedBy ? ` from ${t.suggestedBy}` : ''})` : ''}`
+      : 'uncategorized'
   const extra = [
     ...t.links.map((l) => `${l.kind} ${l.amount} ${t.amountMinor > 0 ? 'for' : 'from'} #${l.transactionId}`),
     t.tags.length ? t.tags.map((x) => `#${x}`).join(' ') : '',

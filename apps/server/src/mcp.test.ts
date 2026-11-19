@@ -162,6 +162,41 @@ describe('MCP server', () => {
     ])
   })
 
+  it('splits a transaction into categories, shows the parts, and undoes it', async () => {
+    const { key, connect, call } = await setup()
+    const agent = await connect(await key('Agent', ['write']))
+    const added = await call(agent, 'add_transactions', { transactions: [{ account: 'TD Chequing', date: '2026-10-02', amount: -80.5, payee: 'Superstore', category: 'Groceries' }] })
+    const id = added.data.added[0].id as number
+    // Not the split between ledgers, and listed apart from it.
+    const tools = (await agent.listTools()).tools
+    expect(tools.find((t) => t.name === 'split_by_category')?.description).toContain('This is not split_transaction')
+
+    const split = await call(agent, 'split_by_category', { id, parts: [{ category: 'Groceries', amount: -62.1 }, { category: 'Dine out', amount: -18.4, note: 'hot food' }] })
+    expect(split.isError).toBe(false)
+    expect(split.text).toContain('split by category: Groceries -$62.10, Dine out -$18.40')
+    expect(split.data.transaction).toMatchObject({
+      category: 'Groceries',
+      parts: [
+        { category: 'Groceries', amountMinor: -6210, amount: '-$62.10', note: null },
+        { category: 'Dine out', amountMinor: -1840, amount: '-$18.40', note: 'hot food' },
+      ],
+    })
+    const found = await call(agent, 'search_transactions', { query: 'Superstore' })
+    expect(found.data.transactions[0].parts).toHaveLength(2)
+    // What doesn't add up is refused in plain words.
+    const bad = await call(agent, 'split_by_category', { id, parts: [{ category: 'Groceries', amount: -62.1 }, { category: null, amount: -18 }] })
+    expect([bad.isError, bad.text]).toEqual([true, expect.stringContaining('The parts add up to -$80.10, not -$80.50.')])
+    // One category undoes it, and so does an empty list.
+    expect((await call(agent, 'update_transaction', { id, category: 'Dine out' })).data.transaction).toMatchObject({ category: 'Dine out', parts: null })
+    await call(agent, 'split_by_category', { id, parts: [{ category: 'Groceries', amount: -62.1 }, { category: 'Dine out', amount: -18.4 }] })
+    const undone = await call(agent, 'split_by_category', { id, parts: [] })
+    expect(undone.text).toContain('Undid the split by category')
+    expect(undone.data.transaction).toMatchObject({ category: 'Groceries', parts: null })
+    // A read-only key doesn't have the tool.
+    const reader = await connect(await key('Reader', ['read']))
+    expect((await reader.listTools()).tools.map((t) => t.name)).not.toContain('split_by_category')
+  })
+
   it('answers questions with summaries and reports', async () => {
     const { key, connect, call } = await setup()
     const agent = await connect(await key('Reader', ['read']))

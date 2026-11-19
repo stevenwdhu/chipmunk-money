@@ -289,7 +289,7 @@ No arguments.
 
 #### `update_transaction`
 
-**Update a transaction.** Changes only the fields you give. Setting `category` also teaches the app this payee. `tags` replaces all tags.
+**Update a transaction.** Changes only the fields you give. Setting `category` also teaches the app this payee, and undoes a split by category (split_by_category). `tags` replaces all tags.
 
 | Argument | Type | | What it is |
 |---|---|---|---|
@@ -380,6 +380,16 @@ No arguments.
 | `id` | number | required | The payment: money in on a shared account, in a category left out of totals, held by this ledger. |
 | `shares` | object[] | required | One `{ ledger, amount }` for each ledger other than the home that gets part of it: the ledger by slug or name, the amount in dollars, above zero. Together they can’t be more than the payment. When the ledger that holds the payment isn’t the home, its own amount is what it keeps. Empty: the split is undone. |
 | `dryRun` | boolean | optional | Report what would change without changing anything. Default: `false`. |
+
+#### `split_by_category`
+
+**Split a transaction into categories.** Gives one transaction two or more parts, each with a category, an amount and a note, for a purchase that belongs in more than one category (groceries and pharmacy on one receipt). The parts add up to its amount. It stays one transaction, and reports count each part in its own category. Sending the parts again changes the split, and an empty `parts` undoes it. Setting one category with update_transaction undoes it too. Not for a transfer or a card payment. This is not split_transaction, which shares a card payment between ledgers.
+
+| Argument | Type | | What it is |
+|---|---|---|---|
+| `ledger` | string | optional | Ledger slug or name, e.g. "personal". Leave out to use your default ledger. |
+| `id` | number | required |  |
+| `parts` | object[] | required | Two or more parts that add up to the transaction’s amount. Parts in the same category become one. Empty: the split is undone, and it keeps its largest part’s category. |
 
 #### `create_account`
 

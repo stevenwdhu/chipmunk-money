@@ -595,7 +595,7 @@ export const TOOLS: ToolDef[] = [
     name: 'update_transaction',
     scope: 'write',
     title: 'Update a transaction',
-    description: 'Changes only the fields you give. Setting `category` also teaches the app this payee. `tags` replaces all tags.',
+    description: 'Changes only the fields you give. Setting `category` also teaches the app this payee, and undoes a split by category (split_by_category). `tags` replaces all tags.',
     input: z.object({
       ledger,
       id: z.number().int(),
@@ -934,6 +934,36 @@ export const TOOLS: ToolDef[] = [
         ? `${args.dryRun ? 'Would split' : 'Split'} ${what}: ${given.map((s) => `${s.ledger} ${s.amount}`).join(', ')}, and ${l.name} keeps ${kept}.`
         : `${args.dryRun ? 'Would undo' : 'Undid'} the split of ${what}.`
       return { text, data: { ledger: l.slug, dryRun: args.dryRun, transaction: v, keptMinor: r.keptMinor, kept, shares: given } }
+    },
+  }),
+  tool({
+    name: 'split_by_category',
+    scope: 'write',
+    title: 'Split a transaction into categories',
+    description:
+      'Gives one transaction two or more parts, each with a category, an amount and a note, for a purchase that belongs in more than one category (groceries and pharmacy on one receipt). The parts add up to its amount. It stays one transaction, and reports count each part in its own category. Sending the parts again changes the split, and an empty `parts` undoes it. Setting one category with update_transaction undoes it too. Not for a transfer or a card payment. This is not split_transaction, which shares a card payment between ledgers.',
+    input: z.object({
+      ledger,
+      id: z.number().int(),
+      parts: z
+        .array(
+          z.object({
+            category: categoryRef,
+            amount: z.number().describe('In dollars, with the transaction’s sign: negative for money out. Not zero.'),
+            note: z.string().max(1000).nullable().optional(),
+          }),
+        )
+        .max(50)
+        .describe('Two or more parts that add up to the transaction’s amount. Parts in the same category become one. Empty: the split is undone, and it keeps its largest part’s category.'),
+    }),
+    output: z.object({ ledger: z.string(), transaction: transactionView }),
+    annotations: { ...WRITE, idempotentHint: true },
+    run: async (args, ctx) => {
+      const l = await ctx.ledger(args.ledger)
+      const lk = await ctx.lookups(l)
+      const parts = args.parts.map((p) => ({ categoryId: lk.category(p.category), amountMinor: toMinor(p.amount), note: p.note }))
+      const v = viewTransaction(await ctx.api.put<Transaction>(`/ledgers/${l.slug}/transactions/${args.id}/parts`, { parts }), lk)
+      return { text: `${parts.length ? 'Split by category' : 'Undid the split by category'}: ${transactionLine(v)}`, data: { ledger: l.slug, transaction: v } }
     },
   }),
 

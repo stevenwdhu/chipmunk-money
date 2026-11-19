@@ -485,6 +485,11 @@ const MCP_WRITES: ToolCase[] = [
     across: (c) => ({ ...L(c), id: tx(c, PAYMENT), shares: [{ ledger: c.other.slug, amount: 10 }] }),
   },
   { tool: 'split_transaction', args: (c) => ({ ...L(c), id: ids(c).purchase, shares: [] }), error: () => true },
+  {
+    tool: 'split_by_category',
+    args: (c) => ({ ...L(c), id: ids(c).purchase, parts: [{ category: purchaseNow(c).categoryId, amount: (purchaseNow(c).amountMinor + 100) / 100 }, { category: null, amount: -1 }] }),
+  },
+  { tool: 'split_by_category', args: (c) => ({ ...L(c), id: ids(c).purchase, parts: [] }) },
   // The whole account, row by row: only for a shared account, and a key that can use every ledger that has it.
   { tool: 'list_account_transactions', args: (c) => ({ ...L(c), account: ids(c).card }), error: () => true, across: (c) => ({ ...L(c), account: ids(c).card }) },
   { tool: 'create_account', args: (c) => ({ ...L(c), name: 'MCP Cash', type: 'cash', institution: 'Wallet' }) },
@@ -1009,6 +1014,7 @@ function toolProbes(): Array<{ tool: string; args: (c: C, id: Id) => Record<stri
     { tool: 'delete_custom_report', args: (c, id) => ({ ...L(c), report: id('report') }) },
     { tool: 'import_transactions', args: (c, id) => ({ ...L(c), account: id('chequing'), rows: [{ date: '2026-10-01', payee: 'PROBE', amount: -1 }] }) },
     { tool: 'split_transaction', args: (c, id) => ({ ...L(c), id: id('purchase'), shares: [] }) },
+    { tool: 'split_by_category', args: (c, id) => ({ ...L(c), id: id('purchase'), parts: [] }) },
     { tool: 'list_account_transactions', args: (c, id) => ({ ...L(c), account: id('card') }) },
     { tool: 'share_account', args: (c, id) => ({ ...L(c), account: id('card'), ledgers: [c.me.slug], dryRun: true }) },
   ]
