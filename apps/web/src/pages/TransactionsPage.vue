@@ -34,6 +34,7 @@ import { useCustomReport, usePeriodSummary, useTransactions, useTransactionSpan,
 import { useFilterNames } from '@/composables/useFilterNames'
 import { useTransactionFilters } from '@/composables/useTransactionFilters'
 import { useSelectedMonth, useToday } from '@/composables/useToday'
+import { byCategory } from '@/lib/parts'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()
@@ -268,7 +269,14 @@ function filterByLabel(id: number | 'none') {
       </FilterChips>
     </div>
 
-    <TransactionTotals :items="items" :more="list.hasNextPage.value" :single-account="f.accountId.value !== null" :category-ids="f.categoryIds.value" />
+    <TransactionTotals
+      :items="items"
+      :more="list.hasNextPage.value"
+      :single-account="f.accountId.value !== null"
+      :category-ids="f.categoryIds.value"
+      :label-id="f.labelId.value"
+      :whole="byCategory(f.reportFilter.value, 'spending') || byCategory(f.reportFilter.value, 'income')"
+    />
 
     <div class="grid grid-cols-1 items-start gap-3 md:gap-4 xl:grid-cols-[minmax(0,1fr)_17rem]">
       <div class="flex min-w-0 flex-col gap-3 md:gap-4">

@@ -61,6 +61,7 @@ import { currentLedger, lapi } from '@/lib/ledger'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
 import {
+  categoryAcross,
   commonLedgers,
   foldGiven,
   heldElsewhere,
@@ -609,7 +610,7 @@ async function accept(tx: Transaction) {
                 </span>
               </TableCell>
               <!-- All ledgers: its category in the ledger that holds it, by name. It's changed in the editor. -->
-              <TableCell v-else-if="col === 'category' && tx.across" :style="columns.cellStyle(col)" class="max-w-0 truncate text-muted-foreground">{{ tx.across.category }}</TableCell>
+              <TableCell v-else-if="col === 'category' && tx.across" :style="columns.cellStyle(col)" class="max-w-0 truncate text-muted-foreground">{{ categoryAcross(tx.across) }}</TableCell>
               <!-- Split into categories: changed in the editor the row opens, so picking one here can't undo it by a slip. -->
               <TableCell v-else-if="col === 'category' && tx.parts" :style="columns.cellStyle(col)" class="max-w-0">
                 <CategoryParts :parts="tx.parts" />

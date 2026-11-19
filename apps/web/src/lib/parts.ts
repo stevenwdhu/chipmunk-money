@@ -1,4 +1,4 @@
-import { parseMoney, type TransactionPart } from '@chipmunk/shared'
+import { parseMoney, sideOf, type FilterSide, type ReportFilter, type TransactionPart } from '@chipmunk/shared'
 import { money } from './format'
 
 /** A line of the Split into categories editor, as typed. Amounts are typed without a sign. */
@@ -21,4 +21,10 @@ export function checkLines(lines: PartLine[], totalMinor: number | null): { amou
   if (rest === 0) return { amounts, problem: 'Nothing is left for the last line. Lower an amount, or take a line out.' }
   if (rest < 0) return { amounts, problem: `The lines are ${money(-rest)} more than the amount` }
   return { amounts, problem: null }
+}
+
+/** This side of a report's filter has a condition on categories (a category, group or label): it counts a split's parts each on its own. */
+export function byCategory(f: ReportFilter | null | undefined, side: FilterSide): boolean {
+  const s = sideOf(f, side)
+  return [...s.only, ...s.filterOut.flatMap((r) => r.when)].some((c) => c.field === 'category' || c.field === 'group' || c.field === 'label')
 }

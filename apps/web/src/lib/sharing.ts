@@ -233,6 +233,9 @@ export function toListRow(row: AccountTransaction, accountId: number): ListRow {
   }
 }
 
+/** A row's category in the All ledgers list, by name: one split into categories says so, as its mark does in a ledger's own list. */
+export const categoryAcross = (row: AccountTransaction) => (row.splitByCategory ? 'Split by category' : row.category)
+
 /** Another ledger's row in the All ledgers list: why it's read-only there. */
 export const heldElsewhere = (row: AccountTransaction) => `In ${row.ledger.name}. Move it here to edit it.`
 

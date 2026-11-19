@@ -157,11 +157,12 @@ function linkedRefund(tx: Transaction) {
   suggestion.value = null
   // The new category is saved already: not a change of yours.
   const before = JSON.parse(initial.value || '[]') as unknown[]
-  // Linked in full, a split into categories is undone.
-  if (!tx.parts) parts.value = null
+  // Linked in full, a split into categories is undone. Otherwise the lines stay as typed, saved or not.
+  const full = tx.categorySource === 'linked'
+  if (full) parts.value = null
   if (before.length) {
     before[4] = tx.categoryId
-    before[11] = parts.value
+    if (full) before[11] = null
     initial.value = JSON.stringify(before)
   }
 }

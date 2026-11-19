@@ -4,7 +4,7 @@ import { ArrowRightFromLine } from '@lucide/vue'
 import { formatDateLong, type Account, type AccountTransaction, type MoveResult } from '@chipmunk/shared'
 import MoneyText from '@/components/MoneyText.vue'
 import { Button } from '@/components/ui/button'
-import { MOVE_SPLIT } from '@/lib/sharing'
+import { categoryAcross, MOVE_SPLIT } from '@/lib/sharing'
 import MoveToMenu from './MoveToMenu.vue'
 
 /**
@@ -30,7 +30,7 @@ const title = computed(() => props.row.name ?? props.row.payeeName)
       <dt class="text-muted-foreground">Ledger</dt>
       <dd>{{ row.ledger.name }}</dd>
       <dt class="text-muted-foreground">Category</dt>
-      <dd>{{ row.category ?? 'Uncategorized' }}</dd>
+      <dd>{{ categoryAcross(row) ?? 'Uncategorized' }}</dd>
       <template v-if="row.split">
         <dt class="text-muted-foreground">Split</dt>
         <dd>

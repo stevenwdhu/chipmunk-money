@@ -8,7 +8,7 @@ import LedgerMark from '@/components/ledger/LedgerMark.vue'
 import LinkBadge from '@/components/LinkBadge.vue'
 import { billCount, netAmount } from '@/lib/links'
 import { sentPayeeUnder, titleOf } from '@/lib/payee'
-import { sharesAcross, sharesFor, SHARES_OVER, splitTitle, type ListRow } from '@/lib/sharing'
+import { categoryAcross, sharesAcross, sharesFor, SHARES_OVER, splitTitle, type ListRow } from '@/lib/sharing'
 import MoneyText from '@/components/MoneyText.vue'
 import { useAccounts, useLedgers } from '@/composables/queries'
 import { shortDate } from '@/lib/format'
@@ -52,7 +52,7 @@ const badge = computed(() => ({
   txId: props.tx.id,
 }))
 /** All ledgers: "Family · Groceries · Pending". */
-const held = computed(() => (across.value ? [across.value.ledger.name, across.value.category, across.value.status === 'pending' ? 'Pending' : null].filter(Boolean).join(' · ') : ''))
+const held = computed(() => (across.value ? [across.value.ledger.name, categoryAcross(across.value), across.value.status === 'pending' ? 'Pending' : null].filter(Boolean).join(' · ') : ''))
 /** Date and account, under the payee while the row is too narrow for their own columns. */
 const meta = computed(() => {
   const parts: string[] = []

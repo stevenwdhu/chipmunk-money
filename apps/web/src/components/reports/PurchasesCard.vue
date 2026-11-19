@@ -11,6 +11,7 @@ import { useCategories, useReportPurchases } from '@/composables/queries'
 import type { ReportState } from '@/composables/useReportState'
 import { useToday } from '@/composables/useToday'
 import { money, shortDate } from '@/lib/format'
+import { byCategory } from '@/lib/parts'
 import { titleOf } from '@/lib/payee'
 import { useUiStore } from '@/stores/ui'
 
@@ -50,8 +51,8 @@ const out = useReportPurchases(() => ({ ...params.value, set: 'filtered-out' as 
 
 const rules = computed(() => sideOf(props.state.filter.value, 'spending').filterOut)
 const charged = (i: Item) => -i.transaction.amountMinor
-/** One split into categories shows what the report counts of it: under a category filter, its part. */
-const shown = (i: Item) => (i.transaction.parts ? i.inRangeMinor : charged(i))
+/** Under a filter on categories, one split into categories shows what the report counts of it: its part. */
+const shown = (i: Item) => (i.transaction.parts && byCategory(props.state.filter.value, 'spending') ? i.inRangeMinor : charged(i))
 const meta = (i: Item) => {
   const c = i.transaction.categoryId === null ? null : categories.value.get(i.transaction.categoryId)
   return [shortDate(i.transaction.date, today.value), i.transaction.parts ? 'Split by category' : c?.name].filter(Boolean).join(' · ')
