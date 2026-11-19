@@ -47,6 +47,7 @@ import {
   importCommitSchema,
   transactionMatchSchema,
   transactionMoveSchema,
+  transactionPartsSetSchema,
   transactionSplitSetSchema,
   linkCandidateSchema,
   linkedTransactionSchema,
@@ -147,6 +148,7 @@ import { today } from '../services/settings'
 import * as setup from '../services/setup'
 import { getSharing, setSharing } from '../services/sharing'
 import { setSplit } from '../services/splits'
+import { setParts } from '../services/category-splits'
 import { setLinks, setLinksTogether } from '../services/links'
 import * as txs from '../services/transactions'
 import { latestBankPayload } from '../services/bank/apply'
@@ -277,7 +279,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'read',
       summary: 'List transactions',
       description:
-        'Newest first. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`. On a shared account, only the transactions this ledger holds: GET /accounts/{id}/transactions lists every ledger’s.',
+        'Newest first. Filter by date range, account, category (`none` for uncategorized), tag, recurring item, text, or `needsReview`. One split into categories is found by the category of any of its parts. On a shared account, only the transactions this ledger holds: GET /accounts/{id}/transactions lists every ledger’s.',
       query: transactionQuerySchema,
       response: transactionPageSchema,
     },
@@ -295,7 +297,7 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       scope: 'write',
       summary: 'Create a transaction',
       description:
-        'Leave out `categoryId` to let the app suggest one from your history (or AI); suggestions are flagged `needsReview`. With an `externalId` that the account already has, nothing is added and the existing transaction is returned with status 200.',
+        'Leave out `categoryId` to let the app suggest one from your history (or AI); suggestions are flagged `needsReview`. With `parts`, it’s split into categories from the start. With an `externalId` that the account already has, nothing is added and the existing transaction is returned with status 200.',
       body: transactionCreateSchema,
       response: transactionSchema,
       status: 201,
@@ -509,13 +511,33 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
     },
     (c, { params, body, dryRun }) => ({ ...setSplit(c.var.ctx, storage.ctxOf, params.id, body, { dryRun, actor: acting(c), usable: usableLedgers(c) }), dryRun }),
   )
+  r.put(
+    '/transactions/:id/parts',
+    {
+      ...tx,
+      scope: 'write',
+      summary: 'Split a transaction into categories',
+      description:
+        'Gives it two or more parts, each with a category (or none), an amount and a note. The parts add up to its amount, each of its sign and not zero, and parts in the same category become one. It stays one transaction: the balance, bank sync, CSV duplicates, matching and moves see it whole. Reports, the overview and totals count each part in its own category, and a refund or payback linked to it comes off every part by its share of the amount, to the cent. Its own `categoryId` is its largest part’s. `parts` replaces the split, and an empty list undoes it. AI, your history, payee rules and recurring items leave a split transaction’s category alone, and nothing is learned from it. When its amount changes (a sync, an edit without `parts`), the largest part takes the difference, and the split is undone if that part would be left at zero. Not for a transfer, a card payment or money in that has the category of what it pays back (400), nor for part of a payment split between ledgers (409: PUT /transactions/{id}/split is that other split).',
+      body: transactionPartsSetSchema,
+      response: transactionSchema,
+    },
+    (c, { params, body }) => {
+      const before = txs.getTransaction(c.var.ctx, params.id)
+      setParts(c.var.ctx, params.id, body.parts)
+      const after = txs.getTransaction(c.var.ctx, params.id)
+      logUpdate(c, 'transaction', after.id, `${body.parts.length ? 'Split' : 'Undid the split of'} ${describe(before)} into categories`, before, after)
+      return after
+    },
+  )
   r.patch(
     '/transactions/:id',
     {
       ...tx,
       scope: 'write',
       summary: 'Update a transaction',
-      description: 'Only the fields you send change. Setting `categoryId` also teaches the app for this payee. `tags` replaces all tags.',
+      description:
+        'Only the fields you send change. Setting `categoryId` also teaches the app for this payee, and on a transaction split into categories it undoes the split. `tags` replaces all tags. `parts` splits it into categories, as PUT /transactions/{id}/parts does.',
       body: transactionUpdateSchema,
       response: transactionSchema,
     },
@@ -1836,7 +1858,8 @@ export function ledgerRoutes(storage: Storage, bank: BankService) {
       ...data,
       scope: 'read',
       summary: 'Export transactions as CSV',
-      description: 'With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: transfers and what’s left out of totals stay in.',
+      description:
+        'A transaction split into categories has a row for each part, with the part’s amount and category (and its note, when it has one), so a spreadsheet sums by category. With `filter` (a ReportFilter as JSON), the transactions it counts, as GET /transactions lists them: transfers and what’s left out of totals stay in.',
       query: z.object({ from: isoDate.optional(), to: isoDate.optional() }).extend(filterQuery.shape),
       file: { contentType: 'text/csv', description: 'date, account, payee, amount, currency, category, group, notes, status, tags' },
     },

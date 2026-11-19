@@ -4,6 +4,7 @@ import { badRequest, notFound } from '../lib/http'
 import type { Storage } from '../storage'
 import { onSharedList, readCatalog, usesSharedList, type Catalog, type SharedList } from './catalog'
 import { moveCategoryUsage } from './categories'
+import { settleParts } from './category-splits'
 import { refileSplitRows, refuseCountingSplitRows } from './splits'
 
 /**
@@ -110,8 +111,9 @@ function setLabels(db: SharedList, categoryId: number, labelIds: number[]) {
 /**
  * Shared categories that are going: in every ledger, their transactions become uncategorized (and
  * no longer say a rule, AI or a link categorized them, or that they need review), and their
- * recurring payments lose them. Then they're deleted. Split rows in them go to each ledger's other
- * category for card payments first, or it's a 409 (refileSplitRows).
+ * recurring payments lose them, and so do the parts of transactions split into categories. Then
+ * they're deleted. Split rows in them go to each ledger's other category for card payments first, or
+ * it's a 409 (refileSplitRows).
  */
 function forget(storage: Storage, db: SharedList, ids: number[]) {
   if (!ids.length) return
@@ -124,6 +126,8 @@ function forget(storage: Storage, db: SharedList, ids: number[]) {
   )
   db.run('UPDATE recurring_items SET category_id = NULL WHERE category_id IN (SELECT value FROM json_each(?))', list)
   db.run('DELETE FROM categories WHERE ledger_id IS NULL AND id IN (SELECT value FROM json_each(?))', list)
+  // Parts in them have none now (their foreign key): each ledger's splits settle.
+  for (const ctx of sharing(storage)) settleParts(ctx)
 }
 
 /** The ledgers that use the shared list, each by its context. */

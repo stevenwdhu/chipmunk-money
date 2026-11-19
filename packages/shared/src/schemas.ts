@@ -233,6 +233,23 @@ const localDateTime = z
   .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/, 'A local date and time, like 2026-09-22T14:30')
   .transform((v) => (v.length === 16 ? `${v}:00` : v))
 
+/** A transaction's parts by category: PUT /transactions/{id}/parts, and `parts` when one is created or updated. */
+const partsInput = z
+  .array(
+    z.object({
+      categoryId: id.nullable().describe('A category of the ledger, or null for none. An income category only takes money in.'),
+      amountMinor: minor.describe('Not zero, and of the transaction’s sign (negative for money out).'),
+      note: optionalText,
+    }),
+  )
+  .max(50)
+  .describe(
+    'Splits it into categories: two or more parts that add up to its amount. Parts in the same category become one. Empty: the split is undone, and it keeps its category (its largest part’s). Not for a transfer, a card payment, money in that has the category of what it pays back, or part of a payment split between ledgers.',
+  )
+
+export const transactionPartsSetSchema = z.object({ parts: partsInput })
+export type TransactionPartsSet = z.input<typeof transactionPartsSetSchema>
+
 export const transactionCreateSchema = z.object({
   accountId: id,
   date: isoDate,
@@ -248,6 +265,7 @@ export const transactionCreateSchema = z.object({
   /** Creates a linked transfer into this account (amount mirrored). */
   transferAccountId: id.nullish().describe('Makes this a transfer: a mirrored transaction is added to this account.'),
   externalId: externalId.nullish(),
+  parts: partsInput.optional().describe('Splits it into categories, as PUT /transactions/{id}/parts does: `categoryId` is then left aside.'),
 })
 export type TransactionCreate = z.input<typeof transactionCreateSchema>
 
@@ -266,11 +284,12 @@ export const transactionUpdateSchema = z.object({
     .nullable()
     .optional()
     .describe('What it is (null or empty: none). For a recurring item’s payment, it renames the item, so all its payments share it. A refund of one purchase has that purchase’s name, so it can’t be changed.'),
-  categoryId: id.nullable().optional(),
+  categoryId: id.nullable().optional().describe('Setting one category on a transaction split into categories undoes the split.'),
   notes: optionalText.optional(),
   tags: tagNames.optional(),
   status: z.enum(['cleared', 'pending']).optional(),
   recurringItemId: id.nullable().optional(),
+  parts: partsInput.optional().describe('Splits it into categories, as PUT /transactions/{id}/parts does, after the other changes (so the parts add up to a new `amountMinor`): `categoryId` is then left aside. Left out, a split stays, and its largest part takes a change of amount.'),
   transferPairId: z.null().optional().describe('null: it isn’t a transfer. Unlinks both sides, which keep their categories as yours.'),
   corrected: z
     .boolean()

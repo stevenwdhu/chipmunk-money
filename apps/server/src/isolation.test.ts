@@ -87,6 +87,8 @@ const ids = (c: C) => c.me.ids
 const find = (c: C, sql: string, ...params: unknown[]) => one<number>(c.me.ctx, sql, ...params)
 const column = (c: C, sql: string) => c.me.ctx.q.column<number>(sql)
 const tx = (c: C, payee: string) => find(c, 'SELECT id FROM transactions WHERE ledger_id = @ledger AND payee = ? ORDER BY id DESC LIMIT 1', payee)
+const purchaseNow = (c: C) =>
+  c.me.ctx.q.get<{ categoryId: number | null; amountMinor: number }>('SELECT category_id AS categoryId, amount_minor AS amountMinor FROM transactions WHERE ledger_id = @ledger AND id = ?', ids(c).purchase)!
 const payeeKey = (c: C, id: number) => one<string>(c.me.ctx, 'SELECT payee_key FROM transactions WHERE ledger_id = @ledger AND id = ?', id)
 /** A card payment onto the subject's card, which the shared-account test adds: one that can be split. */
 const PAYMENT = 'TWIN PAYMENT'
@@ -285,6 +287,13 @@ function writeCases(ownLists: boolean): Case[] {
     { route: 'PUT /ledgers/:ledger/transactions/:id/links', params: (c) => ({ id: ids(c).moneyIn }), body: (c) => ({ links: [{ transactionId: ids(c).purchase, amountMinor: 1_200, kind: 'refund' }] }), kinds: { id: 'moneyIn' } },
     { route: 'PUT /ledgers/:ledger/transactions/links', body: (c) => ({ sets: [{ id: ids(c).moneyIn, links: [] }] }) },
     { route: 'PATCH /ledgers/:ledger/transactions/:id', params: (c) => ({ id: ids(c).purchase }), body: () => ({ notes: 'edited', tags: ['edited'] }) },
+    // Split into categories, then undone: its largest part is in the category it has, so it's left as it was.
+    {
+      route: 'PUT /ledgers/:ledger/transactions/:id/parts',
+      params: (c) => ({ id: ids(c).purchase }),
+      body: (c) => ({ parts: [{ categoryId: purchaseNow(c).categoryId, amountMinor: purchaseNow(c).amountMinor + 100 }, { categoryId: null, amountMinor: -100, note: 'bags' }] }),
+    },
+    { route: 'PUT /ledgers/:ledger/transactions/:id/parts', params: (c) => ({ id: ids(c).purchase }), body: () => ({ parts: [] }) },
     { route: 'DELETE /ledgers/:ledger/transactions/:id', params: (c) => ({ id: tx(c, 'TWIN SHOP') }) },
     { route: 'POST /ledgers/:ledger/transactions/:id/restore', params: (c) => ({ id: ids(c).deleted }), kinds: { id: 'deleted' } },
     // Institutions and accounts
@@ -955,6 +964,7 @@ function bodyProbes(c: C, ownLists: boolean): Array<{ name: string; make: (id: I
       r('POST transactions categoryId', 'POST', '/transactions', (id) => tx(i.chequing, { categoryId: id('category') })),
       r('PATCH transaction categoryId', 'PATCH', `/transactions/${i.purchase}`, (id) => ({ categoryId: id('category') })),
       r('bulk categoryId', 'POST', '/transactions/bulk', (id) => ({ ids: [i.purchase], categoryId: id('category') })),
+      r('parts categoryId', 'PUT', `/transactions/${i.purchase}/parts`, (id) => ({ parts: [{ categoryId: id('category'), amountMinor: -1 }, { categoryId: null, amountMinor: -1 }] })),
       r('POST recurring categoryId', 'POST', '/recurring', (id) => ({ payee: 'PROBE', expectedAmountMinor: -100, cadence: 'monthly', anchorDate: '2026-09-01', categoryId: id('category') })),
       r('payee choice categoryId', 'PUT', '/payees/choice', (id) => ({ payee: 'HYDRO ONE', mode: 'always', categoryId: id('category') }), () => ({ dryRun: true })),
       r('payee choice ?categoryId', 'GET', '/payees/choice', undefined, (id) => ({ payeeKey: 'new grocer', categoryId: id('category') })),

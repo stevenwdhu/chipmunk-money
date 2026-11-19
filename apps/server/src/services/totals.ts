@@ -11,14 +11,16 @@ export const IS_INCOME = `(c.is_income = 1 OR (c.id IS NULL AND t.amount_minor >
 /**
  * Each account's countable transactions from the 1st of the month up to each date (dates ascending).
  * For a credit card that's the month's spending, less refunds: payments are transfers, so they're left out.
+ * One split into categories counts by its parts, each by its own category.
  */
 export function monthToDate(ctx: AppContext, dates: ISODate[], accountId?: number): Map<number, number[]> {
   const out = new Map<number, number[]>()
   if (!dates.length) return out
   const monthStart = (d: ISODate) => `${d.slice(0, 7)}-01`
   const rows = ctx.q.all<{ accountId: number; date: string; total: number }>(
-    `SELECT t.account_id AS accountId, t.date, sum(t.amount_minor) AS total
-     FROM transactions t LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+    `SELECT t.account_id AS accountId, t.date, sum(coalesce(p.amount_minor, t.amount_minor)) AS total
+     FROM transactions t LEFT JOIN transaction_parts p ON p.transaction_id = t.id
+       LEFT JOIN ledger_categories c ON c.id = CASE WHEN p.transaction_id IS NULL THEN t.category_id ELSE p.category_id END AND c.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND ${COUNTABLE} AND t.date BETWEEN ? AND ?${accountId === undefined ? '' : ' AND t.account_id = ?'}
      GROUP BY t.account_id, t.date`,
     monthStart(dates[0]!),

@@ -1,6 +1,7 @@
 import type { PayeeChoice, PayeeChoiceUpdate, PayeeRule, PayeeSearchResult } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
 import { getCategory } from './categories'
+import { noParts } from './category-splits'
 import type { AppContext } from './context'
 import { payeeKeyOf, payeeNameOf } from './payee-namer'
 
@@ -22,15 +23,15 @@ export function listPayeeRules(ctx: AppContext): PayeeRule[] {
 
 /**
  * The payee's transactions `always` would set: waiting for review or uncategorized, and not a
- * transfer or linked money in (a refund or payback follows what it pays back), nor a split row. An
- * income category only takes money in.
+ * transfer or linked money in (a refund or payback follows what it pays back), nor a split row or
+ * a transaction split into categories. An income category only takes money in.
  */
 function pendingIds(ctx: AppContext, payeeKey: string, categoryId: number): number[] {
   const { isIncome } = getCategory(ctx, categoryId)
   return ctx.q.column<number>(
     `SELECT id FROM transactions
      WHERE ledger_id = @ledger AND payee_key = ? AND deleted_at IS NULL AND transfer_pair_id IS NULL AND category_source IS NOT 'linked'
-       AND (needs_review = 1 OR category_id IS NULL) AND split_of IS NULL${isIncome ? ' AND amount_minor > 0' : ''}
+       AND (needs_review = 1 OR category_id IS NULL) AND split_of IS NULL AND ${noParts('transactions')}${isIncome ? ' AND amount_minor > 0' : ''}
      ORDER BY id`,
     payeeKey,
   )

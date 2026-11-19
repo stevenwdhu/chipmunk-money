@@ -1,4 +1,5 @@
 import { addDays, daysBetween, payeeSimilarity, type CategorySource } from '@chipmunk/shared'
+import { noParts } from './category-splits'
 import type { AppContext } from './context'
 import { releaseTransactionLinks } from './links'
 import { today } from './settings'
@@ -46,9 +47,9 @@ export interface MatchResult {
   cleared: number[]
 }
 
-/** From a bank or a CSV file, not deleted, and not already a transfer, a refund or a payback. */
+/** From a bank or a CSV file, not deleted, and not already a transfer, a refund or a payback, nor split into categories. */
 const LINKABLE = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND t.origin IN ('sync', 'import')
-  AND NOT EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_in_id = t.id)`
+  AND NOT EXISTS (SELECT 1 FROM transaction_links l WHERE l.money_in_id = t.id) AND ${noParts('t')}`
 /**
  * Rows the rules may still change: uncategorized, an earlier rule's, or a suggestion still waiting
  * for review. A category you chose or accepted, or that your history is sure of, stays.
@@ -75,10 +76,10 @@ const SELECT = `SELECT t.id, t.account_id AS accountId, a.type AS accountType, t
   WHERE t.ledger_id = @ledger AND t.split_of IS NULL`
 
 /**
- * A withdrawal that could have paid a card: not already a transfer, and categorized by the app, or
- * by you as money moving between accounts (a category left out of totals).
+ * A withdrawal that could have paid a card: not already a transfer or split into categories, and
+ * categorized by the app, or by you as money moving between accounts (a category left out of totals).
  */
-const COULD_PAY = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL
+const COULD_PAY = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND ${noParts('t')}
   AND (t.category_source IS NULL OR t.category_source IN ('history', 'ai', 'rule') OR ${MOVES_MONEY})`
 
 const sameMerchant = (a: string, b: string) => a === b || payeeSimilarity(a, b) >= SAME_MERCHANT

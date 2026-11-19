@@ -391,6 +391,15 @@ export const transactionSplitSchema = z
   )
 export type TransactionSplit = z.output<typeof transactionSplitSchema>
 
+export const transactionPartSchema = z
+  .object({
+    categoryId: id.nullable().describe('The part’s category, or null when it has none.'),
+    amountMinor: minor.describe('The part’s amount, of the transaction’s sign. The parts add up to the transaction’s amount.'),
+    note: z.string().nullable(),
+  })
+  .meta({ id: 'TransactionPart' })
+export type TransactionPart = z.output<typeof transactionPartSchema>
+
 export const transactionSchema = z
   .object({
     id,
@@ -431,6 +440,12 @@ export const transactionSchema = z
     correctedAt: timestamp.nullable().describe('When you corrected its amount or date after it came from the bank; syncs leave those alone from then on.'),
     tags: z.array(tagSchema),
     split: transactionSplitSchema.nullable().describe('How it’s split between the ledgers that share its account, or null when it isn’t part of a split.'),
+    parts: z
+      .array(transactionPartSchema)
+      .nullable()
+      .describe(
+        'Its parts when it’s split into categories, in order, or null. Reports count each part in its own category, with what’s linked to the transaction shared between the parts by their amounts. `categoryId` is then its largest part’s. Not the same as `split`.',
+      ),
     createdAt: timestamp,
     updatedAt: timestamp,
   })

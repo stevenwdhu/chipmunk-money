@@ -2,6 +2,7 @@ import { HTTPException } from 'hono/http-exception'
 import { DEFAULT_CATEGORY_GROUPS, DEFAULT_LABELS } from '@chipmunk/shared'
 import type { UnscopedQuery } from '../db/scope'
 import type { Storage } from '../storage'
+import { moveParts, settleParts } from './category-splits'
 import type { AppContext } from './context'
 import { joinCategoryRefs } from './custom-reports'
 import { refuseCountingSplitRows } from './splits'
@@ -353,6 +354,7 @@ export function leaveSharedList(ctx: AppContext) {
     for (const [from, to] of categoryIds) {
       const ids = { from, to }
       ctx.q.run('UPDATE transactions SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
+      moveParts(ctx, from, to)
       ctx.q.run('UPDATE recurring_items SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
       ctx.q.run('UPDATE payee_rules SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
       ctx.q.run('UPDATE payee_category_stats SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
@@ -435,6 +437,7 @@ export function joinSharedList(storage: Storage, ctx: AppContext, resolve?: Map<
                WHERE ledger_id = @ledger AND category_id = @from`,
               { from },
             )
+            moveParts(ctx, from, null)
             ctx.q.run('UPDATE recurring_items SET category_id = NULL WHERE ledger_id = @ledger AND category_id = @from', { from })
             ctx.q.run('DELETE FROM payee_rules WHERE ledger_id = @ledger AND category_id = @from', { from })
             ctx.q.run('DELETE FROM payee_category_stats WHERE ledger_id = @ledger AND category_id = @from', { from })
@@ -442,6 +445,7 @@ export function joinSharedList(storage: Storage, ctx: AppContext, resolve?: Map<
           }
           const ids = { from, to }
           ctx.q.run('UPDATE transactions SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
+          moveParts(ctx, from, to)
           ctx.q.run('UPDATE recurring_items SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
           ctx.q.run('UPDATE payee_rules SET category_id = @to WHERE ledger_id = @ledger AND category_id = @from', ids)
           // What was learned about payees adds up where two categories became one.
@@ -454,6 +458,8 @@ export function joinSharedList(storage: Storage, ctx: AppContext, resolve?: Map<
           )
           ctx.q.run('DELETE FROM payee_category_stats WHERE ledger_id = @ledger AND category_id = @from', ids)
         }
+        // Parts whose categories became one, or went, settle.
+        settleParts(ctx)
         // Its own list goes (its labels' links with its categories).
         ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger')
         ctx.q.run('DELETE FROM category_groups WHERE ledger_id = @ledger')

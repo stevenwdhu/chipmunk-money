@@ -425,21 +425,24 @@ export function incomeVsExpense(ctx: AppContext, endMonth: MonthKey, count: numb
 /**
  * Rows for CSV export of transactions in a date range: oldest first, in the order they're listed (a
  * day's money in, then ones with a time of day, then money out, the other way round on a credit card).
- * With a filter, the ones it counts.
+ * One split into categories has a row for each part, in the parts' order, with the part's amount and
+ * category and its note (the transaction's notes for a part without one), so a spreadsheet sums by
+ * category. With a filter, the ones it counts.
  */
 export function exportRows(ctx: AppContext, from?: ISODate, to?: ISODate, filter?: Filter) {
   const scope = listScope(filter, {})
   return ctx.q.all<Record<string, string | number | null>>(
-    `SELECT t.date, a.name AS account, t.payee, t.amount_minor AS amountMinor, t.currency, c.name AS category,
-       g.name AS categoryGroup, t.notes, t.status,
+    `SELECT t.date, a.name AS account, t.payee, coalesce(p.amount_minor, t.amount_minor) AS amountMinor, t.currency, c.name AS category,
+       g.name AS categoryGroup, coalesce(p.note, t.notes) AS notes, t.status,
        (SELECT group_concat(tg.name, ' ' ORDER BY tt.tag_id) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id AND tg.ledger_id = @ledger
         WHERE tt.transaction_id = t.id) AS tags
      FROM transactions t
      JOIN ledger_accounts a ON a.id = t.account_id AND a.ledger_id = t.ledger_id
-     LEFT JOIN ledger_categories c ON c.id = t.category_id AND c.ledger_id = t.ledger_id
+     LEFT JOIN transaction_parts p ON p.transaction_id = t.id
+     LEFT JOIN ledger_categories c ON c.id = CASE WHEN p.transaction_id IS NULL THEN t.category_id ELSE p.category_id END AND c.ledger_id = t.ledger_id
      LEFT JOIN ledger_category_groups g ON g.id = c.group_id AND g.ledger_id = t.ledger_id
      WHERE t.ledger_id = @ledger AND t.deleted_at IS NULL AND t.date BETWEEN ? AND ?${scope ? ` AND ${scope.sql}` : ''}
-     ORDER BY t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END, t.datetime, t.id`,
+     ORDER BY t.date, CASE WHEN t.datetime IS NOT NULL THEN 1 WHEN (CASE WHEN a.type = 'credit' THEN t.amount_minor > 0 ELSE t.amount_minor < 0 END) THEN 2 ELSE 0 END, t.datetime, t.id, p.sort`,
     from ?? '0000-01-01',
     to ?? addDays(today(ctx), 3650),
     scope?.params ?? {},

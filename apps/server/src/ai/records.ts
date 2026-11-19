@@ -72,9 +72,11 @@ export function payeeOf(key: string): { payeeKey: string; direction: 'in' | 'out
 
 /**
  * What “Ask AI again” leaves as it is, of a transaction `t`: a deleted one, a transfer, a refund or
- * payback that follows its purchase, a payment a recurring item categorizes, and a split row.
+ * payback that follows its purchase, a payment a recurring item categorizes, a split row, and one
+ * split into categories.
  */
-export const ASKED_AGAIN_ABOUT = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND COALESCE(t.category_source, '') NOT IN ('linked', 'recurring') AND t.split_of IS NULL`
+export const ASKED_AGAIN_ABOUT = `t.deleted_at IS NULL AND t.transfer_pair_id IS NULL AND COALESCE(t.category_source, '') NOT IN ('linked', 'recurring') AND t.split_of IS NULL
+  AND NOT EXISTS (SELECT 1 FROM transaction_parts sp WHERE sp.transaction_id = t.id)`
 
 /** The transactions a record remembers (its `asked`). None on a record that keeps no list, one from before it was kept included. */
 export function askedOf(list: string | null): Asked[] {

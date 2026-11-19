@@ -19,6 +19,7 @@ import type { z } from 'zod'
 import type { recurringCreateSchema, recurringUpdateSchema } from '@chipmunk/shared'
 import { payeeSimilarity } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
+import { noParts } from './category-splits'
 import type { AppContext } from './context'
 import { payeeKeyOf, payeeNameOf } from './payee-namer'
 import { recurringDetection, today } from './settings'
@@ -1015,11 +1016,11 @@ function itemCategoryOf(ctx: AppContext, itemId: number): number | null {
   return ctx.q.pluck<number | null>('SELECT category_id FROM recurring_items WHERE ledger_id = @ledger AND id = @id', { id: itemId }) ?? null
 }
 
-/** Leaves a payment uncategorized (and so its refunds). */
+/** Leaves a payment uncategorized (and so its refunds). Not one split into categories: its parts say what it is. */
 function clearCategory(ctx: AppContext, txId: number) {
   ctx.q.run(
     `UPDATE transactions SET category_id = NULL, category_source = NULL, category_confidence = NULL, needs_review = 0, updated_at = ${NOW}
-     WHERE ledger_id = @ledger AND id = @id`,
+     WHERE ledger_id = @ledger AND id = @id AND ${noParts('transactions')}`,
     { id: txId },
   )
 }
@@ -1070,13 +1071,14 @@ export function setItemCategory(ctx: AppContext, itemId: number, categoryId: num
 
 /**
  * An item's category is on all its payments: set when they're linked and whenever it changes, over
- * a payee's, AI's or one set by hand. Their refunds follow them. An item without one leaves them be.
+ * a payee's, AI's or one set by hand. Their refunds follow them. An item without one leaves them be,
+ * and a payment split into categories keeps its parts: the item's category isn't put on it.
  */
 function applyItemCategory(ctx: AppContext, itemId: number) {
   const categoryId = itemCategoryOf(ctx, itemId)
   if (!categoryId) return
   const ids = ctx.q.column<number>(
-    'SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND (category_id IS NOT @category OR needs_review = 1)',
+    `SELECT id FROM transactions WHERE ledger_id = @ledger AND recurring_item_id = @item AND (category_id IS NOT @category OR needs_review = 1) AND ${noParts('transactions')}`,
     { item: itemId, category: categoryId },
   )
   for (const id of ids) {

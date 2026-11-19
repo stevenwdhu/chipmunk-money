@@ -1,5 +1,6 @@
 import { formatMoney, type LinkKind, type TransactionLink, type TransactionLinksSet } from '@chipmunk/shared'
 import { badRequest } from '../lib/http'
+import { saveParts } from './category-splits'
 import type { AppContext } from './context'
 import { refuseSplitLink } from './splits'
 
@@ -160,8 +161,9 @@ export function setLinksTogether(ctx: AppContext, sets: Array<{ id: number; link
 
 /**
  * Money in's category after its links change: linked in full to one bill, that bill's (following it);
- * to several, none of its own. No longer linked in full: unlinked, it keeps its category as yours;
- * partly linked, the rest is uncategorized, for you (or AI) to say.
+ * to several, none of its own. Linked in full, a split of it into categories is undone. No longer
+ * linked in full: unlinked, it keeps its category as yours; partly linked, the rest is uncategorized,
+ * for you (or AI) to say.
  */
 export function settleLinkedCategory(ctx: AppContext, moneyInId: number) {
   const t = ctx.q.get<{ amount: number; categoryId: number | null; source: string | null }>(
@@ -182,6 +184,8 @@ export function settleLinkedCategory(ctx: AppContext, moneyInId: number) {
       values,
     )
   if (links.length && total >= t.amount) {
+    // Nothing of it is left for parts to say: a split into categories is undone.
+    saveParts(ctx, moneyInId, [])
     set({ id: moneyInId, categoryId: links.length === 1 ? links[0]!.categoryId : null, source: 'linked' })
   } else if (t.source === 'linked') {
     if (links.length) set({ id: moneyInId, categoryId: null, source: null })

@@ -2,6 +2,7 @@ import { HTTPException } from 'hono/http-exception'
 import { unusedColor, type Category, type CategoryCreate, type CategoryGroup, type CategoryList, type CategoryMergeResult, type CategoryUpdate, type Tag, type TagWithCount } from '@chipmunk/shared'
 import { badRequest, notFound } from '../lib/http'
 import { requireOwnList, usesSharedList } from './catalog'
+import { moveParts, settleParts, USES_IN_PARTS } from './category-splits'
 import type { AppContext } from './context'
 import { remapCategoryRefs } from './custom-reports'
 import { labelIdsByCategory, listLabels, setCategoryLabels } from './labels'
@@ -129,8 +130,9 @@ export function deleteCategory(ctx: AppContext, id: number) {
   getCategory(ctx, id)
   ctx.q.transaction(() => {
     refileSplitRows(ctx, [id], null)
-    // Transactions keep existing but become uncategorized (FK is ON DELETE SET NULL).
+    // Transactions keep existing but become uncategorized (FK is ON DELETE SET NULL), and so do parts.
     ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger AND id = @id', { id })
+    settleParts(ctx)
   })
 }
 
@@ -167,7 +169,8 @@ export function setCategoryEnabled(
   let moved = 0
   let reports = 0
   if (!input.enabled && !before.archived) {
-    const used = ctx.q.pluck<number>('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND category_id = @id AND deleted_at IS NULL', { id })!
+    // With the ones that have a part in it.
+    const used = ctx.q.pluck<number>(`SELECT count(*) + ${USES_IN_PARTS} FROM transactions WHERE ledger_id = @ledger AND category_id = @id AND deleted_at IS NULL`, { id })!
     if (used && input.moveTo === undefined) {
       throw new HTTPException(409, { message: `${used} transaction${used === 1 ? ' uses' : 's use'} ${before.name}. Choose another category for them, or leave them uncategorized.` })
     }
@@ -187,6 +190,8 @@ export function setCategoryEnabled(
              updated_at = ${NOW} WHERE ledger_id = @ledger AND category_id = @id`,
           { id },
         )
+        moveParts(ctx, id, null)
+        settleParts(ctx)
         ctx.q.run('UPDATE recurring_items SET category_id = NULL WHERE ledger_id = @ledger AND category_id = @id', { id })
         ctx.q.run('DELETE FROM payee_category_stats WHERE ledger_id = @ledger AND category_id = @id', { id })
         ctx.q.run('DELETE FROM payee_rules WHERE ledger_id = @ledger AND category_id = @id', { id })
@@ -201,10 +206,11 @@ export function setCategoryEnabled(
 
 /**
  * Moves what uses a category in this ledger to another: its transactions (deleted ones too, so a
- * restore lands in the right place), recurring payments, what the app learned about payees, and
- * custom reports. Merging a shared category does this in every ledger on the list. Split rows go
- * along only to a category left out of totals: otherwise they go to the ledger's other category for
- * card payments first, or it's a 409 (refileSplitRows).
+ * restore lands in the right place) and the parts of ones split into categories, recurring
+ * payments, what the app learned about payees, and custom reports. Merging a shared category does
+ * this in every ledger on the list. Split rows go along only to a category left out of totals:
+ * otherwise they go to the ledger's other category for card payments first, or it's a 409
+ * (refileSplitRows).
  */
 export function moveCategoryUsage(ctx: AppContext, id: number, into: number) {
   return ctx.q.transaction(() => {
@@ -212,6 +218,9 @@ export function moveCategoryUsage(ctx: AppContext, id: number, into: number) {
     refileSplitRows(ctx, [id], into)
     const transactions = ctx.q.pluck<number>('SELECT count(*) FROM transactions WHERE ledger_id = @ledger AND category_id = @id AND deleted_at IS NULL', { id })!
     ctx.q.run(`UPDATE transactions SET category_id = @into, updated_at = ${NOW} WHERE ledger_id = @ledger AND category_id = @id`, ids)
+    // Parts too: one that lands on a category another part has becomes one with it.
+    moveParts(ctx, id, into)
+    settleParts(ctx)
     const recurring = ctx.q.run('UPDATE recurring_items SET category_id = @into WHERE ledger_id = @ledger AND category_id = @id', ids).changes
     // Payees learned for this category now suggest the other one.
     ctx.q.run(
@@ -297,6 +306,7 @@ export function deleteGroup(ctx: AppContext, id: number): Category[] {
     )
     ctx.q.run('DELETE FROM categories WHERE ledger_id = @ledger AND group_id = @id', { id })
     ctx.q.run('DELETE FROM category_groups WHERE ledger_id = @ledger AND id = @id', { id })
+    settleParts(ctx)
   })
   return removed
 }

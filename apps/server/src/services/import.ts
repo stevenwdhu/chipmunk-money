@@ -14,6 +14,7 @@ import { aiEnabled } from '../ai/runner'
 import { badRequest } from '../lib/http'
 import { requireHome, saveImportMapping } from './accounts'
 import { aiSuggestion, directionOf, historySuggestion, learn, payeeRule, type SuggestionResult } from './categorize'
+import { noParts } from './category-splits'
 import type { AppContext } from './context'
 import { payeeKeyOf } from './payee-namer'
 import { isCardReward, matchTransactions } from './matching'
@@ -242,7 +243,7 @@ interface Uncategorized {
 
 /**
  * The transactions without a category that AI may be asked about, newest first: not a transfer,
- * money in that follows what it pays back, or a split row. Money onto a credit card is a payment
+ * money in that follows what it pays back, a split row, or one split into categories. Money onto a credit card is a payment
  * (or a refund), never a guess for AI, but cash back and rewards are.
  */
 function uncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[] } = {}): Uncategorized[] {
@@ -251,7 +252,7 @@ function uncategorized(ctx: AppContext, opts: { batchId?: number; ids?: number[]
        bank_category AS bankCategory, bank_category_confident AS bankConfident
      FROM transactions
      WHERE ledger_id = @ledger AND category_id IS NULL AND deleted_at IS NULL AND transfer_pair_id IS NULL AND category_source IS NOT 'linked'
-       AND split_of IS NULL
+       AND split_of IS NULL AND ${noParts('transactions')}
        ${opts.batchId ? 'AND import_batch_id = ?' : ''}
        ${opts.ids ? 'AND id IN (SELECT value FROM json_each(?))' : ''}
      ORDER BY date DESC`,
@@ -291,7 +292,7 @@ export async function categorizeUncategorized(ctx: AppContext, opts: { batchId?:
   const update = (...params: unknown[]) =>
     ctx.q.run(
       `UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ?
-       WHERE id = ? AND ledger_id = @ledger AND category_id IS NULL AND split_of IS NULL`,
+       WHERE id = ? AND ledger_id = @ledger AND category_id IS NULL AND split_of IS NULL AND ${noParts('transactions')}`,
       ...params,
     )
   try {
@@ -387,7 +388,7 @@ export function recategorize(ctx: AppContext, ids: number[], onDone?: (changed: 
   const work = [...groups.values()]
   const set = (...params: unknown[]) =>
     ctx.q.run(
-      'UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger AND split_of IS NULL',
+      `UPDATE transactions SET category_id = ?, category_source = ?, category_confidence = ?, needs_review = ? WHERE id = ? AND ledger_id = @ledger AND split_of IS NULL AND ${noParts('transactions')}`,
       ...params,
     )
   const changed: Recategorized[] = always.size ? applyPayeeChoices(ctx, [...always]) : []

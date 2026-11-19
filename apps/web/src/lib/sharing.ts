@@ -225,6 +225,7 @@ export function toListRow(row: AccountTransaction, accountId: number): ListRow {
     correctedAt: null,
     tags: [],
     split: row.split && { part: 'payment', ...row.split },
+    parts: null,
     createdAt: '',
     updatedAt: '',
     balanceAfterMinor: row.balanceAfterMinor,

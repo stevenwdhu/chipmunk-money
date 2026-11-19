@@ -5,6 +5,7 @@ import { HTTPException } from 'hono/http-exception'
 import { badRequest } from '../lib/http'
 import { recordActivity, type ActivityActor } from './activity'
 import { upsertTags } from './categories'
+import { putParts, takeParts } from './category-splits'
 import { historySuggestion } from './categorize'
 import type { AppContext, CtxOf } from './context'
 import { categorizeUncategorized } from './import'
@@ -276,7 +277,10 @@ function categoriesIn(from: AppContext, to: AppContext, rows: MovingRow[]): Map<
  *    move were added to the rows at the start (withItems), and each item is read to be carried
  *    (itemToCarry). Then the items let go of the rows (detachPayments): nothing of an item may stay
  *    attached to a row as it changes ledger. With `plain` the items stay and that's all.
- * 5. Category in `to` (categoriesIn), from `to`'s history when it has none of its own there.
+ * 5. Category in `to` (categoriesIn), from `to`'s history when it has none of its own there. A row
+ *    split into categories keeps its parts, each in the same category there, else the one of the
+ *    same name, else none (parts that end the same become one), and its own category is its largest
+ *    part's again.
  * 6. Tags go by name, made in `to` when it has none of that name.
  * 7. Bank payloads that point at them point at no row: only the home's rows have payloads.
  * 8. One UPDATE changes their ledger (moveRows, through ctx.accountWide).
@@ -346,8 +350,10 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     const detached = detachPayments(fromCtx, ids)
     const recurring = rows.flatMap((r) => (r.recurringItemId && !going.has(r.recurringItemId) ? [{ id: r.id, itemId: r.recurringItemId, item: r.itemName ?? '' }] : []))
 
-    // 5. Categories, as they are once the steps above have let go.
+    // 5. Categories, as they are once the steps above have let go. The parts of rows split into
+    // categories come off (a row changes ledger without them) and go back on in `to` in step 9.
     const fields = categoriesIn(fromCtx, toCtx, rows)
+    const parts = takeParts(fromCtx, ids)
 
     // 6. Tags, by name.
     const tags = fromCtx.q.all<{ txId: number; name: string; color: string | null }>(
@@ -367,7 +373,8 @@ export function moveTransactions(fromCtx: AppContext, ctxOf: CtxOf, input: MoveI
     // 8. The move.
     const moved = fromCtx.accountWide.moveRows({ to: toCtx, ids, fields })
 
-    // 9. In `to`, as new rows: their links, tags, matching and recurring items.
+    // 9. In `to`, as new rows: their parts by category, links, tags, matching and recurring items.
+    putParts(toCtx, parts, (categoryId, name) => categoryThere(toCtx, categoryId, name)?.id ?? null)
     for (const l of carried) {
       toCtx.q.run('INSERT INTO transaction_links (kind, money_in_id, money_out_id, amount_minor) VALUES (?, ?, ?, ?)', l.kind, l.moneyIn, l.moneyOut, l.amountMinor)
     }
@@ -583,11 +590,11 @@ export function routeToItems(home: AppContext, ctxOf: CtxOf, ids: number[], acto
  *
  * In `from`: the live ones are deleted (soft), then every link they have goes (the money in that
  * stays settles its category), their transfers are unpaired on both sides, their rejected pairs and
- * tags go, recurring items let go of them (dues and not-payments too) and work out their payments
- * again, and their bank payloads point at no row. Then one UPDATE (moveRows) puts them in `to` with
- * no category, recurring item, transfer pair or import batch. Up to MOVE_LIMIT at a time, all of
- * them held by `from`, and none part of a split (the caller lets those go first, with leaveSplits).
- * Run it inside the caller's transaction. Returns how many went.
+ * tags go, their parts by category go, recurring items let go of them (dues and not-payments too)
+ * and work out their payments again, and their bank payloads point at no row. Then one UPDATE
+ * (moveRows) puts them in `to` with no category, recurring item, transfer pair or import batch. Up
+ * to MOVE_LIMIT at a time, all of them held by `from`, and none part of a split (the caller lets
+ * those go first, with leaveSplits). Run it inside the caller's transaction. Returns how many went.
  */
 export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: number[]; to: string }): number {
   const ids = [...new Set(input.ids)]
@@ -620,6 +627,7 @@ export function sendAsDeleted(fromCtx: AppContext, ctxOf: CtxOf, input: { ids: n
       these,
     )
 
+    takeParts(fromCtx, ids)
     const none: MovedCategory = { categoryId: null, categorySource: null, categoryConfidence: null, needsReview: false }
     const sent = fromCtx.accountWide.moveRows({ to: toCtx, ids, fields: new Map(ids.map((id) => [id, none])) })
     for (const item of detached) recalculateRecurring(fromCtx, item.itemId, { removed: true, followAmount: true, wasPaidOff: item.wasPaidOff })

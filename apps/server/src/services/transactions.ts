@@ -27,6 +27,7 @@ import type { AccountTransactionRow, SplitShare } from './account-rows'
 import { currentParts, getAccount } from './accounts'
 import { diff } from './activity'
 import { listScope, positional, textLike } from './filters'
+import { checkParts, isSplitIntoCategories, partsFor, saveParts, setParts } from './category-splits'
 import { learn, suggestCategory, type SuggestionResult } from './categorize'
 import { upsertTags } from './categories'
 import type { UsableLedgers } from './bank/service'
@@ -136,7 +137,7 @@ function tagsFor(ctx: AppContext, ids: number[]): Map<number, Tag[]> {
   return map
 }
 
-function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNaming, split: Transaction['split']): Transaction {
+function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNaming, split: Transaction['split'], parts: Transaction['parts']): Transaction {
   return {
     id: r.id,
     accountId: r.account_id,
@@ -167,12 +168,13 @@ function toDTO(r: TxRow, tags: Tag[], links: TransactionLink[], payee: PayeeNami
     correctedAt: r.corrected_at,
     tags,
     split,
+    parts,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
 }
 
-/** Transactions as the API shows them: with their tags, links, payee names and splits. */
+/** Transactions as the API shows them: with their tags, links, payee names, splits between ledgers and parts by category. */
 function dtos(ctx: AppContext, rows: TxRow[]): Transaction[] {
   const ids = rows.map((r) => r.id)
   const tags = tagsFor(ctx, ids)
@@ -182,7 +184,8 @@ function dtos(ctx: AppContext, rows: TxRow[]): Transaction[] {
     ctx,
     rows.filter((r) => r.split_of !== null || r.split_payment).map((r) => ({ id: r.id, amount: r.amount_minor, splitOf: r.split_of, isPayment: !!r.split_payment })),
   )
-  return rows.map((r) => toDTO(r, tags.get(r.id) ?? [], links.get(r.id) ?? [], name(r.payee), splits.get(r.id) ?? null))
+  const parts = partsFor(ctx, ids)
+  return rows.map((r) => toDTO(r, tags.get(r.id) ?? [], links.get(r.id) ?? [], name(r.payee), splits.get(r.id) ?? null, parts.get(r.id) ?? null))
 }
 
 /** A row kept only for its bank id (bank_id_only) is no transaction of the ledger's: not found, deleted ones included or not. */
@@ -414,21 +417,26 @@ const linkedTo = (bill: string) =>
   `EXISTS (SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
     WHERE l.money_in_id = t.id AND b.ledger_id = t.ledger_id AND b.deleted_at IS NULL AND ${bill})`
 
+/** `t` is split into categories, with a part whose category (`sp.category_id`) matches `part`. */
+const anyPart = (part: string) => `EXISTS (SELECT 1 FROM transaction_parts sp WHERE sp.transaction_id = t.id AND ${part})`
+
 /**
  * Adds a condition (to `where`, and its values to `params`): in any of these categories, `none` for
  * uncategorized. Money in linked in full to several bills has no category of its own: it's in each
- * of theirs, and so is a refund of an uncategorized purchase.
+ * of theirs, and so is a refund of an uncategorized purchase. One split into categories is in each
+ * of its parts'.
  */
 function inCategories(categories: Array<number | 'none'>, where: string[], params: unknown[]) {
   const any: string[] = []
   for (const c of new Set(categories)) {
     if (c === 'none') {
       any.push(`(t.category_id IS NULL AND t.transfer_pair_id IS NULL AND (t.category_source IS NOT 'linked' OR ${linkedTo('b.category_id IS NULL')}))`)
+      any.push(anyPart('sp.category_id IS NULL'))
     } else {
       any.push(`(t.category_id = ? OR (t.category_source = 'linked' AND t.category_id IS NULL AND EXISTS (
         SELECT 1 FROM transaction_links l JOIN transactions b ON b.id = l.money_out_id
-        WHERE l.money_in_id = t.id AND b.ledger_id = t.ledger_id AND b.category_id = ?)))`)
-      params.push(c, c)
+        WHERE l.money_in_id = t.id AND b.ledger_id = t.ledger_id AND b.category_id = ?)) OR ${anyPart('sp.category_id = ?')})`)
+      params.push(c, c, c)
     }
   }
   where.push(`(${any.join(' OR ')})`)
@@ -465,13 +473,13 @@ export function listTransactions(ctx: AppContext, q: QueryInput): TransactionPag
       AND NOT EXISTS (SELECT 1 FROM category_labels cl WHERE cl.category_id = c.id)`
     where.push(
       `t.transfer_pair_id IS NULL AND ((t.category_id IS NULL AND t.amount_minor < 0) OR t.category_id IN (${unlabelled})
-         OR (t.category_id IS NULL AND t.category_source = 'linked' AND ${linkedTo(`(b.category_id IS NULL OR b.category_id IN (${unlabelled}))`)}))`,
+         OR (t.category_id IS NULL AND t.category_source = 'linked' AND ${linkedTo(`(b.category_id IS NULL OR b.category_id IN (${unlabelled}))`)})
+         OR ${anyPart(`((sp.category_id IS NULL AND t.amount_minor < 0) OR sp.category_id IN (${unlabelled}))`)})`,
     )
   } else if (q.labelId) {
-    where.push(
-      't.transfer_pair_id IS NULL AND t.category_id IN (SELECT cl.category_id FROM category_labels cl JOIN ledger_labels b ON b.id = cl.label_id WHERE b.ledger_id = @ledger AND cl.label_id = ?)',
-    )
-    params.push(q.labelId)
+    const labelled = '(SELECT cl.category_id FROM category_labels cl JOIN ledger_labels b ON b.id = cl.label_id WHERE b.ledger_id = @ledger AND cl.label_id = ?)'
+    where.push(`t.transfer_pair_id IS NULL AND (t.category_id IN ${labelled} OR ${anyPart(`sp.category_id IN ${labelled}`)})`)
+    params.push(q.labelId, q.labelId)
   }
   if (q.q) {
     const [sql, ...search] = textSearch(q.q)
@@ -667,6 +675,16 @@ interface ResolvedCategory {
 }
 
 export async function createTransaction(ctx: AppContext, input: CreateInput, opts: CreateOptions = {}): Promise<Transaction> {
+  if (input.parts?.length) {
+    // Split into categories from the start: nothing is suggested, and all of it or none is added.
+    const { parts, ...rest } = input
+    const id = ctx.q.transaction(() => {
+      const id = insertTransaction(ctx, { ...rest, categoryId: null }, { ...opts, suggestion: null })
+      setParts(ctx, id, parts)
+      return id
+    })
+    return getTransaction(ctx, id)
+  }
   let suggestion = opts.suggestion
   if (suggestion === undefined && !input.categoryId && !input.transferAccountId) {
     suggestion = await suggestCategory(ctx, {
@@ -765,8 +783,14 @@ export function insertTransaction(ctx: AppContext, input: CreateInput, opts: Cre
   return id
 }
 
-export function updateTransaction(ctx: AppContext, id: number, input: UpdateInput): Transaction {
+export function updateTransaction(ctx: AppContext, id: number, update: UpdateInput): Transaction {
   const row = getRow(ctx, id)
+  // Split into categories: `parts` says how, and `categoryId` is left aside. On one that's split, one
+  // category (or no parts) undoes the split, and with neither the split stays.
+  const input = update.parts?.length ? { ...update, categoryId: undefined } : update
+  const wasSplit = isSplitIntoCategories(ctx, id)
+  const parts = input.parts?.length ? checkParts(ctx, id, input.parts, input.amountMinor ?? row.amount_minor) : null
+  const undoesSplit = wasSplit && !parts && (input.categoryId !== undefined || input.parts !== undefined)
   const itemWasPaidOff = row.recurring_item_id ? paidOff(ctx, row.recurring_item_id) : false
   const sets: string[] = []
   const params: Record<string, unknown> = { id }
@@ -819,7 +843,7 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   if (input.corrected === false) set('corrected_at', 'correctedAt', null)
   else if (!row.corrected_at && (input.corrected || (row.external_id && corrects))) set('corrected_at', 'correctedAt', ctx.now().toISOString())
 
-  const categoryChanged = input.categoryId !== undefined && input.categoryId !== row.category_id
+  const categoryChanged = input.categoryId !== undefined && (input.categoryId !== row.category_id || wasSplit)
   // Money in linked in full has its bill's category (the links_follow_bill trigger keeps it so), or its bills'.
   if (categoryChanged && row.category_source === 'linked') {
     badRequest('It has the category of what it pays back. Change that one’s, or unlink it.')
@@ -860,6 +884,8 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
       sets.push(`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
       ctx.q.run(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id AND ledger_id = @ledger`, params)
     }
+    if (parts) saveParts(ctx, id, parts)
+    else if (undoesSplit) saveParts(ctx, id, [])
     if (input.tags !== undefined) setTags(ctx, id, input.tags)
     if (unlinksTransfer) unpairTransfer(ctx, id, { reject: true })
     // Keep both sides of a transfer you entered in step.
@@ -898,7 +924,8 @@ export function updateTransaction(ctx: AppContext, id: number, input: UpdateInpu
   // A split row is the split's: nothing learns from it, and no recurring item takes it.
   if (!row.transfer_pair_id && row.split_of === null) {
     if (categoryChanged) {
-      if (row.category_source === 'user' && row.category_id) learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
+      // A split's category was its largest part's: nothing learned it.
+      if (row.category_source === 'user' && row.category_id && !wasSplit) learn(ctx, row.payee_key, row.amount_minor, row.category_id, -1)
       learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, input.categoryId ?? null)
     } else if (confirmsSuggestion) {
       learn(ctx, payeeKey, input.amountMinor ?? row.amount_minor, row.category_id)

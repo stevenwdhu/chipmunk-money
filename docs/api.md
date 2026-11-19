@@ -154,6 +154,7 @@ Money in and out of an account. Amounts are in minor units (cents): negative is 
 | PUT | `/ledgers/{ledger}/transactions/{id}/links` | Set what a transaction pays back, or what paid it back. | write |
 | PUT | `/ledgers/{ledger}/transactions/links` | Set what several money in pays back, together. | write |
 | PUT | `/ledgers/{ledger}/transactions/{id}/split` | Split a card payment between ledgers. Accepts `?dryRun=true`. | write |
+| PUT | `/ledgers/{ledger}/transactions/{id}/parts` | Split a transaction into categories. | write |
 | PATCH | `/ledgers/{ledger}/transactions/{id}` | Update a transaction. | write |
 | DELETE | `/ledgers/{ledger}/transactions/{id}` | Delete a transaction. | write |
 | POST | `/ledgers/{ledger}/transactions/{id}/restore` | Restore a deleted transaction. | write |
