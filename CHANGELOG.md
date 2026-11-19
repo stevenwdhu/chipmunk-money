@@ -2,6 +2,16 @@
 
 What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
 
+## Unreleased
+
+### Added
+
+- On a shared account, a new payment follows its recurring item. A transaction from a bank sync, Fetch all history or a CSV import goes from the home to another ledger when it's a payment of an active recurring item there, of none in the home, and of none in any other ledger that has the account. The sync's or import's message and Activity in both ledgers say what went where. The API's sync and import results list them (`routed`), and so do the MCP tools.
+
+### Changed
+
+- Moving a payment of a recurring item to another ledger now moves all the item's payments, and the item itself, where it used to take the one payment off the item. The app says what goes along and asks first. When the other ledger already has an active item for the payee, the payments become that item's. A payment that can't move stays, and the item stays with it. `POST /transactions/move` and the MCP tool `move_transactions` report it in `recurringItems`, and `moved` counts every payment that went.
+
 ## v0.3.2 (2026-11-15)
 
 ### Changed

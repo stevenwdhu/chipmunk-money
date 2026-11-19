@@ -15,8 +15,9 @@ import { useUiStore } from '@/stores/ui'
 
 /**
  * "Move to…": a menu of the other ledgers that have the transactions' account, around the button in
- * its slot. Picking one asks the server what the move would let go of (a dry run). When it's
- * something, that's said first, to confirm. Otherwise they move right away. Nothing shows when there
+ * its slot. Picking one asks the server what the move would let go of, and which recurring items
+ * would go along with all their payments (a dry run). When it's something, that's said first, to
+ * confirm. Otherwise they move right away. Nothing shows when there
  * is no ledger to move them to. When they can't move for another reason (`blocked`), that's said in
  * place of the button. Once they've moved, an editor open on one of them closes: it's another
  * ledger's now.
@@ -46,7 +47,7 @@ const targets = computed(() => all.all.value.filter((l) => !l.archived && l.slug
 
 /** Asking the server what a move would do. */
 const asking = ref(false)
-/** A move that lets go of something, waiting to be confirmed. */
+/** A move that lets go of something or takes a recurring item along, waiting to be confirmed. */
 const pending = ref<{ ids: number[]; to: Ledger; drops: string[] } | null>(null)
 const confirming = computed({ get: () => !!pending.value, set: (v) => !v && (pending.value = null) })
 const busy = computed(() => asking.value || m.isPending.value)
@@ -57,7 +58,7 @@ async function pick(to: Ledger) {
   asking.value = true
   try {
     const would = await previewMove({ ids, to: to.slug, from: from.value })
-    if (dropsAnything(would)) pending.value = { ids, to, drops: moveDrops(would, nameOf(from.value), nameOf) }
+    if (dropsAnything(would)) pending.value = { ids, to, drops: moveDrops(would, nameOf(from.value), to.name, nameOf) }
     else await move(ids, to)
   } catch (err) {
     toast.error(errorMessage(err))
@@ -97,7 +98,7 @@ async function move(ids: number[], to: Ledger) {
       <DialogContent v-if="pending" class="max-h-[90svh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Move {{ pending.ids.length === 1 ? 'it' : `${pending.ids.length} transactions` }} to {{ pending.to.name }}?</DialogTitle>
-          <DialogDescription>What ties {{ pending.ids.length === 1 ? 'it' : 'them' }} to {{ nameOf(from) }} doesn’t go along.</DialogDescription>
+          <DialogDescription>This is what moving {{ pending.ids.length === 1 ? 'it' : 'them' }} out of {{ nameOf(from) }} also does.</DialogDescription>
         </DialogHeader>
         <ul class="grid gap-1.5 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
           <li v-for="d in pending.drops" :key="d">{{ d }}</li>

@@ -1,4 +1,4 @@
-import { statementBalance, type Account, type AccountTransaction, type MoveResult, type Transaction, type TransactionListItem, type TransactionSplitShare } from '@chipmunk/shared'
+import { statementBalance, type Account, type AccountTransaction, type MoveResult, type RoutedTransaction, type Transaction, type TransactionListItem, type TransactionSplitShare } from '@chipmunk/shared'
 import { money } from './format'
 
 type LedgerRef = { slug: string; name: string }
@@ -56,14 +56,28 @@ export const besidesAction = (changes: string[]) => changes.slice(0, -1)
 /** The same, for the toast under its title once it's done. */
 export const alsoDone = (changes: string[]) => besidesAction(changes).join(' ') || undefined
 
-/** Whether a move lets go of anything: said before it's confirmed. */
-export const dropsAnything = (r: MoveResult) => r.dropped.links.length + r.dropped.partlyLinked.length + r.dropped.pairs.length + r.dropped.recurring.length > 0
+/** Whether a move lets go of anything, or takes a recurring item along: said before it's confirmed. */
+export const dropsAnything = (r: MoveResult) =>
+  r.dropped.links.length + r.dropped.partlyLinked.length + r.dropped.pairs.length + r.dropped.recurring.length + r.recurringItems.length > 0
 
-/** What a move lets go of, a sentence each, from its dry run. `ledgerName`: a ledger's name by its slug. */
-export function moveDrops(r: MoveResult, from: string, ledgerName: (slug: string) => string): string[] {
+/** A recurring item that goes with its payments, in a sentence or two. */
+function itemGoes(i: MoveResult['recurringItems'][number], from: string, to: string): string {
+  const payments = i.payments === 1 ? 'its payment' : `its ${i.payments} payments`
+  const goes = i.joined
+    ? `${i.item} is a recurring item, so ${payments} go too, as payments of ${to}’s own ${i.item}.`
+    : `${i.item} is a recurring item, so ${payments} and the item go too.`
+  return i.left ? `${goes} ${count(i.left, 'payment')} can’t move and ${i.left === 1 ? 'stays' : 'stay'} in ${from}, with the item.` : goes
+}
+
+/**
+ * What a move takes along and lets go of, a sentence each, from its dry run. `from` and `to` are
+ * the two ledgers' names, and `ledgerName` gives a ledger's name by its slug.
+ */
+export function moveDrops(r: MoveResult, from: string, to: string, ledgerName: (slug: string) => string): string[] {
   const { links, partlyLinked, pairs, recurring } = r.dropped
   const items = [...new Set(recurring.map((x) => x.item))]
   return [
+    ...r.recurringItems.map((i) => itemGoes(i, from, to)),
     links.length && `${count(links.length, 'refund or payback link')} ${links.length === 1 ? 'is' : 'are'} let go, because the other side stays behind.`,
     ...partlyLinked.map((p) => `${money(p.leftMinor)} of ${p.payee} is no longer paid back, and counts as income in ${ledgerName(p.ledger)}.`),
     pairs.length && `${count(pairs.length, 'transfer')} ${pairs.length === 1 ? 'is' : 'are'} no longer paired with ${pairs.length === 1 ? 'its' : 'their'} other side, which stays in ${from}.`,
@@ -76,8 +90,12 @@ export const MOVE_SPLIT = 'Undo the split to move it.'
 /** The same, for a selection of several with one of those in it. */
 export const MOVE_SPLIT_SELECTED = 'A split payment is selected. Undo the split to move it.'
 
-/** After a move: what was let go of, and what the ledger they went to matched them with. */
+/** "Netflix went to Family, where it’s a payment of Netflix family plan." for each new transaction a sync or an import sent to another ledger. */
+export const routedLines = (routed: RoutedTransaction[]) => routed.map((r) => `${r.payee} went to ${r.ledger}, where it’s a payment of ${r.item}.`)
+
+/** After a move: the recurring items that went along, what was let go of, and what the ledger they went to matched them with. */
 export function moveSummary(r: MoveResult, to: string): string | undefined {
+  const items = r.recurringItems.map((i) => i.item)
   const dropped = [
     r.unlinked && `${count(r.unlinked, 'link')} let go`,
     r.unpaired && `${count(r.unpaired, 'transfer')} no longer paired`,
@@ -88,7 +106,11 @@ export function moveSummary(r: MoveResult, to: string): string | undefined {
     r.matched.refunds && count(r.matched.refunds, 'refund'),
     r.matched.payments && count(r.matched.payments, 'recurring payment'),
   ].filter(Boolean)
-  const said = [dropped.length && `${dropped.join(', ')}.`, matched.length && `Matched in ${to}: ${matched.join(', ')}.`].filter(Boolean)
+  const said = [
+    items.length && `The recurring ${items.length === 1 ? 'item' : 'items'} ${listOf(items)} went with ${items.length === 1 ? 'its' : 'their'} payments.`,
+    dropped.length && `${dropped.join(', ')}.`,
+    matched.length && `Matched in ${to}: ${matched.join(', ')}.`,
+  ].filter(Boolean)
   return said.length ? said.join(' ') : undefined
 }
 

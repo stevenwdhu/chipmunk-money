@@ -20,6 +20,7 @@ import { useBankConnections, useBankMutations, useSettings, useUpdateSettings } 
 import { useIsDesktop } from '@/composables/useBreakpoint'
 import { errorMessage } from '@/lib/api'
 import { openPlaidLink, PlaidLinkFailure } from '@/lib/plaid'
+import { routedLines } from '@/lib/sharing'
 
 /**
  * App settings → Bank sync: a card to add a service, then a card for each service you've added, with
@@ -218,6 +219,7 @@ async function sync(id: string, full = false) {
     const added = r.accounts.reduce((s, a) => s + a.added, 0)
     const changed = r.accounts.reduce((s, a) => s + a.updated + a.adopted + a.removed, 0)
     const problems = r.accounts.filter((a) => a.error)
+    const said = [...routedLines(r.accounts.flatMap((a) => a.routed)), ...problems.map((p) => `${p.name}: ${p.error}`)]
     const done = full ? 'Fetched all history' : 'Synced'
     toast.success(
       added || changed
@@ -225,7 +227,7 @@ async function sync(id: string, full = false) {
         : full
           ? `${done}.`
           : `${done}. Nothing new.`,
-      problems.length ? { description: problems.map((p) => `${p.name}: ${p.error}`).join(' ') } : undefined,
+      said.length ? { description: said.join(' ') } : undefined,
     )
   } catch (err) {
     toast.error(errorMessage(err))

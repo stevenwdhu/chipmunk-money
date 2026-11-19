@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useAccountBankMutations, useAccounts, useBankMutations, useLedgers } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
 import { accountKind, guessType, similarNames } from '@/lib/bankAccounts'
+import { routedLines } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
@@ -119,7 +120,7 @@ async function submit() {
     if (!r.ok) toast.error(r.error ?? 'The first sync failed. It will retry on its own.')
     else if (mine) {
       const matched = mine.updated + mine.adopted
-      toast.success(`Synced ${a.name}: ${matched} matched, ${mine.added} new.`)
+      toast.success(`Synced ${a.name}: ${matched} matched, ${mine.added} new.`, { description: routedLines(mine.routed).join(' ') || undefined })
     }
   } catch (err) {
     toast.info(`Linked. ${errorMessage(err)}`)

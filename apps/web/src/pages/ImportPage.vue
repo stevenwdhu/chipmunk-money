@@ -35,6 +35,7 @@ import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useAccounts, useAiJobStatus, useImportBatches, useImportMutations, useSettings } from '@/composables/queries'
 import { errorMessage } from '@/lib/api'
+import { routedLines } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 type Step = 'file' | 'map' | 'review' | 'done'
@@ -533,6 +534,9 @@ function onPick(e: Event) {
         :title="`Imported ${result.imported} transaction${result.imported === 1 ? '' : 's'}`"
         :description="`${result.categorized} categorized from your history${result.needsReview ? `, ${result.needsReview} to review` : ''}${result.skippedDuplicates ? ` · ${result.skippedDuplicates} duplicates skipped` : ''}.`"
       >
+        <ul v-if="result.routed.length" class="grid w-full gap-1 text-sm text-muted-foreground">
+          <li v-for="line in routedLines(result.routed)" :key="line">{{ line }}</li>
+        </ul>
         <div v-if="aiJob.data.value?.running" class="flex w-full items-center justify-center gap-2 text-sm text-muted-foreground">
           <Sparkles class="size-4 text-ai" />Categorizing new payees with AI… {{ aiJob.data.value.done }}/{{ aiJob.data.value.total }}
         </div>

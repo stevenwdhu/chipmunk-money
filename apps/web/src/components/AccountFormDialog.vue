@@ -31,6 +31,7 @@ import { useIsDesktop } from '@/composables/useBreakpoint'
 import { useToday } from '@/composables/useToday'
 import { errorMessage } from '@/lib/api'
 import { guessType, similarNames } from '@/lib/bankAccounts'
+import { routedLines } from '@/lib/sharing'
 import { cn } from '@/lib/utils'
 
 /**
@@ -158,7 +159,11 @@ async function syncNow(connectionId: string, accountId: number) {
     const r = await bankM.sync.mutateAsync(connectionId)
     const mine = r.accounts.find((a) => a.accountId === accountId)
     if (!r.ok) toast.error(r.error ?? 'The first sync failed. It will retry on its own.')
-    else if (mine) toast.success(`Synced: ${mine.added} new transaction${mine.added === 1 ? '' : 's'}${mine.adopted ? `, ${mine.adopted} matched to ones you had` : ''}`)
+    else if (mine) {
+      toast.success(`Synced: ${mine.added} new transaction${mine.added === 1 ? '' : 's'}${mine.adopted ? `, ${mine.adopted} matched to ones you had` : ''}`, {
+        description: routedLines(mine.routed).join(' ') || undefined,
+      })
+    }
   } catch (err) {
     // E.g. the day's SimpleFIN requests are used up: the scheduled sync will pick it up.
     toast.info(`Linked. ${errorMessage(err)}`)

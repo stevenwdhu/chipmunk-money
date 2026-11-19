@@ -26,7 +26,7 @@ Only credit cards can be shared for now.
 
 One of the ledgers that have the card is its **home**, the ledger the card was in when you shared it unless you choose another. Two things happen there:
 
-- **New transactions land there.** Everything a bank sync or a CSV import brings goes to the home. From there you move what belongs to another ledger.
+- **New transactions land there.** What a bank sync or a CSV import brings goes to the home, except a payment of another ledger's recurring item, which goes to that ledger (see [New payments follow their recurring item](#new-payments-follow-their-recurring-item)). From the home you move what belongs to another ledger.
 - **The account is looked after there.** Its name, type, starting balance and notes, its bank link, **Update balance**, **Import CSV**, **Share with…** and **Delete account** are in the home only.
 
 ### Sharing a card
@@ -52,9 +52,23 @@ A moved transaction belongs to the other ledger from then on, and that ledger tr
 - **Notes and tags** go along. A tag the other ledger doesn't have is added to it.
 - **Refund and payback links** are kept when both sides move together. A link to something that stays behind is let go.
 - **A transfer** is no longer paired, and its other side stays where it is. The other ledger's own matching may pair the moved side again, with a withdrawal there.
-- **A recurring item** stays in the ledger it's in, and the moved payment comes off it. The other ledger's recurring items can take the payment as theirs.
+- **A recurring item goes with its payments.** Moving one payment of a recurring item moves all its payments, and the item: its name, schedule, amount, price variation, number of payments, next due date, and the due dates you gave its payments. Its category is the other ledger's category of the same name. When the other ledger already has an active recurring item for that payee, the payments become that item's, and no second item is made. The item is then gone from the ledger it left. A payment that can't move (on an account the other ledger doesn't have, or part of a split) stays where it is, and the item stays there too, with those payments. At most 1,000 transactions move at a time, an item's other payments included, and the app says so when an item makes it more.
 
-When a move would let go of a link, a transfer's pair or a recurring item, the app lists that and asks before it moves anything. A payment that's split between ledgers can't move until its split is undone, and a deleted transaction has to be restored first.
+When a move would take a recurring item along, or let go of a link or a transfer's pair, the app lists that and asks before it moves anything: "Netflix is a recurring item, so its 14 payments and the item go too." A payment that's split between ledgers can't move until its split is undone, and a deleted transaction has to be restored first.
+
+### New payments follow their recurring item
+
+Once a recurring item is in another ledger, its next payments go there on their own. A transaction that a bank sync, **Fetch all history** or a CSV import adds goes from the home to another ledger when all of this is true:
+
+- it's no payment of an active recurring item in the home,
+- it's a payment of an active recurring item in exactly one other ledger that has the card, and that ledger isn't archived,
+- it isn't a card payment, a transfer or part of a split.
+
+"A payment of" means what it means everywhere else: the item's payee, an amount within its price variation, and a date in its due window. A suggested item you never accepted doesn't count. In the other ledger the transaction is that item's payment, in its category.
+
+Otherwise it stays in the home: when the home has a matching item of its own, and when two other ledgers both do. A transaction you enter by hand stays where you enter it.
+
+The sync's or import's message says what went where ("Netflix went to Family, where it's a payment of Netflix."), and so does **Activity** in both ledgers. The other ledger's entry says the transaction is new on the card, and not which ledger it came through.
 
 ### Splitting a card payment
 
@@ -97,7 +111,7 @@ The starting balance stays with the ledger that had it, which keeps taking up di
 
 Untick a ledger in **Share with…**. The home can't be unticked: make another ledger the home first. A ledger with no transactions on the card just loses it. One that holds some asks what happens to them, and each choice shows the balances it gives before you save:
 
-- **Move them to the home** ("Move Family’s 12 transactions to Personal"). They become the home's transactions, as with any move. The home's balance on the card grows by what Family owed, and the total doesn't change. Family's share of a payment the home holds goes back to the home.
+- **Move them to the home** ("Move Family’s 12 transactions to Personal"). They become the home's transactions. Family's recurring items stay Family's and let go of those payments: only a move you make yourself takes a recurring item along. The home's balance on the card grows by what Family owed, and the total doesn't change. Family's share of a payment the home holds goes back to the home.
 - **Keep them** ("Keep them in Family, in a new manual account"). Family gets a new credit card account of its own, with the same name, holding those transactions. Its balance is what Family owed. It isn't synced, and the bank never adds those transactions to the shared account again. Family's recurring items, custom reports and report filters that named the card name the new account.
 
   With "keep", the card's total doesn't go down. It's still what the bank says, and Family no longer has a part of it. So what Family owed is counted twice: on Family's new account, and inside the balance of the ledger that carries the card's starting balance. It stays that way until you record how it was settled, by hand, for example with a payment on Family's new account once Family has paid its part. The dialog names the ledger and the amount.
@@ -113,7 +127,7 @@ With only the home left ticked, the card isn't shared any more. A shared account
 A ledger that has a shared account asks first, in the same dialog:
 
 - **"Visa’s home is Personal. Which ledger becomes its home?"** when the ledger is the card's home. This is asked before archiving too: an archived ledger is never a home.
-- **"Personal has 42 transactions on Visa. Delete them or move them?"** before deleting or erasing, with **Delete them** and **Move to Family**. Under the choices it says what each does to the other ledgers' balances, now and at the next sync.
+- **"Personal has 42 transactions on Visa. Delete them or move them?"** before deleting or erasing, with **Delete them** and **Move to Family**. Moving them takes the transactions only: the ledger's recurring items go with the ledger. Under the choices it says what each does to the other ledgers' balances, now and at the next sync.
 - When the ledger carries the card's starting balance, a note says it goes to the home, and by how much the home's balance changes.
 
 Once everything is answered, **Once it’s done** lists what else will have changed, and the toast repeats it afterwards. When the ledger is the home and every other ledger that has the card is archived, it can't be done: restore one of them, or stop sharing the card, first.
