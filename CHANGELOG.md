@@ -2,6 +2,12 @@
 
 What changed in each release of Chipmunk, called Spending Tracker before the rename. Versions follow [Semantic Versioning](https://semver.org), and [docs/releasing.md](docs/releasing.md) says how a release is made. Docker images are on `ghcr.io/stevenwdhu/chipmunk-money` under each version (`ghcr.io/stevenwdhu/spending-tracker` up to v0.2.3).
 
+## Unreleased
+
+### Changed
+
+- The Pending tag on a transaction is a pill, like Refunded and the split marks beside it.
+
 ## v0.4.0 (2026-11-19)
 
 ### Added

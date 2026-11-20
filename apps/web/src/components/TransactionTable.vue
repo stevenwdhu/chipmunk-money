@@ -575,7 +575,7 @@ async function accept(tx: Transaction) {
                 <div class="flex min-w-0 items-center gap-1.5">
                   <span :class="cn('truncate font-medium', tx.split?.part === 'given' && 'text-muted-foreground')">{{ splitTitle(tx) ?? titleOf(tx) }}</span>
                   <span v-if="tx.split?.part === 'payment'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Split between ledgers</span>
-                  <span v-if="tx.status === 'pending'" class="shrink-0 text-xs text-muted-foreground">Pending</span>
+                  <span v-if="tx.status === 'pending'" class="shrink-0 rounded-full border px-1.5 text-[11px] text-muted-foreground">Pending</span>
                   <LinkBadge :tx="tx" />
                   <Repeat v-if="tx.recurringItemId" class="size-3.5 shrink-0 text-muted-foreground" aria-label="Recurring" />
                 </div>
